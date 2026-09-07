@@ -113,10 +113,8 @@ public final class GiReceiverShaderPatcher {
                         + "                if (metallumGiConfidence > 0.0) {\n"
                         + "                    vec3 metallumGiIncomingAmbient = max("
                         + GiReceiverBindingAbi.VARYING + ".rgb, vec3(0.0));\n"
-                        + "                    diffuse = metallumGiFallbackAmbient"
-                        + " * (1.0 - metallumGiConfidence)\n"
-                        + "                            + metallumGiIncomingAmbient"
-                        + " * metallumGiConfidence;\n"
+                        + "                    diffuse = metallumGiFallbackAmbient\n"
+                        + "                            + metallumGiIncomingAmbient;\n"
                         + "                }";
         patched = replaceExactlyOnce(patched, AMBIENT_ANCHOR, ambientReplacement);
         if (patched == null) {
@@ -154,6 +152,9 @@ public final class GiReceiverShaderPatcher {
                 || source.contains("sampler3D " + GiReceiverBindingAbi.SH_RED_SAMPLER)
                 || !source.contains("vec3 diffuse = metallumGiFallbackAmbient;")
                 || !source.contains("if (metallumGiConfidence > 0.0)")
+                || !source.contains("diffuse = metallumGiFallbackAmbient")
+                || !source.contains("+ metallumGiIncomingAmbient;")
+                || source.contains("metallumGiIncomingAmbient * metallumGiConfidence")
                 || !source.contains(GiReceiverBindingAbi.VARYING + ".a")) {
             return new Result(source, false, "G5 fragment receiver structure is incomplete");
         }

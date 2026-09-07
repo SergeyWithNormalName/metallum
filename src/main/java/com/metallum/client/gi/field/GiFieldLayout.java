@@ -11,7 +11,13 @@ public final class GiFieldLayout {
     public static final int COVERAGE_BYTES_PER_CELL = Byte.BYTES;
     public static final long DIFFUSE_GI_BUDGET_BYTES = 24L * 1024L * 1024L;
 
-    private static final int[] CELL_SIZES_BLOCKS = {2, 4, 8};
+    // Minecraft's smallest opaque/light-emitting unit is one block. C0 therefore uses one block
+    // per cell so a floor and the air above it cannot collapse into one binary CONTENT cell.
+    // C1/C2 retain their accepted coverage while C0 carries exact block-scale local transport.
+    private static final int[] CELL_SIZES_BLOCKS = {1, 4, 8};
+    // A two-block C0 origin quantum preserves the accepted scroll frequency and bounded work;
+    // the physical cells themselves remain one block wide.
+    private static final int[] ORIGIN_SNAP_BLOCKS = {2, 4, 8};
 
     private GiFieldLayout() {
     }
@@ -19,6 +25,12 @@ public final class GiFieldLayout {
     public static int cellSizeBlocks(final int cascade) {
         validateCascade(cascade);
         return CELL_SIZES_BLOCKS[cascade];
+    }
+
+    /** World-space origin quantum. It may be coarser than the physical cell size. */
+    public static int originSnapBlocks(final int cascade) {
+        validateCascade(cascade);
+        return ORIGIN_SNAP_BLOCKS[cascade];
     }
 
     public static int spanBlocks(final int cascade) {
@@ -51,7 +63,11 @@ public final class GiFieldLayout {
     public static int centeredOriginBlock(final int cameraBlock, final int cascade) {
         int cellSize = cellSizeBlocks(cascade);
         int unsnapped = cameraBlock - spanBlocks(cascade) / 2;
-        return Math.multiplyExact(Math.floorDiv(unsnapped, cellSize), cellSize);
+        int snap = originSnapBlocks(cascade);
+        if (snap % cellSize != 0) {
+            throw new IllegalStateException("GI origin quantum lost cell alignment");
+        }
+        return Math.multiplyExact(Math.floorDiv(unsnapped, snap), snap);
     }
 
     public static boolean contains(

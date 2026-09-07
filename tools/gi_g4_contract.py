@@ -146,7 +146,7 @@ G6_SUCCESSOR_FILE_SHA256 = {
     "src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java": "3e4f421efb614a9e99fd19faa9bd2e7c123f890981d34cfc65a582649a377051",
     "src/main/java/com/metallum/client/gi/transport/GiTransportGpuResources.java": "6c33f400f7471ba7e4b71d78cbd4c708ed1321af434a0a961252c4b4796701a1",
     "src/main/java/com/metallum/client/gi/transport/GiTransportRuntime.java": "c501fa915e93f809227c37c4bc926763b0260cbbc3414ed86f8201f44a48d8d6",
-    "src/main/java/com/metallum/client/gui/MetallumSodiumConfig.java": "ed61d924826362e3e58b65eb87ba0592ea5cfd31a2d062985c49f8f40e6dcc09",
+    "src/main/java/com/metallum/client/gui/MetallumSodiumConfig.java": "44e3258a56fb999509eccc0205e1e2e9385a87066f761335435d3b51b559c4df",
     "src/main/java/com/metallum/client/lighting/AdvancedLightRegistry.java": "420e0dd8369dcd90a6cc91f8b8daa7d21d49db88c4837782e94726e31a6568a4",
     "src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java": "7c8b317744a4674115d078c13198abe03cb5ed35cfc86953d32afa122d881973",
     "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "1fb8fdcd6085db7a907059660ded6ea00ef30ab44ad0daf93c61c822d97bc52f",
@@ -155,8 +155,8 @@ G6_SUCCESSOR_FILE_SHA256 = {
     "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java": "228d1bac4fb08f4581c38c803e550aade53c5daddc8dbd8d2013638c62199611",
     "src/main/metal/MetallumGiTransport.metal": "e5f4fe468bf7f450b860e9ae5c9844f04eb7ef4d2b3169fdeab2a4e316151806",
     "src/main/native/MetallumNative.swift": "c7eccc46a8079a665b953b13ad4f3bb5affad68fcc7f041b602a7531d5059054",
-    "src/main/resources/assets/metallum/lang/en_us.json": "bc2d4f73d1ba4ec07fbd559253caa00bc89fc62d6ca7f8afd6c33a29e9257a51",
-    "src/main/resources/assets/metallum/lang/ru_ru.json": "cd0b83dc13ab750febe475f973bc4e70b39b1df40f098e8431c73d2e28d3d032",
+    "src/main/resources/assets/metallum/lang/en_us.json": "b30322965146a558722b45f0a5ece93beeb719536fcf2fb76f80548e0aef1c8c",
+    "src/main/resources/assets/metallum/lang/ru_ru.json": "46b6e8905ef5494ec26b212fffb816d32520c41597c55ec27f0d7d945c59b3cc",
     "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "aad4b4e9d459aaed52d7a848022c7cb75f7e8935b9f8d57fe11ac29d74e1246e",
     "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java": "1a063a55698324b690fee52286c91910088387e038f66f9b100e18ad1342ced9",
     "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "d26c00be19a226aa6c0760997c7141c947e6e6150b268b9747362724bd77360f",
@@ -169,10 +169,52 @@ G6_SUCCESSOR_FILE_SHA256 = {
     "tools/metal_benchmark_report.py": "affb2e60e7b8e6e770cf030602781d17e205b0f14a64050278f22d1f06c1d4f8",
     "tools/test_gi_release_contract_guard.sh": "cb3c3888a6ab9e7ab5f4c4d90722873b2f0a729de26fa0de6693af1bdb73a941",
 }
+# Later G6 stability fixes and the bounded G3 B16 successor retain the accepted
+# G4 receipt but change a small, exact set of source files. Keep the original G6
+# pins above immutable and overlay only final, reviewed file contents here.
+G6_STABILITY_SUCCESSOR_OVERLAY_SHA256 = {
+    "docs/GI_G4.md": "db06c3aae3031b6b112ce1bddeb6f6b5267b31af7ffaca7951949e5cbd839f16",
+    "scripts/run_metal_benchmark.sh": "4138fe4587c9bc7614983b4cf7b456003345fd42334077aec3e325eb6c8f9fdd",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "905d792ca4824259ec05c9c2c99dbb69867e28d729181c758fc59aec26f4601c",
+    "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java": "89962cdc10ceedcb44bd6eec310301bae9cf9b24d91838004e71c1d5e90613c9",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "f3036eb37628f28251234fcb3c045214d9cf99eda32f2a574f5fd4e221a88df9",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java": "8718209d39209293f46b336fb990c7199eb910cabc59b67342f9b9f466793719",
+    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "f9a2fe337a759f049339e64325de4275d7f537a66bf40261d2d234c1ad9bdd7f",
+    "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java": "8b5a4ccf42367fccfd9a292e415584ed629f15c3e89ec2e42ece475e0e12aedb",
+    "src/main/native/MetallumNative.swift": "510c8d1977c1a1dbdda5357a34eb7ea4ea51568493ac39b0f8e114697d4c64ab",
+    "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "133eea8d3855451c6b8722c8df6fd20b7a67c045953ae5036b41f7fb0ab3715c",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "9d78d122f61cd6600bc1ed5bef013adc4eed0a38fb6cb453ae1750a8761dbcf2",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java": "4b87c793376c29ff52c34f4dcb93e51b6265cbc405b5b9d88fb54637e2e687d9",
+    "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java": "1b3f94741b06176b5c4fee7da95ca5afe9f086da0a26230385bcbd5722362a87",
+    "tools/gi_g3_contract.py": "b6431364f914f252ff2388bad84bf734f5949484f75587094d8a2851a9a6f528",
+}
+# This successor changes the runtime grid and radiometric quadrature.  The completed G4
+# artifact remains immutable: this map pins only reviewed *current* source that has drifted
+# from the historical source manifest.  G6 topology evidence is separately marked pending,
+# so no historical G4/G6 receipt is relabelled as proof for this topology.
+G6_TOPOLOGY_SUCCESSOR_OVERLAY_SHA256 = {
+    "build.gradle": "9523bf7d96b7f4f6382a1bac05c37e67e0f5d336462f034c675d74883eba9ba5",
+    "scripts/run_metal_benchmark.sh": "e199a326abf1ee2fb386e95390a81a1c9e8522ede40ad7bc853d2dcfe567ae5c",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "8cc0360fe7e8b6f19eb7a73bccd8b9d4b610144bcc1ca5cbde203e94f069df02",
+    "src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java": "f75a0b304d079b14fdf594acf5c77db09ef864c8ab1530b038ae16a40d85447f",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "f2de20378c06e047db42e0e0047b21be402aebe2da61f947bcffac6622efdd3c",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java": "6f20eedf6bee4fa07f06b1d39209e6176e2ecddc629aa6dade3d51226ddf449b",
+    "src/main/java/com/metallum/client/gi/transport/GiTransportLayout.java": "a3485452fe330c37c289f436f64e3d7100abf87fc89c58bcf1918a3956fababd",
+    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "966311bb2c07217ee96770c96df7e1ffc5f467ba25f2d03fef19b8680d7811cc",
+    "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "8cafa90dc8126297129a03b4603bd60321e7226851cb838ba96a2ea3ea9d2bb4",
+    "src/main/metal/MetallumGiTransport.metal": "534bda56ec8ff43d66dc9be1804c16fb1a58cb17bc9ffde5bb8fa8b603d2f3b6",
+    "src/main/native/MetallumNative.swift": "6a747081a98ab917a8b670b86d3cea66f3288eec72ce84d1094e3f598c9df6a9",
+    "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "6d6074ea9e95be2305f8e5f5704880862b4edceffadfdd1ea1bfbd041b081820",
+    "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java": "57a5bf13b1bb6196515ea07c13b9f3c3411134c482d623015b3119373e11d6f7",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "e7b3f44a0ba4d2de55ce9bf89a68c65ce798142b27a6da86ddb15ddc1014ef29",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java": "a3b1035fc3164f8da801906e3c24f6d0de3e8e9eca934a8f11e0a08006b1e837",
+    "src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java": "7dcde033c1500d9f8088d47e46a7bfac59e417654dd560bfea42021f4bea9c20",
+    "src/test/java/com/metallum/client/gi/transport/GiTransportSourceChainTests.java": "a9092d7ce307821bc46e94ff16d50975e9ed3ff7b1a6c319212e1bd66d7e6a74",
+}
 G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
 # The value-bearing line is normalized before hashing, avoiding a circular digest while still
 # making every other byte of this verifier part of the exact successor seam.
-G4_CONTRACT_SELF_NORMALIZED_SHA256 = "42ed9abb6327439c9f3987ecaede674321288dbbde76738a26243baadff69d08"
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "5834bb09ddc432e3009e655da20fd8a8cce153ef0d76e74f1e8c66864b8c88e9"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,
@@ -394,8 +436,22 @@ def verify_source_hashes(root: Path, implementation: dict[str, Any]) -> None:
     if not drifted:
         return
 
+    for relative, digest in {
+            **G6_STABILITY_SUCCESSOR_OVERLAY_SHA256,
+            **G6_TOPOLOGY_SUCCESSOR_OVERLAY_SHA256,
+    }.items():
+        if relative not in REQUIRED_SOURCE_MANIFEST:
+            raise ContractError(
+                f"G4 stability successor overlay path is outside the immutable manifest: {relative}"
+            )
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ContractError(f"invalid G4 stability successor SHA-256: {relative}")
+
     drifted_paths = {relative for relative, _, _ in drifted}
-    exact_successor_paths = set(G6_SUCCESSOR_FILE_SHA256) | {G4_CONTRACT_SELF_PATH}
+    final_successor_sha256 = dict(G6_SUCCESSOR_FILE_SHA256)
+    final_successor_sha256.update(G6_STABILITY_SUCCESSOR_OVERLAY_SHA256)
+    final_successor_sha256.update(G6_TOPOLOGY_SUCCESSOR_OVERLAY_SHA256)
+    exact_successor_paths = set(final_successor_sha256) | {G4_CONTRACT_SELF_PATH}
     missing = sorted(exact_successor_paths - drifted_paths)
     unsupported = sorted(drifted_paths - exact_successor_paths)
     if missing or unsupported:
@@ -441,14 +497,40 @@ def verify_source_hashes(root: Path, implementation: dict[str, Any]) -> None:
                 raise ContractError(
                     "G4 verifier differs outside its exact reviewed successor seam"
                 )
-        elif actual != G6_SUCCESSOR_FILE_SHA256[relative]:
+        elif actual != final_successor_sha256[relative]:
             raise ContractError(
-                "G4 source differs from its exact reviewed G6 successor seam: "
+                "G4 source differs from its exact reviewed G6 stability successor seam: "
                 f"{relative}"
             )
 
-    # Structural G5/G6 verification is supplemental. It cannot authorize any source drift: every
-    # drifted G4-manifest file has already matched the exact content digest above.
+    # Structural G3/G5/G6 verification is supplemental. It cannot authorize any source drift:
+    # every drifted G4-manifest file has already matched the exact content digest above.
+    g3_contract = root / "tools/gi_g3_contract.py"
+    g3_successor = subprocess.run(
+        [sys.executable, str(g3_contract), "--root", str(root)],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if g3_successor.returncode != 0:
+        detail = (g3_successor.stderr.strip() or g3_successor.stdout.strip()
+                  or "unknown failure")
+        raise ContractError(f"current G3 stability successor contract failed: {detail}")
+
+    topology_contract = root / "tools/gi_g6_topology_successor_contract.py"
+    topology_successor = subprocess.run(
+        [sys.executable, str(topology_contract), "--root", str(root)],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if topology_successor.returncode != 0:
+        detail = (topology_successor.stderr.strip() or topology_successor.stdout.strip()
+                  or "unknown failure")
+        raise ContractError(f"current G6 topology successor contract failed: {detail}")
+
     g5_contract = root / "tools/gi_g5_contract.py"
     g5_document = root / "docs/GI_G5.md"
     g6_document = root / "docs/GI_G6.md"
@@ -1564,11 +1646,13 @@ def verify_source_contract(root: Path) -> None:
         "ABI_VERSION = 1", "LAYOUT_BYTES = 160", "HEADER_BYTES = 128",
         "CELL_BYTES = GiSemanticTransportFieldView.CELL_BYTES", "STATS_BYTES = 192",
         "JAVA_PERSISTENT_PACKET_BYTES", "HEADER_BYTES + CELLS_BYTES + STATS_BYTES",
-        "CASCADE_COUNT = 1", "CELL_SIZE_BLOCKS = 2", "EDGE = GiSemanticTransportFieldView.EDGE",
+        "CASCADE_COUNT = 1", "CELL_SIZE_BLOCKS = GiFieldLayout.cellSizeBlocks(0)",
+        "EDGE = GiSemanticTransportFieldView.EDGE",
         "CELL_COUNT = GiSemanticTransportFieldView.CELL_COUNT", "ITERATION_COUNT = 1",
         "MAXIMUM_DISTANCE = 8", "SIGNED_DIRECTION_COUNT = 26",
         "STENCIL_OFFSET_COUNT = SIGNED_DIRECTION_COUNT * MAXIMUM_DISTANCE",
-        "FORM_WEIGHT_NORMALIZATION = 29.17999846648958",
+        "FORM_WEIGHT_NORMALIZATION = 5.463719420620535",
+        "CONFIDENCE_WEIGHT_NORMALIZATION = 29.17999846648958",
         "FP16_ABSOLUTE_TOLERANCE = 1.0F / 1_024.0F",
         "FP16_RELATIVE_TOLERANCE = 1.0F / 512.0F",
         "PRIVATE_RESOURCE_COUNT = 5", "COMPUTE_PASS_COUNT = 2",
@@ -1619,7 +1703,7 @@ def verify_source_contract(root: Path) -> None:
     ), "G3 persistent Java packet owner")
     require_tokens(gpu_validation, (
         "GiDirectSourceGpuResources.JAVA_PERSISTENT_PACKET_BYTES",
-        "== 70_216L", "GiTransportLayout.JAVA_PERSISTENT_PACKET_BYTES == 524_608L",
+        "== 140_104L", "GiTransportLayout.JAVA_PERSISTENT_PACKET_BYTES == 524_608L",
         "validateAttachmentLifecycle", "g4-attach-wrong-thread",
         "forged G3 telemetry capability was admitted",
         "idempotent owner G4 telemetry attachment failed",
@@ -1779,7 +1863,8 @@ def verify_source_contract(root: Path) -> None:
         "header.maximumDistance != 8u", "directionZ = -1; directionZ <= 1",
         "directionY = -1; directionY <= 1", "directionX = -1; directionX <= 1",
         "distance = 1u; distance <= header.maximumDistance", "rho * (1.0f / metallumGiTransportPi) * direct",
-        "metallumGiTransportPi * normalizedWeight * sourceSupport",
+        "metallumGiTransportAxisBinSolidAngle", "metallumGiTransportConfidenceWeightNormalization",
+        "metallumGiTransportPi * formWeight * sourceSupport",
         "coefficient0 += transfer", "coefficientX += transfer * omega.x",
         "coefficientY += transfer * omega.y", "coefficientZ += transfer * omega.z",
         "shRed.write", "shGreen.write", "shBlue.write", "knownWeight",

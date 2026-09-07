@@ -23,15 +23,18 @@ public final class GiFieldTests {
                 "G1 complete mip-cell count changed");
         require(GiFieldLayout.arithmeticPersistentBytes() == 1_011_123L,
                 "G1 arithmetic field footprint changed");
-        int[] expectedCellSizes = {2, 4, 8};
-        int[] expectedSpans = {64, 128, 256};
+        int[] expectedCellSizes = {1, 4, 8};
+        int[] expectedOriginSnaps = {2, 4, 8};
+        int[] expectedSpans = {32, 128, 256};
         for (int cascade = 0; cascade < GiFieldLayout.CASCADE_COUNT; cascade++) {
             require(GiFieldLayout.cellSizeBlocks(cascade) == expectedCellSizes[cascade],
                     "G1 cascade spacing changed");
+            require(GiFieldLayout.originSnapBlocks(cascade) == expectedOriginSnaps[cascade],
+                    "G1 cascade origin quantum changed");
             require(GiFieldLayout.spanBlocks(cascade) == expectedSpans[cascade],
                     "G1 cascade span changed");
             int origin = GiFieldLayout.centeredOriginBlock(-1, cascade);
-            require(Math.floorMod(origin, expectedCellSizes[cascade]) == 0,
+            require(Math.floorMod(origin, expectedOriginSnaps[cascade]) == 0,
                     "negative G1 origin is not world snapped");
             require(GiFieldLayout.contains(origin, origin, origin, origin, origin, origin, cascade),
                     "G1 lower bound is not covered");

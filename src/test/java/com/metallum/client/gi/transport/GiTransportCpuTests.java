@@ -40,7 +40,7 @@ public final class GiTransportCpuTests {
                 "G4 Java/native ABI sizes changed");
         require(GiTransportLayout.CASCADE_COUNT == 1
                         && GiTransportLayout.EDGE == 32
-                        && GiTransportLayout.CELL_SIZE_BLOCKS == 2
+                        && GiTransportLayout.CELL_SIZE_BLOCKS == 1
                         && GiTransportLayout.CELL_COUNT == 32 * 32 * 32
                         && GiTransportLayout.CELLS_BYTES == 524_288L,
                 "G4 frozen near-cascade topology changed");
@@ -54,6 +54,9 @@ public final class GiTransportCpuTests {
         require(Math.abs(GiTransportLayout.computedFormWeightNormalization()
                         - GiTransportLayout.FORM_WEIGHT_NORMALIZATION) < 1.0e-12,
                 "G4 declared form-weight normalization differs from its fixed stencil");
+        require(Math.abs(GiTransportLayout.computedConfidenceWeightNormalization()
+                        - GiTransportLayout.CONFIDENCE_WEIGHT_NORMALIZATION) < 1.0e-12,
+                "G4 declared confidence normalization differs from its fixed stencil");
         require(GiTransportLayout.CAPTURE_RGBA_BYTES == 262_144
                         && GiTransportLayout.CAPTURE_CONFIDENCE_BYTES == 32_768
                         && GiTransportLayout.CAPTURE_COMPACT_BYTES == 1_081_344L,
@@ -189,18 +192,104 @@ public final class GiTransportCpuTests {
         double directRed = 8.0;
         double rhoRed = 0.75;
         double outgoingRed = rhoRed / Math.PI * directRed;
-        double normalizedFormSum = Math.PI
-                * GiTransportLayout.computedFormWeightNormalization()
+        double[] representativeFaces = {1.0, 0.25, 0.75, 0.5, 0.125, 0.875};
+        double nearestDirectionFormSum = formFactorSum(representativeFaces);
+        require(Math.abs(nearestDirectionFormSum - Math.PI * 0.5) < 1.0e-12,
+                "G4 projected-solid-angle quadrature is not a half-cosine L1 distribution");
+
+        // A source can have many receiver candidates along one signed ray, but the nearest
+        // CONTENT cell is an intermediate supercover blocker for every farther candidate.  The
+        // transport bound therefore admits one, rather than a sum of all eight, radial samples.
+        boolean[] contentAlongRay = new boolean[GiTransportLayout.MAXIMUM_DISTANCE];
+        contentAlongRay[0] = true;
+        contentAlongRay[GiTransportLayout.MAXIMUM_DISTANCE - 1] = true;
+        int nearestVisibleDistance = nearestVisibleDistance(contentAlongRay);
+        require(nearestVisibleDistance == 1,
+                "G4 radial path contract admitted a farther CONTENT receiver behind a nearer one");
+        double nearestAxisTransfer = directionFormFactor(
+                representativeFaces, 1, 0, 0, nearestVisibleDistance);
+        require(Math.abs(nearestAxisTransfer - directionFormFactor(
+                        representativeFaces, 1, 0, 0, 1)) < 1.0e-12,
+                "G4 source-wise energy incorrectly accumulated blocked radial receivers");
+        require(nearestAxisTransfer > directionFormFactor(
+                        representativeFaces, 1, 0, 0,
+                        GiTransportLayout.MAXIMUM_DISTANCE),
+                "G4 radial attenuation is not monotonic after the nearest-hit proof");
+        double transportedDc = outgoingRed * nearestDirectionFormSum;
+        require(transportedDc <= rhoRed * directRed * 0.5 + 1.0e-12
+                        && 2.0 * transportedDc <= rhoRed * directRed + 1.0e-12,
+                "G4 projected form factor can amplify DC or reconstructed reflected input");
+        for (int faceMask = 1; faceMask < 1 << 6; faceMask++) {
+            double[] faces = new double[6];
+            for (int face = 0; face < faces.length; face++) {
+                faces[face] = (faceMask & 1 << face) == 0 ? 0.0 : 1.0;
+            }
+            require(Math.abs(formFactorSum(faces) - Math.PI * 0.5) < 1.0e-12,
+                    "G4 face-area normalization duplicates reflected energy");
+        }
+        double nearestAxis = Math.PI * GiTransportLayout.AXIS_BIN_SOLID_ANGLE
                 / GiTransportLayout.FORM_WEIGHT_NORMALIZATION;
-        double transportedRed = outgoingRed * normalizedFormSum;
-        require(Math.abs(transportedRed - rhoRed * directRed) < 1.0e-12,
-                "G4 normalized stencil amplifies reflected direct input");
+        double oldNearestAxis = Math.PI / GiTransportLayout.CONFIDENCE_WEIGHT_NORMALIZATION;
+        require(nearestAxis > oldNearestAxis * 4.0 && nearestAxis < Math.PI * 0.5,
+                "G4 local solid-angle transfer is not finite or did not replace sparse global dilution");
         double blackOutgoing = 0.0 / Math.PI * directRed;
         require(blackOutgoing == 0.0, "black G2 rho created a G4 bounce");
         double green = 0.0 / Math.PI * 0.0;
         double blue = 0.0 / Math.PI * 0.0;
         require(green == 0.0 && blue == 0.0,
                 "red-only G4 input created cross-channel energy");
+    }
+
+    private static double formFactorSum(final double[] faces) {
+        double sum = 0.0;
+        for (int z = -1; z <= 1; z++) {
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    if (x == 0 && y == 0 && z == 0) continue;
+                    sum += directionFormFactor(faces, x, y, z, 1);
+                }
+            }
+        }
+        return sum;
+    }
+
+    private static double directionFormFactor(
+            final double[] faces,
+            final int x,
+            final int y,
+            final int z,
+            final int distance
+    ) {
+        double faceSum = 0.0;
+        for (double face : faces) faceSum += face;
+        require(faceSum > 0.0, "G4 form-factor fixture has no surface face");
+        require(distance >= 1 && distance <= GiTransportLayout.MAXIMUM_DISTANCE,
+                "G4 form-factor fixture has an invalid radial distance");
+        int active = Integer.bitCount((x == 0 ? 0 : 1)
+                | (y == 0 ? 0 : 2) | (z == 0 ? 0 : 4));
+        require(active != 0, "G4 form-factor fixture has a zero direction");
+        double length = Math.sqrt(x * x + y * y + z * z);
+        double selected = Math.abs(x) * faces[x < 0 ? 0 : 1]
+                + Math.abs(y) * faces[y < 0 ? 2 : 3]
+                + Math.abs(z) * faces[z < 0 ? 4 : 5];
+        double support = selected / (length * faceSum);
+        double solidAngle = switch (active) {
+            case 1 -> GiTransportLayout.AXIS_BIN_SOLID_ANGLE;
+            case 2 -> GiTransportLayout.EDGE_BIN_SOLID_ANGLE;
+            case 3 -> GiTransportLayout.CORNER_BIN_SOLID_ANGLE;
+            default -> throw new AssertionError("invalid G4 direction");
+        };
+        return Math.PI * solidAngle * support
+                / ((double) distance * distance * GiTransportLayout.FORM_WEIGHT_NORMALIZATION);
+    }
+
+    private static int nearestVisibleDistance(final boolean[] contentAlongRay) {
+        require(contentAlongRay.length == GiTransportLayout.MAXIMUM_DISTANCE,
+                "G4 radial path fixture does not match the fixed stencil");
+        for (int distance = 1; distance <= contentAlongRay.length; distance++) {
+            if (contentAlongRay[distance - 1]) return distance;
+        }
+        return 0;
     }
 
     private static void frozenMatchRejectsAnyChangedInput() {

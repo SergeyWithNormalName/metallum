@@ -69,7 +69,9 @@ one-brick scroll into a long zero-coverage interval.
 
 There are no steady-state CPU allocations, CPU texture readbacks, queue waits or
 frame-count-driven rebuilds in the G6 path. The shared G2+G3+G6 accounting must
-remain at or below `25,165,824` bytes. Resource reuse is counted once.
+remain at or below `25,165,824` bytes. With the current G3 B16 packet/staging
+capacity it is `24,917,280` bytes, leaving `248,544` bytes of hard-cap
+headroom. Resource reuse is counted once.
 
 ## Receiver contract
 
@@ -77,9 +79,14 @@ The terrain receiver remains vertex-only. It samples L1 irradiance and
 confidence for the three compatible cascades, evaluates the authored exact
 axis normal, and passes ready irradiance to the fragment shader. The fragment
 stage contains no G6 `sampler3D`, DDA or cone trace. Receiver reflectance is
-applied once; confidence zero preserves the existing ambient fallback. The
-Sodium four-bit position sideband and its fail-closed carrier rules remain the
-G5 contract.
+applied once. Positive known-path confidence adds the finite, non-negative
+physical one-bounce correction to the non-GI ambient fallback without scaling
+the transported energy again; confidence zero preserves the existing ambient
+fallback exactly. Consequently a transported colored signal remains visible
+even below the fallback in every individual channel, while G6 cannot make any
+channel darker than GI-off merely because coverage, occlusion or a cascade
+changes. The Sodium four-bit position sideband and its fail-closed carrier
+rules remain the G5 contract.
 
 ## Automated live route
 
@@ -139,6 +146,22 @@ prove post-removal decay, camera-motion stability, scroll, popping, teleport
 recovery or artistic acceptance. Those remain separate live-review evidence and
 belong to G7 product acceptance.
 
+For a source-identical static control, restart with Sodium Global Illumination
+set to `Off`, then capture the same torch route and non-GI settings profile:
+
+```bash
+scripts/run_metal_benchmark.sh --capture-reference \
+  --route benchmark/routes/hdrtest-torch-toggle-v1.json \
+  --settings benchmark/settings/native-hdr-fancy-v1.json \
+  --label gi-g6-image-off
+```
+
+The off run also captures at measured frame 400, rather than the generic
+measurement-start reference. The pair therefore keeps the world, camera, torch,
+time, HDR settings and source tree fixed while changing only the persistent
+Sodium GI mode. It is valid static ON/OFF attribution, but still not motion
+acceptance.
+
 ## Evidence boundary
 
 The structural runner contract is:
@@ -165,7 +188,9 @@ passed all 22 events/20 recoveries; static p95/p99 was 1/2, scroll 12/12 and ful
 reset 20/20 submits. The later flicker repair keeps that latency attribution but
 retains compatible visible history during same-root environment rebuilds; fresh
 runtime evidence is required for that successor contract. Combined accounted
-memory was 24,637,728 bytes against the 25,165,824-byte cap.
+memory was 24,637,728 bytes against the 25,165,824-byte cap. That value belongs
+to the immutable B8 artifact; the current B16 successor must report
+`24,917,280` bytes in fresh runtime evidence.
 
 The separately captured 3024x1964 torch-on PNG passed a direct static
 gross-artifact review: no black/zero atlas, NaN bands, cascade seams, broken

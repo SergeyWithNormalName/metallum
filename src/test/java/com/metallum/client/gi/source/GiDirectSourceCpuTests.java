@@ -37,6 +37,8 @@ public final class GiDirectSourceCpuTests {
         worldRootRotationAllowsChildEpochResetOnly();
         originOnlyScrollDoesNotBecomePhysicalSourceDirt();
         metadataOnlyRolloverRequiresByteIdenticalInputs();
+        liveInputSuccessorRequiresAnExactStableGrid();
+        liveInputRebasePreservesQueuedBacklog();
         queueBoundsCoalescingAndStarvation();
         acceptedFailureRetriesAndStaleCompletionCannotPublish();
         sameCommandProjectedSourceSurvivesExactIdentityChurn();
@@ -44,7 +46,8 @@ public final class GiDirectSourceCpuTests {
     }
 
     private static void negativeCoordinateMath() {
-        int near = GiDirectSourceLayout.brickIdForWorld(0, -64, -64, -64, -1, -1, -1);
+        // C0 spans 32 one-block cells: with origin -64 its final in-bounds block is -33.
+        int near = GiDirectSourceLayout.brickIdForWorld(0, -64, -64, -64, -33, -33, -33);
         check(near == GiDirectSourceLayout.brickId(0, 3, 3, 3), "negative world coordinate mapping");
         check(GiDirectSourceLayout.brickIdForWorld(0, -64, -64, -64, -65, -1, -1) == -1,
                 "negative outside mapping");
@@ -583,6 +586,87 @@ public final class GiDirectSourceCpuTests {
                 "scroll suppressed coalesced semantic/source/environment dirt");
     }
 
+    private static void liveInputSuccessorRequiresAnExactStableGrid() {
+        LightWorldToken world = new LightWorldToken(3L, "minecraft:overworld");
+        GiDirectSourceEpoch previous = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 13L, 17L, 19L, world, 23L, 29L
+        );
+        GiDirectSourceEpoch content = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 13L, 17L, 20L, world, 23L, 29L
+        );
+        GiDirectSourceEpoch staticSource = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 13L, 17L, 19L, world, 24L, 29L
+        );
+        check(content.isLiveInputSuccessorOf(previous)
+                        && staticSource.isLiveInputSuccessorOf(previous),
+                "strict G2 content successor was not rebase-compatible");
+        check(!previous.isLiveInputSuccessorOf(previous)
+                        && !new GiDirectSourceEpoch(
+                        5L, 7L, 11L, 14L, 17L, 20L, world, 23L, 29L
+                ).isLiveInputSuccessorOf(previous)
+                        && !new GiDirectSourceEpoch(
+                        5L, 7L, 11L, 13L, 17L, 20L, world, 23L, 30L
+                ).isLiveInputSuccessorOf(previous)
+                        && !new GiDirectSourceEpoch(
+                        5L, 8L, 11L, 13L, 17L, 20L, world, 23L, 29L
+                ).isLiveInputSuccessorOf(previous)
+                        && !new GiDirectSourceEpoch(
+                        5L, 7L, 12L, 13L, 17L, 20L, world, 23L, 29L
+                ).isLiveInputSuccessorOf(previous)
+                        && !new GiDirectSourceEpoch(
+                        5L, 7L, 11L, 13L, 17L, 20L,
+                        new LightWorldToken(4L, "minecraft:overworld"), 23L, 29L
+                ).isLiveInputSuccessorOf(previous),
+                "G3 content-only predicate accepted structural/source drift");
+    }
+
+    private static void liveInputRebasePreservesQueuedBacklog() {
+        GiDirectSourceEpoch first = epoch(1L, 1L);
+        GiDirectSourceEpoch second = epoch(2L, 1L);
+        GiDirectDirtyQueue queue = new GiDirectDirtyQueue();
+        queue.rotateEpoch(first);
+        queue.enqueue(first, 3, 2L);
+        queue.enqueue(first, 7, 3L);
+        queue.enqueue(first, 11, 4L);
+
+        queue.rebaseLiveInputEpoch(second);
+        check(queue.activeEpoch().equals(second)
+                        && queue.telemetry().pending() == 3
+                        && queue.telemetry().discarded() == 0L
+                        && queue.telemetry().algebraIsExact(),
+                "content rebase discarded or detached pending G3 work");
+        check(queue.enqueue(second, 7, 5L) == GiDirectDirtyQueue.OfferResult.COALESCED,
+                "content rebase lost pending-brick coalescing");
+        int[] batch = new int[GiDirectSourceLayout.MAX_DRAIN_PER_FRAME];
+        int count = queue.drainTo(second, 5L, batch);
+        check(count == 3 && batch[0] == 3 && batch[1] == 7 && batch[2] == 11,
+                "content rebase changed pending age/sequence order");
+        check(!queue.epochTelemetry().fullVolumeEnqueued(),
+                "live content rebase retained a frozen full-population proof");
+
+        GiDirectDirtyQueue inFlight = new GiDirectDirtyQueue();
+        inFlight.rotateEpoch(first);
+        inFlight.enqueue(first, 1, 1L);
+        check(inFlight.drainTo(first, 1L, batch) == 1,
+                "content rebase in-flight fixture did not drain");
+        try {
+            inFlight.rebaseLiveInputEpoch(second);
+            throw new AssertionError("content rebase accepted in-flight G3 ownership");
+        } catch (IllegalStateException expected) {
+            check(inFlight.activeEpoch().equals(first)
+                            && inFlight.telemetry().inFlight() == 1
+                            && inFlight.telemetry().discarded() == 0L,
+                    "rejected content rebase mutated in-flight ownership");
+        }
+        try {
+            queue.rebaseLiveInputEpoch(first);
+            throw new AssertionError("content rebase accepted a regressed epoch");
+        } catch (IllegalArgumentException expected) {
+            check(queue.activeEpoch().equals(second),
+                    "rejected content regression changed the queue epoch");
+        }
+    }
+
     private static void queueBoundsCoalescingAndStarvation() {
         GiDirectSourceEpoch epoch = epoch(1L, 1L);
         GiDirectDirtyQueue queue = new GiDirectDirtyQueue();
@@ -708,13 +792,13 @@ public final class GiDirectSourceCpuTests {
         queue.rotateEpoch(first);
         queue.enqueueAll(first, 0L);
         int[] batch = new int[GiDirectSourceLayout.MAX_DRAIN_PER_FRAME];
-        for (int iteration = 0; iteration < 4; iteration++) {
+        for (int iteration = 0; iteration < 2; iteration++) {
             int count = queue.drainTo(first, iteration, batch);
             queue.completeBatch(first, batch, count);
         }
         queue.rotateEpoch(second);
         queue.enqueueAll(second, 4L);
-        for (int iteration = 0; iteration < 24; iteration++) {
+        for (int iteration = 0; iteration < 12; iteration++) {
             int count = queue.drainTo(second, 4L + iteration, batch);
             queue.completeBatch(second, batch, count);
         }

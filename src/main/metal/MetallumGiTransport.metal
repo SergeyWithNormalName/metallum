@@ -8,6 +8,10 @@ constant uint metallumGiTransportValidityEmpty = 1u;
 constant uint metallumGiTransportValidityContent = 2u;
 constant uint metallumGiTransportValidityFallback = 3u;
 constant float metallumGiTransportPi = 3.14159265358979323846f;
+constant float metallumGiTransportConfidenceWeightNormalization = 29.17999846648958f;
+constant float metallumGiTransportAxisBinSolidAngle = 0.8054316831613232f;
+constant float metallumGiTransportEdgeBinSolidAngle = 0.48157053442524556f;
+constant float metallumGiTransportCornerBinSolidAngle = 0.24436676278603597f;
 
 // G4 uses a separate accepted-G2 ABI. G3's reserved cell bytes stay reserved.
 struct MetallumGiTransportCellV1 {
@@ -72,12 +76,27 @@ inline float metallum_gi_transport_source_face_support(
     float3 outwardDirection
 ) {
     float3 magnitude = abs(outwardDirection);
-    float denominator = magnitude.x + magnitude.y + magnitude.z;
-    if (!(denominator > 0.0f)) return 0.0f;
+    float directionLength = length(outwardDirection);
+    float faceSum = 0.0f;
+    for (uint face = 0u; face < 6u; ++face) {
+        faceSum += float(cell.faceWeights[face]) * (1.0f / 255.0f);
+    }
+    if (!(directionLength > 0.0f) || !(faceSum > 0.0f)) return 0.0f;
     float x = float(cell.faceWeights[outwardDirection.x < 0.0f ? 0 : 1]) * (1.0f / 255.0f);
     float y = float(cell.faceWeights[outwardDirection.y < 0.0f ? 2 : 3]) * (1.0f / 255.0f);
     float z = float(cell.faceWeights[outwardDirection.z < 0.0f ? 4 : 5]) * (1.0f / 255.0f);
-    return clamp((magnitude.x * x + magnitude.y * y + magnitude.z * z) / denominator, 0.0f, 1.0f);
+    // Face weights describe relative exposed area. Normalizing by their total prevents a cell
+    // with several visible faces from duplicating its reflected energy, while the Euclidean
+    // projection preserves the source cosine for edge/corner directions.
+    return clamp((magnitude.x * x + magnitude.y * y + magnitude.z * z)
+        / (directionLength * faceSum), 0.0f, 1.0f);
+}
+
+inline float metallum_gi_transport_direction_solid_angle(int3 direction) {
+    uint active = uint(direction.x != 0) + uint(direction.y != 0) + uint(direction.z != 0);
+    return active == 1u ? metallumGiTransportAxisBinSolidAngle
+        : active == 2u ? metallumGiTransportEdgeBinSolidAngle
+        : active == 3u ? metallumGiTransportCornerBinSolidAngle : 0.0f;
 }
 
 // Quantize DC first, then conservatively project the directional lobe inside
@@ -266,12 +285,16 @@ kernel void metallum_gi_transport_jacobi_sh_v1(
             for (int directionX = -1; directionX <= 1; ++directionX) {
                 int3 direction = int3(directionX, directionY, directionZ);
                 if (all(direction == int3(0))) continue;
-                float directionWeight = rsqrt(float(directionX * directionX
+                float confidenceDirectionWeight = rsqrt(float(directionX * directionX
                     + directionY * directionY + directionZ * directionZ));
+                float formDirectionWeight = metallum_gi_transport_direction_solid_angle(direction);
                 float3 omega = normalize(float3(direction));
                 for (uint distance = 1u; distance <= header.maximumDistance; ++distance) {
-                    float normalizedWeight = directionWeight
+                    float formWeight = formDirectionWeight
                         / (float(distance * distance) * header.formWeightNormalization);
+                    float confidenceWeight = confidenceDirectionWeight
+                        / (float(distance * distance)
+                        * metallumGiTransportConfidenceWeightNormalization);
                     int3 sourcePosition = receiver + direction * int(distance);
                     if (!metallum_gi_transport_inside(sourcePosition)) continue;
 
@@ -283,7 +306,7 @@ kernel void metallum_gi_transport_jacobi_sh_v1(
                     MetallumGiTransportPathStatus path = metallum_gi_transport_path_status(
                         geometry, receiver, direction, distance);
                     if (path == MetallumGiTransportPathUnknown) continue;
-                    knownWeight += normalizedWeight;
+                    knownWeight += confidenceWeight;
                     if (path == MetallumGiTransportPathOccluded
                             || endpointState != metallumGiTransportValidityContent) {
                         continue;
@@ -297,7 +320,7 @@ kernel void metallum_gi_transport_jacobi_sh_v1(
                     if (!(sourceSupport > 0.0f)) continue;
                     float3 outgoing = max(float3(bounce.read(uint3(sourcePosition)).rgb), float3(0.0f));
                     if (!all(isfinite(outgoing)) || !any(outgoing > float3(0.0f))) continue;
-                    float formFactor = metallumGiTransportPi * normalizedWeight * sourceSupport;
+                    float formFactor = metallumGiTransportPi * formWeight * sourceSupport;
                     float3 transfer = outgoing * formFactor;
                     coefficient0 += transfer;
                     coefficientX += transfer * omega.x;
@@ -504,12 +527,16 @@ kernel void metallum_gi_live_jacobi_sh_v1(
             for (int directionX = -1; directionX <= 1; ++directionX) {
                 int3 direction = int3(directionX, directionY, directionZ);
                 if (all(direction == int3(0))) continue;
-                float directionWeight = rsqrt(float(directionX * directionX
+                float confidenceDirectionWeight = rsqrt(float(directionX * directionX
                     + directionY * directionY + directionZ * directionZ));
+                float formDirectionWeight = metallum_gi_transport_direction_solid_angle(direction);
                 float3 omega = normalize(float3(direction));
                 for (uint distance = 1u; distance <= header.maximumDistance; ++distance) {
-                    float normalizedWeight = directionWeight
+                    float formWeight = formDirectionWeight
                         / (float(distance * distance) * header.formWeightNormalization);
+                    float confidenceWeight = confidenceDirectionWeight
+                        / (float(distance * distance)
+                        * metallumGiTransportConfidenceWeightNormalization);
                     int3 sourcePosition = receiver + direction * int(distance);
                     if (!metallum_gi_transport_inside(sourcePosition)) continue;
                     uint endpointState = geometry.read(uint3(sourcePosition)).r;
@@ -518,7 +545,7 @@ kernel void metallum_gi_live_jacobi_sh_v1(
                     MetallumGiTransportPathStatus path = metallum_gi_transport_path_status(
                         geometry, receiver, direction, distance);
                     if (path == MetallumGiTransportPathUnknown) continue;
-                    knownWeight += normalizedWeight;
+                    knownWeight += confidenceWeight;
                     if (path == MetallumGiTransportPathOccluded
                             || endpointState != metallumGiTransportValidityContent) continue;
                     uint sourceIndex = metallum_gi_transport_index(uint3(sourcePosition));
@@ -537,7 +564,7 @@ kernel void metallum_gi_live_jacobi_sh_v1(
                     outgoing = all(isfinite(outgoing))
                         ? max(outgoing, float3(0.0f)) : float3(0.0f);
                     if (!all(isfinite(outgoing)) || !any(outgoing > float3(0.0f))) continue;
-                    float formFactor = metallumGiTransportPi * normalizedWeight * sourceSupport;
+                    float formFactor = metallumGiTransportPi * formWeight * sourceSupport;
                     float3 transfer = outgoing * formFactor;
                     coefficient0 += transfer;
                     coefficientX += transfer * omega.x;
@@ -564,6 +591,9 @@ kernel void metallum_gi_live_jacobi_sh_v1(
     shBlue.write(metallum_gi_transport_quantize_sh(
         coefficient0.b, float3(coefficientX.b, coefficientY.b, coefficientZ.b),
         header.fp16RelativeTolerance), atlasPosition);
+    // R is known-path reliability. G is binary valid-surface coverage. The
+    // receiver filters both alongside SH and divides by filtered coverage so
+    // neighbouring AIR zeros cannot attenuate a valid surface sample.
     confidence.write(half4(half(clamp(knownWeight, 0.0f, 1.0f)),
-        0.0h, 0.0h, 0.0h), atlasPosition);
+        1.0h, 0.0h, 0.0h), atlasPosition);
 }

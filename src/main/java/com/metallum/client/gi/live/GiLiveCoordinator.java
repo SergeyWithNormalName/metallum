@@ -23,8 +23,10 @@ public final class GiLiveCoordinator implements AutoCloseable {
     public static final int STATUS_INPUT_NOT_READY = -7;
     public static final int STATUS_ASYNC_COMPLETION_FAILED = -11;
     static final int FULL_RESET_STABLE_PUBLICATION_SUBMITS = 10;
-    public static final long G2_G3_ACCOUNTED_BYTES = 19_196_840L;
+    public static final long G2_G3_ACCOUNTED_BYTES = 19_476_392L;
     public static final long TOTAL_BUDGET_BYTES = 25_165_824L;
+    private static final boolean LATENCY_DIAGNOSTICS_ENABLED =
+            "1".equals(System.getenv("METALLUM_BENCHMARK"));
 
     private enum EpochTransition {
         PROVISIONAL(false, true),
@@ -91,6 +93,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
     @Nullable private GiLiveUpdateClass deferredUpdateClass;
     private long deferredFirstAffectedSubmitIndex = -1L;
     private boolean deferredSourceMaskUnknown;
+    /** The deferred reset was opened by a missing G3 environment identity. */
+    private boolean deferredEnvironmentIdentityUnavailable;
     private boolean capturedBasisAvailable;
     private boolean workAdmissionOccurred;
     private boolean fullResetRootOpen;
@@ -98,6 +102,21 @@ public final class GiLiveCoordinator implements AutoCloseable {
     private long lastFullResetStableSubmit = -1L;
     private boolean admissionLogged;
     private boolean receiverOriginsKnown;
+
+    // Low-frequency reset/scroll receipts. These primitives let the benchmark distinguish an
+    // upstream G3 source wait from G6 remap/admission/completion without allocating per-frame
+    // trace objects or changing the fixed latency histogram contract.
+    @Nullable private GiLiveUpdateClass latencyDiagnosticClass;
+    private long latencyDiagnosticFirstAffectedSubmitIndex = -1L;
+    private long latencyDiagnosticBeginSubmitIndex = -1L;
+    private long latencyFirstNearScrollRemapSubmitIndex = -1L;
+    private long latencyFirstNearSourceSubmitIndex = -1L;
+    private long latencyFirstNearAdmissionSubmitIndex = -1L;
+    private long latencyDiagnosticEpochTransitions;
+    private long latencyStartG3DirectDispatches = -1L;
+    private long latencyStartG3Completed = -1L;
+    private int latencyStartG3Pending = -1;
+    private int latencyStartG3InFlight = -1;
 
     private boolean observed;
     @Nullable private String observedDimension;
@@ -143,7 +162,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
         }
     }
 
-    /** Encodes no more than eight bricks and grants one allowance per renderer/source tick. */
+    /** Encodes one bounded brick batch and grants one allowance per renderer/source tick. */
     public int observeAndEncode(
             final MemorySegment commandBuffer,
             final MemorySegment fence,
@@ -181,15 +200,39 @@ public final class GiLiveCoordinator implements AutoCloseable {
             return retirementStatus;
         }
         if (!sourceEnvironmentIdentityReady(environmentDigest)) {
-            // A temporarily unavailable G3 identity is itself an incompatible observation once
-            // G6 has published an atlas. Retire any accepted write first, then keep the earliest
-            // affected submit and fail the eventual successor closed to a full reset.
+            // A temporarily unavailable G3 identity cannot authorize new transport work.  A
+            // same-world, same-grid atlas is nevertheless still a spatially valid last-proven
+            // receiver history: keep it visible while recording a conservative full reset for
+            // the eventual successor. Structural/world/origin changes remain exact-zero.
+            boolean retainReceiverHistory = unavailableEnvironmentHistoryCanBind(
+                    this.fullResetRootOpen,
+                    this.observed,
+                    sameObservedStructuralRoot(field),
+                    sameObservedOrigins(field),
+                    this.observedEnvironmentDigest
+            );
             if (this.observed) {
                 recordDeferredObservation(GiLiveUpdateClass.FULL_RESET, submitIndex);
                 this.deferredSourceMaskUnknown = true;
+                this.deferredEnvironmentIdentityUnavailable = true;
             }
             publishFinalTelemetry(stats);
-            return STATUS_INPUT_NOT_READY;
+            return retainReceiverHistory ? STATUS_RETAINED_HISTORY : STATUS_INPUT_NOT_READY;
+        }
+        // Missing G3 metadata is not itself a world mutation. If the exact admitted identity
+        // returns and every other observed input is unchanged, consume the conservative marker
+        // now. Leaving it queued would merge a stale FULL_RESET into the next unrelated block
+        // update and briefly zero the receiver long after the transient had recovered.
+        if (recoveredUnavailableEnvironmentMatchesObserved(
+                this.deferredEnvironmentIdentityUnavailable,
+                this.deferredUpdateClass,
+                this.observedEnvironmentDigest,
+                environmentDigest,
+                observationMatchesExceptEnvironment(
+                        field, dynamic, staticEpoch, staticHealthy
+                )
+        )) {
+            clearDeferredObservation();
         }
         reconcileExactReadyMasks(stats);
         boolean changed = observationChanged(
@@ -266,6 +309,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
                     this.requiredMasks[0]
             );
             if (status != GiLiveLayout.STATUS_OK) return status;
+            markFirstNearScrollRemap(submitIndex);
             this.workAdmissionOccurred = true;
             this.capturedBasisAvailable = false;
             this.cascadePrepared[0] = true;
@@ -282,7 +326,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
         long dynamicHash = dynamic.sourceHash();
         GiDirectSourceCoordinator.LiveSource available = staticHealthy
                 ? firstAvailableSource(
-                        commandBuffer, fence, dynamicEpoch, dynamicHash, inputSourceTick
+                        commandBuffer, fence, dynamicEpoch, dynamicHash, inputSourceTick,
+                        submitIndex
                 ) : null;
         if (available == null) {
             return provisionalReceiverHistoryCanBind(
@@ -296,6 +341,19 @@ public final class GiLiveCoordinator implements AutoCloseable {
                     this.activeUpdateClass, this.cascadePrepared[0]
             ) ? STATUS_NO_WORK : STATUS_INPUT_NOT_READY;
         }
+        // The source query is deliberately near-to-far, but G3 can transiently expose only an
+        // outer cascade while C0 is still rebuilding after movement. Handing that source into
+        // the authoritative epoch would discard the completed provisional C0 remap, then fail
+        // the mandatory near plan and globally zero otherwise valid receiver history. Keep the
+        // provisional tuple until the current near source can own the handoff.
+        if (shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                this.activeEpochAuthoritative,
+                this.activeUpdateClass,
+                this.cascadePrepared[0],
+                available.cascade()
+        )) {
+            return STATUS_NO_WORK;
+        }
         if (!this.activeEpochAuthoritative
                 || !matchesAuthoritative(this.activeEpoch, field, available, dynamic)) {
             installAuthoritativeEpoch(field, available, dynamic, submitIndex);
@@ -307,7 +365,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
         boolean authoritativePlanAvailable = hasAnyAuthoritativePlan();
         do {
             if (!prepareNextCascadePlan(
-                    commandBuffer, fence, dynamicEpoch, dynamicHash, inputSourceTick
+                    commandBuffer, fence, dynamicEpoch, dynamicHash, inputSourceTick,
+                    submitIndex
             )) {
                 authoritativeSourceUnavailable = true;
                 break;
@@ -325,11 +384,13 @@ public final class GiLiveCoordinator implements AutoCloseable {
         reconcileExactReadyMasks(stats);
         observeCompletion(stats, submitIndex);
         publishFinalTelemetry(stats);
-        if (authoritativeSourceUnavailable) {
+        if (authoritativeSourceUnavailable && this.scheduler.pendingCount() == 0) {
             // With no authoritative cascade, the provisional tuple cannot authorize this frame.
             // Once any current cascade is authoritative, unplanned outer cascades remain exact
             // zero/per-brick fail-closed and the restored near mask is safe to bind visibly.
-            return unavailableAuthoritativeSourceStatus(authoritativePlanAvailable);
+            return unavailableAuthoritativeSourceStatus(
+                    authoritativePlanAvailable, stats.receiverVisibleMask()
+            );
         }
         if (this.scheduler.pendingCount() == 0) return STATUS_NO_WORK;
 
@@ -355,8 +416,18 @@ public final class GiLiveCoordinator implements AutoCloseable {
         );
         if (source == null) {
             this.scheduler.retryBatch(epoch, this.drainedBricks, count);
-            return STATUS_INPUT_NOT_READY;
+            // Source ownership can advance between planning and the bounded cascade submit. The
+            // retry is safe, and a compatible prepared receiver history must not blink to zero
+            // for that transient miss. An authoritative scroll handoff resets the Java prepared
+            // bit even though native has already remapped all three current receiver masks, so
+            // use that actual native tuple as the stronger fallback proof.
+            stats = this.resources.stats();
+            return retrySourceHistoryCanBind(
+                    this.preserveExact, this.activeUpdateClass, this.cascadePrepared[0]
+            ) || allCascadesHaveSampleableReceiverHistory(stats.receiverVisibleMask())
+                    ? STATUS_RETAINED_HISTORY : STATUS_INPUT_NOT_READY;
         }
+        if (cascade == 0) markFirstNearSource(submitIndex);
         boolean prepare = !this.cascadePrepared[cascade];
         long dispatchBaseline = stats.transportDispatches();
         long rejectBaseline = stats.rejectedCount();
@@ -374,6 +445,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
             }
             return status;
         }
+        if (cascade == 0) markFirstNearAdmission(submitIndex);
         this.workAdmissionOccurred = true;
         this.capturedBasisAvailable = false;
         this.cascadePrepared[cascade] = true;
@@ -406,6 +478,30 @@ public final class GiLiveCoordinator implements AutoCloseable {
         long nativeBytes = this.resources.stats().allocatedBytes();
         return Math.addExact(G2_G3_ACCOUNTED_BYTES,
                 Math.addExact(nativeBytes, GiLiveLayout.JAVA_PACKET_BYTES));
+    }
+
+    /**
+     * Explicit benchmark-only field inspection.  The live identity is retained inside the G6
+     * resource owner so callers cannot accidentally pair coordinates with a stale epoch.
+     */
+    public int beginDebugProbe(
+            final int[] cascades,
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        assertOwnerThread();
+        return this.resources.beginDebugProbe(cascades, worldXs, worldYs, worldZs);
+    }
+
+    /** Non-blocking counterpart to {@link #beginDebugProbe(int[], int[], int[], int[])}. */
+    public GiLiveGpuResources.@Nullable DebugProbeCapture pollDebugProbe() {
+        assertOwnerThread();
+        return this.resources.pollDebugProbe();
+    }
+    public int debugProbeLastStatus() {
+        assertOwnerThread();
+        return this.resources.debugProbeLastStatus();
     }
     public boolean admissionLogged() { assertOwnerThread(); return this.admissionLogged; }
     public void markAdmissionLogged() { assertOwnerThread(); this.admissionLogged = true; }
@@ -650,7 +746,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
             // The tracker preserves unfinished scroll/full-reset barriers, while a newer
             // incremental epoch owns last-event attribution. This historical SLA index is kept
             // separate from the current publication submit, which must never move backwards.
-            this.latency.beginPending(observedUpdateClass, affectedSubmitIndex);
+            beginLatencyPending(observedUpdateClass, affectedSubmitIndex, publicationSubmitIndex);
             this.firstAffectedSubmitIndex = this.latency.pendingFirstAffectedSubmitIndex();
         }
         beginEpoch(
@@ -673,6 +769,12 @@ public final class GiLiveCoordinator implements AutoCloseable {
             );
         }
         GiLiveEpoch authoritative = epochFromSource(field, source, dynamic);
+        GiLiveEpoch queuedEpoch = this.scheduler.activeEpoch();
+        boolean rebasePendingScheduler = shouldRebasePendingScheduler(
+                queuedEpoch, authoritative, this.activeUpdateClass,
+                this.preserveExact, this.completion.pending(),
+                this.scheduler.inFlightCount(), this.scheduler.ownedCount()
+        );
         EpochTransition handoff = this.workAdmissionOccurred
                 ? EpochTransition.AUTHORITATIVE_REBASE
                 : EpochTransition.AUTHORITATIVE_HANDOFF;
@@ -690,7 +792,11 @@ public final class GiLiveCoordinator implements AutoCloseable {
         );
         this.activeEpochAuthoritative = true;
         this.workAdmissionOccurred = false;
-        this.scheduler.rotateEpoch(authoritative);
+        if (rebasePendingScheduler) {
+            this.scheduler.rebaseLiveInputEpoch(authoritative);
+        } else {
+            this.scheduler.rotateEpoch(authoritative);
+        }
         this.nextCascadeToEnqueue = 0;
         for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
             this.cascadePrepared[cascade] = false;
@@ -723,13 +829,15 @@ public final class GiLiveCoordinator implements AutoCloseable {
             this.activeEpochAuthoritative = false;
         }
         if (transition.startsLatency) {
-            this.latency.beginPending(
-                    this.activeUpdateClass, latencyFirstAffectedSubmitIndex
+            beginLatencyPending(
+                    this.activeUpdateClass, latencyFirstAffectedSubmitIndex,
+                    publicationSubmitIndex
             );
             // An unfinished FULL_RESET is the root transaction. Child content/source epochs may
             // advance publication identity, but they must never retarget its SLA start.
             this.firstAffectedSubmitIndex = this.latency.pendingFirstAffectedSubmitIndex();
         }
+        noteLatencyEpochTransition();
     }
 
     private void resetProvisionalPlanState() {
@@ -834,7 +942,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
             final MemorySegment fence,
             final long dynamicEpoch,
             final long dynamicHash,
-            final long sourceTick
+            final long sourceTick,
+            final long submitIndex
     ) {
         if (this.nextCascadeToEnqueue >= GiLiveLayout.CASCADE_COUNT) return true;
         int cascade = this.nextCascadeToEnqueue;
@@ -843,6 +952,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
                 cascade, dynamicEpoch, dynamicHash, commandBuffer, fence, sourceTick
         );
         if (source == null) return false;
+        if (cascade == 0) markFirstNearSource(submitIndex);
         long affected = authoritativePlanAffectedMask(
                 this.conservativeMasks[cascade], source.affectedBrickMask()
         );
@@ -861,6 +971,10 @@ public final class GiLiveCoordinator implements AutoCloseable {
             throw new IllegalStateException("Native G6 cascade plan failed with status " + status);
         }
         this.authoritativeSources[cascade] = source;
+        // The accepted native plan and fixed scheduler queue now own every non-exact brick.
+        // Advance the retained basis at the same boundary before dropping sticky pre-plan dirt;
+        // a same-tick child can therefore never resurrect an affected queued brick as exact.
+        this.handoffRetainedMasks[cascade] = baseExact;
         this.conservativeMasks[cascade] = conservativeMaskAfterAcceptedPlan(
                 this.preserveExact, this.conservativeMasks[cascade],
                 source.affectedBrickMask()
@@ -928,7 +1042,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
     }
 
     private void enqueueNextCascadeIfNeeded() {
-        if (this.scheduler.ownedCount() != 0 || this.activeEpoch == null) return;
+        if (this.activeEpoch == null) return;
         while (this.nextCascadeToEnqueue < GiLiveLayout.CASCADE_COUNT) {
             int cascade = this.nextCascadeToEnqueue;
             if (!this.authoritativeMask[cascade]) return;
@@ -958,7 +1072,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
             final MemorySegment fence,
             final long dynamicEpoch,
             final long dynamicHash,
-            final long sourceTick
+            final long sourceTick,
+            final long submitIndex
     ) {
         for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
             GiDirectSourceCoordinator.LiveSource source =
@@ -966,9 +1081,154 @@ public final class GiLiveCoordinator implements AutoCloseable {
                             cascade, dynamicEpoch, dynamicHash,
                             commandBuffer, fence, sourceTick
                     );
-            if (source != null) return source;
+            if (source != null) {
+                if (cascade == 0) markFirstNearSource(submitIndex);
+                return source;
+            }
         }
         return null;
+    }
+
+    private void beginLatencyPending(
+            final GiLiveUpdateClass classification,
+            final long firstAffectedSubmitIndex,
+            final long observationSubmitIndex
+    ) {
+        this.latency.beginPending(classification, firstAffectedSubmitIndex);
+        if (!LATENCY_DIAGNOSTICS_ENABLED) return;
+        GiLiveUpdateClass pending = this.latency.pendingClassification();
+        long pendingFirst = this.latency.pendingFirstAffectedSubmitIndex();
+        if ((pending != GiLiveUpdateClass.SCROLL
+                && pending != GiLiveUpdateClass.FULL_RESET)
+                || (pending == this.latencyDiagnosticClass
+                && pendingFirst == this.latencyDiagnosticFirstAffectedSubmitIndex)) {
+            return;
+        }
+        this.latencyDiagnosticClass = pending;
+        this.latencyDiagnosticFirstAffectedSubmitIndex = pendingFirst;
+        this.latencyDiagnosticBeginSubmitIndex = observationSubmitIndex;
+        this.latencyFirstNearScrollRemapSubmitIndex = -1L;
+        this.latencyFirstNearSourceSubmitIndex = -1L;
+        this.latencyFirstNearAdmissionSubmitIndex = -1L;
+        this.latencyDiagnosticEpochTransitions = 0L;
+        com.metallum.client.gi.source.GiDirectDirtyQueue.Telemetry queue =
+                this.direct.queueTelemetry();
+        com.metallum.client.gi.source.GiDirectSourceGpuResources.Stats nativeStats =
+                this.direct.nativeStats();
+        this.latencyStartG3DirectDispatches = nativeStats == null
+                ? -1L : nativeStats.directInjectDispatches();
+        this.latencyStartG3Completed = queue.completed();
+        this.latencyStartG3Pending = queue.pending();
+        this.latencyStartG3InFlight = queue.inFlight();
+    }
+
+    private void noteLatencyEpochTransition() {
+        if (tracksCurrentResetOrScrollLatency()) {
+            this.latencyDiagnosticEpochTransitions = Math.incrementExact(
+                    this.latencyDiagnosticEpochTransitions
+            );
+        }
+    }
+
+    private void markFirstNearScrollRemap(final long submitIndex) {
+        if (tracksCurrentResetOrScrollLatency()
+                && this.latencyFirstNearScrollRemapSubmitIndex < 0L) {
+            this.latencyFirstNearScrollRemapSubmitIndex = submitIndex;
+        }
+    }
+
+    private void markFirstNearSource(final long submitIndex) {
+        if (tracksCurrentResetOrScrollLatency()
+                && this.latencyFirstNearSourceSubmitIndex < 0L) {
+            this.latencyFirstNearSourceSubmitIndex = submitIndex;
+        }
+    }
+
+    private void markFirstNearAdmission(final long submitIndex) {
+        if (tracksCurrentResetOrScrollLatency()
+                && this.latencyFirstNearAdmissionSubmitIndex < 0L) {
+            this.latencyFirstNearAdmissionSubmitIndex = submitIndex;
+        }
+    }
+
+    private boolean tracksCurrentResetOrScrollLatency() {
+        GiLiveUpdateClass pending = this.latency.pendingClassification();
+        return pending != null
+                && pending == this.latencyDiagnosticClass
+                && this.latency.pendingFirstAffectedSubmitIndex()
+                == this.latencyDiagnosticFirstAffectedSubmitIndex;
+    }
+
+    private void logResetOrScrollLatencySample(
+            final GiLiveUpdateClass classification,
+            final long readySubmitIndex,
+            final GiLiveGpuResources.Stats live
+    ) {
+        if (!LATENCY_DIAGNOSTICS_ENABLED
+                || (classification != GiLiveUpdateClass.SCROLL
+                && classification != GiLiveUpdateClass.FULL_RESET)) {
+            return;
+        }
+        com.metallum.client.gi.source.GiDirectDirtyQueue.Telemetry queue =
+                this.direct.queueTelemetry();
+        com.metallum.client.gi.source.GiDirectSourceGpuResources.Stats nativeStats =
+                this.direct.nativeStats();
+        long g3Dispatches = nativeStats == null ? -1L : nativeStats.directInjectDispatches();
+        long first = this.latency.pendingFirstAffectedSubmitIndex();
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_G6_LATENCY_SAMPLE class={} "
+                        + "first={} diagnostic_begin={} remap={} "
+                        + "g3_near={} g6_near_admit={} ready={} total={} source_wait={} "
+                        + "receiver_wait={} completion_wait={} epoch_transitions={} "
+                        + "g3_dispatch_start={} g3_dispatch_ready={} g3_dispatch_delta={} "
+                        + "g3_completed_start={} g3_completed_ready={} "
+                        + "g3_pending_start={} g3_pending_ready={} "
+                        + "g3_in_flight_start={} g3_in_flight_ready={} "
+                        + "g6_pending={} g6_in_flight={} exact_near={} ready_mask={} "
+                        + "field={} source_tick={} active_class={} reset_kind={} "
+                        + "full_reset_root={} authoritative={}",
+                classification, first, this.latencyDiagnosticBeginSubmitIndex,
+                this.latencyFirstNearScrollRemapSubmitIndex,
+                this.latencyFirstNearSourceSubmitIndex,
+                this.latencyFirstNearAdmissionSubmitIndex,
+                readySubmitIndex, readySubmitIndex - first,
+                submitDelta(first, this.latencyFirstNearSourceSubmitIndex),
+                submitDelta(this.latencyFirstNearSourceSubmitIndex, readySubmitIndex),
+                submitDelta(this.latencyFirstNearAdmissionSubmitIndex, readySubmitIndex),
+                this.latencyDiagnosticEpochTransitions,
+                this.latencyStartG3DirectDispatches, g3Dispatches,
+                counterDelta(this.latencyStartG3DirectDispatches, g3Dispatches),
+                this.latencyStartG3Completed, queue.completed(),
+                this.latencyStartG3Pending, queue.pending(),
+                this.latencyStartG3InFlight, queue.inFlight(),
+                this.scheduler.pendingCount(), this.scheduler.inFlightCount(),
+                Long.toHexString(this.exactMasks[0]), live.readyMask(),
+                live.fieldGeneration(), live.sourceTick(), this.activeUpdateClass,
+                this.activeResetKind, this.fullResetRootOpen,
+                this.activeEpochAuthoritative
+        );
+    }
+
+    private void clearLatencyDiagnostic() {
+        this.latencyDiagnosticClass = null;
+        this.latencyDiagnosticFirstAffectedSubmitIndex = -1L;
+        this.latencyDiagnosticBeginSubmitIndex = -1L;
+        this.latencyFirstNearScrollRemapSubmitIndex = -1L;
+        this.latencyFirstNearSourceSubmitIndex = -1L;
+        this.latencyFirstNearAdmissionSubmitIndex = -1L;
+        this.latencyDiagnosticEpochTransitions = 0L;
+        this.latencyStartG3DirectDispatches = -1L;
+        this.latencyStartG3Completed = -1L;
+        this.latencyStartG3Pending = -1;
+        this.latencyStartG3InFlight = -1;
+    }
+
+    private static long submitDelta(final long first, final long second) {
+        return first < 0L || second < first ? -1L : second - first;
+    }
+
+    private static long counterDelta(final long first, final long second) {
+        return first < 0L || second < first ? -1L : second - first;
     }
 
     private void observeCompletion(final GiLiveGpuResources.Stats stats, final long submitIndex) {
@@ -995,7 +1255,9 @@ public final class GiLiveCoordinator implements AutoCloseable {
                         this.scheduler.inFlightCount(), this.nextCascadeToEnqueue
                 );
             }
+            logResetOrScrollLatencySample(pending, submitIndex, stats);
             this.latency.recordPendingReady(submitIndex);
+            clearLatencyDiagnostic();
         }
         if (stats.allCascadesReady()) {
             this.publication.publishReady(this.activeEpoch, submitIndex);
@@ -1261,16 +1523,16 @@ public final class GiLiveCoordinator implements AutoCloseable {
         return conservativeMask | expandTransportHalo(authoritativeSourceMask);
     }
 
-    /** Keeps a transferred incremental source delta until physical exact/required owns it. */
+    /** Drops pre-plan dirt once native exact/required plus the fixed queue durably own it. */
     static long conservativeMaskAfterAcceptedPlan(
             final boolean preserveExact,
             final long conservativeMask,
             final long transferredSourceMask
     ) {
-        // FULL_RESET intentionally keeps structural ALL out of sticky dirt: exact=0 owns it.
-        return preserveExact
-                ? conservativeMask | expandTransportHalo(transferredSourceMask)
-                : 0L;
+        // The arguments document the ownership being transferred. The result is deliberately
+        // empty for both incremental and reset plans: baseExact has already removed every bit
+        // in their union, while requiredToConverge keeps every non-exact brick queued.
+        return 0L;
     }
 
     /**
@@ -1369,7 +1631,31 @@ public final class GiLiveCoordinator implements AutoCloseable {
                 || nextCascade > GiLiveLayout.CASCADE_COUNT) {
             throw new IllegalArgumentException("Invalid G6 authoritative planning state");
         }
-        return pendingBricks == 0 && nextCascade < GiLiveLayout.CASCADE_COUNT;
+        return nextCascade < GiLiveLayout.CASCADE_COUNT;
+    }
+
+    static boolean shouldRebasePendingScheduler(
+            final @Nullable GiLiveEpoch queuedEpoch,
+            final GiLiveEpoch authoritative,
+            final GiLiveUpdateClass updateClass,
+            final boolean preserveExact,
+            final boolean completionPending,
+            final int inFlightBricks,
+            final int ownedBricks
+    ) {
+        Objects.requireNonNull(authoritative, "authoritative");
+        Objects.requireNonNull(updateClass, "updateClass");
+        if (inFlightBricks < 0 || ownedBricks < 0 || inFlightBricks > ownedBricks) {
+            throw new IllegalArgumentException("Invalid G6 scheduler ownership for rebase");
+        }
+        return queuedEpoch != null
+                && ownedBricks > 0
+                && inFlightBricks == 0
+                && !completionPending
+                && preserveExact
+                && (updateClass == GiLiveUpdateClass.BLOCK
+                || updateClass == GiLiveUpdateClass.STATIC_SOURCE)
+                && authoritative.isSameGridInputSuccessorOf(queuedEpoch);
     }
 
     static boolean shouldEncodeProvisionalNearScrollRemap(
@@ -1411,9 +1697,37 @@ public final class GiLiveCoordinator implements AutoCloseable {
     }
 
     static int unavailableAuthoritativeSourceStatus(
-            final boolean authoritativePlanAvailable
+            final boolean authoritativePlanAvailable,
+            final int receiverVisibleMask
     ) {
-        return authoritativePlanAvailable ? STATUS_NO_WORK : STATUS_INPUT_NOT_READY;
+        if (!allCascadesHaveSampleableReceiverHistory(receiverVisibleMask)) {
+            return STATUS_INPUT_NOT_READY;
+        }
+        return authoritativePlanAvailable ? STATUS_NO_WORK : STATUS_RETAINED_HISTORY;
+    }
+
+    /** Native-owned proof that each current cascade still has some sampleable receiver history. */
+    static boolean allCascadesHaveSampleableReceiverHistory(final int receiverVisibleMask) {
+        if ((receiverVisibleMask & ~GiLiveLayout.READY_MASK_ALL) != 0) {
+            throw new IllegalArgumentException("G6 receiver-visible mask is out of range");
+        }
+        return receiverVisibleMask == GiLiveLayout.READY_MASK_ALL;
+    }
+
+    static boolean shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+            final boolean activeEpochAuthoritative,
+            final GiLiveUpdateClass updateClass,
+            final boolean nearRemapPrepared,
+            final int availableCascade
+    ) {
+        Objects.requireNonNull(updateClass, "updateClass");
+        if (availableCascade < 0 || availableCascade >= GiLiveLayout.CASCADE_COUNT) {
+            throw new IllegalArgumentException("G6 available source cascade is out of range");
+        }
+        return !activeEpochAuthoritative
+                && updateClass == GiLiveUpdateClass.SCROLL
+                && nearRemapPrepared
+                && availableCascade != 0;
     }
 
     /** Includes unfinished work inherited from a superseded epoch, not only its latest dirt. */
@@ -1578,6 +1892,44 @@ public final class GiLiveCoordinator implements AutoCloseable {
         return false;
     }
 
+    private boolean observationMatchesExceptEnvironment(
+            final GiSemanticTransportFieldView field,
+            final GiDynamicSourceSnapshot dynamic,
+            final long staticEpoch,
+            final boolean staticHealthy
+    ) {
+        if (!this.observed
+                || !Objects.equals(this.observedDimension, field.world().dimensionId())
+                || this.observedWorld != field.worldGeneration()
+                || this.observedResource != field.resourceEpoch()
+                || this.observedMaterial != field.materialEpoch()
+                || this.observedClipmap != field.clipmapGeneration()
+                || this.observedPalette != field.paletteGeneration()
+                || this.observedContent != field.contentGeneration()
+                || this.observedStatic != staticEpoch
+                || this.observedStaticHealthy != staticHealthy
+                || this.observedDynamic != dynamic.epoch().sourceEpoch()
+                || this.observedDynamicHash != dynamic.sourceHash()) {
+            return false;
+        }
+        return sameObservedOrigins(field);
+    }
+
+    /** State-machine boundary for {@code valid D -> unavailable -> valid D}. */
+    static boolean recoveredUnavailableEnvironmentMatchesObserved(
+            final boolean deferredUnavailable,
+            final GiLiveUpdateClass deferredClass,
+            final long observedDigest,
+            final long returnedDigest,
+            final boolean allOtherInputsMatch
+    ) {
+        return deferredUnavailable
+                && deferredClass == GiLiveUpdateClass.FULL_RESET
+                && observedDigest != 0L
+                && returnedDigest == observedDigest
+                && allOtherInputsMatch;
+    }
+
     private boolean sameObservedStructuralRoot(final GiSemanticTransportFieldView field) {
         return this.observed
                 && Objects.equals(this.observedDimension, field.world().dimensionId())
@@ -1687,6 +2039,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
         this.deferredUpdateClass = null;
         this.deferredFirstAffectedSubmitIndex = -1L;
         this.deferredSourceMaskUnknown = false;
+        this.deferredEnvironmentIdentityUnavailable = false;
         for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
             this.deferredAffectedMasks[cascade] = 0L;
         }
@@ -1896,6 +2249,25 @@ public final class GiLiveCoordinator implements AutoCloseable {
     }
     static boolean sourceEnvironmentIdentityReady(final long digest) {
         return digest != 0L;
+    }
+    static boolean unavailableEnvironmentHistoryCanBind(
+            final boolean fullResetRootOpen,
+            final boolean observed,
+            final boolean sameStructuralRoot,
+            final boolean sameOrigins,
+            final long previousEnvironmentDigest
+    ) {
+        return !fullResetRootOpen && observed && sameStructuralRoot && sameOrigins
+                && sourceEnvironmentIdentityReady(previousEnvironmentDigest);
+    }
+    static boolean retrySourceHistoryCanBind(
+            final boolean preserveExact,
+            final GiLiveUpdateClass updateClass,
+            final boolean nearPrepared
+    ) {
+        return provisionalReceiverHistoryCanBind(
+                false, preserveExact, updateClass, nearPrepared
+        );
     }
     private boolean canRetainDeferredHistory(
             final GiLiveUpdateClass updateClass,

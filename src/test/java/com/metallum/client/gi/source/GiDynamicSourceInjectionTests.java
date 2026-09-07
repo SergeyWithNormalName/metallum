@@ -148,8 +148,11 @@ public final class GiDynamicSourceInjectionTests {
                 affected++;
             }
         }
-        check(affected == 4,
-                "small source motion did not stay within its four-brick old/new union: " + affected);
+        // Block-scale C0: the old source lies on an 8 m brick corner (8 bricks), the new source
+        // crosses to one X brick while remaining on Y/Z boundaries (4 bricks). C1 and C2 each
+        // retain one shared coarse brick, for an exact 8 + 4 + 1 + 1 = 14-brick union.
+        check(affected == 14,
+                "small source motion escaped its exact block-scale old/new union: " + affected);
         check(affected <= GiDirectSourceLayout.MAX_DRAIN_PER_FRAME
                         && affected < GiDirectSourceLayout.TOTAL_BRICKS,
                 "dynamic motion fell back to a full 192-brick rebuild");

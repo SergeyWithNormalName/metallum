@@ -24,7 +24,7 @@ import java.util.UUID;
  */
 public final class GiDynamicSourceCollector {
     public static final int MAX_CAPACITY = 512;
-    /** Dynamic GI cannot represent source motion finer than its two-block near field. */
+    /** Dynamic GI source motion is quantized to the one-block C0 field resolution. */
     static final int POSITION_QUANTUM_BLOCKS = GiDirectSourceLayout.cellSizeBlocks(0);
 
     public enum OfferResult {

@@ -38,6 +38,9 @@ public final class GiSemanticSectionReservation implements AutoCloseable {
             final List<GiSemanticQuadObservation> observations
     ) {
         Objects.requireNonNull(observations, "observations");
+        if (observations.size() > GiSemanticSectionBuilder.MAX_OBSERVATIONS) {
+            throw new IllegalArgumentException("G2 section observation bound exceeded");
+        }
         GiSemanticSectionBuilder builder = new GiSemanticSectionBuilder(this.palette, seed);
         for (GiSemanticQuadObservation observation : List.copyOf(observations)) {
             builder.observe(observation);

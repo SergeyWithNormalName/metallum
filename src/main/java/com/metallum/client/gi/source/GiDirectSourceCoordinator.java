@@ -364,7 +364,7 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
      * Ownership-transfer accumulator. Unlike the audit accumulator above, bits leave this mask
      * as soon as an exact current G6 plan has synchronously accepted them. The G6 exact/required
      * masks then own unfinished work across later publication epochs; a later G3 change re-marks
-     * the bit. Keeping the two lifetimes separate prevents a completed eight-brick child from
+     * the bit. Keeping the two lifetimes separate prevents a completed bounded child batch from
      * being invalidated again by an old cumulative FULL_RESET mask.
      */
     private final long[] untransferredAffectedBrickMasks =
@@ -692,7 +692,23 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                     this.submittedBrickStamps, this.desiredBrickStamps,
                     this.submittedSourceKeys, this.desiredSourceKeys
             );
-            this.dirtyQueue.rotateEpoch(nextEpoch);
+            boolean liveInputRebase = !this.frozenTransportRequested
+                    && dynamicSources != null
+                    && previousEpoch != null
+                    && nextEpoch.isLiveInputSuccessorOf(previousEpoch)
+                    && !dynamicSourceChanged && !environmentChanged
+                    && !originsChanged
+                    && previousEnvironmentDigest == this.environment.quantizedDigest();
+            if (liveInputRebase) {
+                if (this.acceptedBatch.pending() || this.dirtyQueue.inFlightCount() != 0) {
+                    throw new IllegalStateException(
+                            "G3 live-input rebase crossed accepted GPU ownership"
+                    );
+                }
+                this.dirtyQueue.rebaseLiveInputEpoch(nextEpoch);
+            } else {
+                this.dirtyQueue.rotateEpoch(nextEpoch);
+            }
             this.activeEpoch = nextEpoch;
             this.consecutiveAsyncCompletionFailures = 0;
             this.activeNearOriginX = this.nextOrigins[0];
@@ -907,6 +923,29 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     public GiDirectSourceGpuResources.@Nullable Stats nativeStats() {
         assertOwnerThread();
         return this.resources == null ? null : this.resources.stats();
+    }
+
+    /** Benchmark-only non-blocking C0 probe; native snapshots the exact current G3 identity. */
+    public int beginDebugProbe(
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        assertOwnerThread();
+        return this.resources == null ? GiDirectSourceGpuResources.STATUS_REJECTED
+                : this.resources.beginDebugProbe(worldXs, worldYs, worldZs);
+    }
+
+    /** Returns {@code null} until the asynchronous blit completes or must be retried stale. */
+    public GiDirectSourceGpuResources.@Nullable DebugProbeCapture pollDebugProbe() {
+        assertOwnerThread();
+        return this.resources == null ? null : this.resources.pollDebugProbe();
+    }
+
+    public int debugProbeLastStatus() {
+        assertOwnerThread();
+        return this.resources == null ? GiDirectSourceGpuResources.STATUS_REJECTED
+                : this.resources.debugProbeLastStatus();
     }
 
     /**

@@ -2,6 +2,7 @@ package com.metallum.client.gi.live;
 
 import com.metallum.client.gi.receiver.GiReceiverBindingAbi;
 import com.metallum.client.gi.receiver.GiReceiverLayout;
+import com.metallum.client.gi.receiver.GiReceiverMath;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
@@ -45,12 +46,33 @@ public final class GiLiveReceiverSourceChainTests {
 
     public static void main(final String[] arguments) throws Exception {
         testDefaultOffAndFailClosedPatchAdmission();
+        testSparseSurfaceNormalization();
         testThreeCascadeVertexOnlySourceContract();
         testCarrierFailureAndReflectionCoexistence();
         testSourceTickAndSteadyAllocationGuards();
         testTerminalFailClosedPublicationGuards();
         testRealGeneratedMslForEveryTerrainFlavor();
         System.out.println("G6 live receiver source-chain tests passed");
+    }
+
+    private static void testSparseSurfaceNormalization() {
+        require(GiReceiverMath.MAX_SPARSE_SURFACE_RECIPROCAL == 8.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(1.0F) == 1.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(0.125F) == 8.0F,
+                "G6 sparse filter no longer preserves all-valid and one-of-eight support");
+        require(close(GiReceiverMath.normalizeSparseComponent(0.25F, 0.125F), 2.0F)
+                        && close(GiReceiverMath.normalizeSparseComponent(-0.125F, 0.125F), -1.0F)
+                        && close(GiReceiverMath.normalizeSparseConfidence(0.1F, 0.125F), 0.8F),
+                "G6 sparse filter did not remove AIR-zero dilution exactly once");
+        require(GiReceiverMath.sparseSurfaceReciprocal(Math.nextDown(0.125F)) == 8.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(0.001F) == 8.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(0.0F) == 0.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(Float.NaN) == 0.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(Float.POSITIVE_INFINITY) == 0.0F
+                        && GiReceiverMath.sparseSurfaceReciprocal(1.0001F) == 0.0F
+                        && GiReceiverMath.normalizeSparseComponent(Float.NaN, 1.0F) == 0.0F
+                        && GiReceiverMath.normalizeSparseConfidence(0.5F, 0.0F) == 0.0F,
+                "G6 sparse filter is discontinuous or amplified malformed surface coverage");
     }
 
     private static void testDefaultOffAndFailClosedPatchAdmission() {
@@ -122,9 +144,9 @@ public final class GiLiveReceiverSourceChainTests {
         for (int cascade = 0; cascade < 3; cascade++) {
             String cascadeBlock = slice(
                     vertex.source(),
-                    "vec3 metallumGiLocal" + cascade + " =",
+                    "vec3 metallumGiSurfacePosition" + cascade + " =",
                     cascade < 2
-                            ? "vec3 metallumGiLocal" + (cascade + 1) + " ="
+                            ? "vec3 metallumGiSurfacePosition" + (cascade + 1) + " ="
                             : GiReceiverBindingAbi.VARYING + " = vec4(0.0);"
             );
             String compact = normalizeWhitespace(cascadeBlock);
@@ -137,6 +159,10 @@ public final class GiLiveReceiverSourceChainTests {
             String mask = "metallumGiSampleableMask" + cascade;
             String word = "metallumGiFootprintSampleableWord" + cascade;
             String sampleable = "metallumGiFootprintSampleable" + cascade;
+            String confidenceCoverage = "metallumGiConfidenceCoverage" + cascade;
+            String surfaceCoverage = "metallumGiSurfaceCoverage" + cascade;
+            String coverageValid = "metallumGiCoverageValid" + cascade;
+            String sparseScale = "metallumGiSparseScale" + cascade;
             int footprintStart = cascadeBlock.indexOf("vec3 " + sampleCell + " =");
             int exactGate = cascadeBlock.indexOf("if (" + sampleable + ") {");
             int exactOpenBrace = exactGate < 0 ? -1 : cascadeBlock.indexOf('{', exactGate);
@@ -180,7 +206,28 @@ public final class GiLiveReceiverSourceChainTests {
                             && count(vertex.source(),
                             "metallumGiCascadeValue" + cascade) >= 3
                             && count(vertex.source(),
-                            "metallumGiCascadeValid" + cascade) >= 3,
+                            "metallumGiCascadeValid" + cascade) >= 3
+                            && compact.contains("vec3 metallumGiSurfacePosition" + cascade
+                            + " = metallumGiWorldPosition - metallumGiFaceNormal"
+                            + " * 0.0009765625;")
+                            && compact.contains("vec2 " + confidenceCoverage
+                            + " = textureLod( " + GiReceiverBindingAbi.CONFIDENCE_SAMPLER
+                            + ", " + sampleCell.replace("Cell", "Uvw") + ", 0.0).rg;")
+                            && compact.contains("float " + surfaceCoverage + " = "
+                            + confidenceCoverage + ".g;")
+                            && compact.contains("bool " + coverageValid
+                            + " = metallumGiFinite" + cascade + " && " + surfaceCoverage
+                            + " > 0.0 && " + surfaceCoverage + " <= 1.0;")
+                            && compact.contains("float " + sparseScale + " = "
+                            + coverageValid + " ? min(1.0 / " + surfaceCoverage
+                            + ", 8.0) : 0.0;")
+                            && compact.contains("metallumGiShRedValue" + cascade
+                            + " *= " + sparseScale + ";")
+                            && compact.contains("metallumGiKnownSupport" + cascade
+                            + " = " + coverageValid + " ? clamp(" + confidenceCoverage
+                            + ".r * " + sparseScale + ", 0.0, 1.0) : 0.0;")
+                            && compact.contains("metallumGiCascadeValid" + cascade
+                            + " = metallumGiKnownSupport" + cascade + " > 0.0;"),
                     "G6 cascade " + cascade + " is absent or structurally incomplete");
         }
         require(vertex.source().contains("cascadeOrigins[3]")
@@ -188,9 +235,25 @@ public final class GiLiveReceiverSourceChainTests {
                         && vertex.source().contains("metallumGiBlendedValid")
                         && vertex.source().contains(
                         "mix(metallumGiBlended, metallumGiCascadeValue0")
+                        && vertex.source().contains(
+                        "metallumGiCascadeFade0 * metallumGiKnownSupport0")
+                        && vertex.source().contains(
+                        "metallumGiCascadeFade1 * metallumGiKnownSupport1")
                         && count(vertex.source(),
                         "out vec4 " + GiReceiverBindingAbi.VARYING + ";") == 1,
                 "G6 three-cascade blend/varying contract is incomplete");
+
+        require(GiLiveReceiverShaderPatcher.combineCascadeSample(
+                        8.0F, true, 0.0F, false, 1.0F, 0.0F) == 8.0F
+                        && GiLiveReceiverShaderPatcher.combineCascadeSample(
+                        8.0F, true, 0.0F, true, 1.0F, 0.25F) == 6.0F
+                        && GiLiveReceiverShaderPatcher.combineCascadeSample(
+                        8.0F, true, 2.0F, true, 1.0F, 1.0F) == 2.0F
+                        && GiLiveReceiverShaderPatcher.combineCascadeSample(
+                        0.0F, false, 2.0F, true, 1.0F, 0.01F) == 2.0F
+                        && GiLiveReceiverShaderPatcher.combineCascadeSample(
+                        8.0F, true, 2.0F, true, Float.NaN, 1.0F) == 8.0F,
+                "G6 reliability handoff can replace stable coarse light with an unknown near sample");
 
         require(!fragment.source().contains("sampler3D")
                         && !fragment.source().contains("textureLod(")
@@ -203,6 +266,11 @@ public final class GiLiveReceiverSourceChainTests {
                         "vec3 diffuse = metallumGiFallbackAmbient;")
                         && fragment.source().contains(
                         "if (metallumGiConfidence > 0.0)")
+                        && fragment.source().contains(
+                        "diffuse = metallumGiFallbackAmbient")
+                        && fragment.source().contains("+ metallumGiIncomingAmbient;")
+                        && !fragment.source().contains(
+                        "metallumGiIncomingAmbient * metallumGiConfidence")
                         && !fragment.source().contains(
                         "metallumGiIncomingAmbient * " + INVERSE_PI),
                 "G6 fragment lost its exactly-once rho/pi or fallback composition");
@@ -241,6 +309,35 @@ public final class GiLiveReceiverSourceChainTests {
                         && bitCorrupted.source().equals(missingFootprintBit)
                         && bitCorrupted.failureReason().contains("sampleable-footprint gate"),
                 "G6 idempotent validation admitted a footprint loop without sampleable-bit proof");
+
+        String missingConfidenceValidity = vertex.source().replace(
+                "metallumGiKnownSupport1 > 0.0",
+                "true /* confidence validity removed */"
+        );
+        GiLiveReceiverShaderPatcher.Result confidenceCorrupted =
+                GiLiveReceiverShaderPatcher.patch(
+                        GiLiveReceiverShaderPatcher.Stage.VERTEX,
+                        missingConfidenceValidity
+                );
+        require(!confidenceCorrupted.success()
+                        && confidenceCorrupted.source().equals(missingConfidenceValidity)
+                        && confidenceCorrupted.failureReason().contains(
+                        "structure is incomplete"),
+                "G6 idempotent validation admitted a zero-confidence near-cascade mask");
+
+        String missingCoverageGate = vertex.source().replace(
+                "min(1.0 / metallumGiSurfaceCoverage1, 8.0)",
+                "1.0 / metallumGiSurfaceCoverage1 /* sparse reciprocal cap removed */"
+        );
+        GiLiveReceiverShaderPatcher.Result coverageCorrupted =
+                GiLiveReceiverShaderPatcher.patch(
+                        GiLiveReceiverShaderPatcher.Stage.VERTEX,
+                        missingCoverageGate
+                );
+        require(!coverageCorrupted.success()
+                        && coverageCorrupted.source().equals(missingCoverageGate)
+                        && coverageCorrupted.failureReason().contains("structure is incomplete"),
+                "G6 idempotent validation admitted unbounded sparse normalization");
     }
 
     private static void testCarrierFailureAndReflectionCoexistence() {
@@ -481,13 +578,25 @@ public final class GiLiveReceiverSourceChainTests {
                         && liveObserve.contains(
                         "if (!sourceMatchesObservation(field, available, dynamic))")
                         && liveCoordinator.contains(
-                        "this.latency.beginPending(observedUpdateClass, affectedSubmitIndex);")
+                        "beginLatencyPending(observedUpdateClass, affectedSubmitIndex, "
+                                + "publicationSubmitIndex);")
                         && liveCoordinator.contains(
                         "this.firstAffectedSubmitIndex = "
                                 + "this.latency.pendingFirstAffectedSubmitIndex();")
                         && liveCoordinator.contains(
                         "epoch, this.activeUpdateClass, publicationSubmitIndex"),
                 "G6 can rotate a shared-atlas epoch in flight or repeat an admitted scroll remap");
+        require(liveCoordinator.contains("shouldRebasePendingScheduler(")
+                        && liveCoordinator.contains(
+                        "this.scheduler.rebaseLiveInputEpoch(authoritative)")
+                        && liveCoordinator.contains("this.completion.pending()")
+                        && liveCoordinator.contains("this.scheduler.inFlightCount()")
+                        && liveCoordinator.contains("authoritative.isSameGridInputSuccessorOf")
+                        && liveCoordinator.contains(
+                        "updateClass == GiLiveUpdateClass.BLOCK")
+                        && liveCoordinator.contains(
+                        "updateClass == GiLiveUpdateClass.STATIC_SOURCE"),
+                "G6 same-grid live-input handoff still discards bounded pending work");
         String provisionalMasks = slice(
                 liveCoordinator,
                 "private void computeProvisionalMasks(",
@@ -530,7 +639,8 @@ public final class GiLiveReceiverSourceChainTests {
                 "observeCompletion(stats, submitIndex);", finalPlanStats
         );
         int unavailableReturn = liveObserve.indexOf(
-                "if (authoritativeSourceUnavailable) {", finalPlanReceipt
+                "if (authoritativeSourceUnavailable && this.scheduler.pendingCount() == 0) {",
+                finalPlanReceipt
         );
         require(planningLoop >= 0 && planCascade > planningLoop
                         && continuePlanning > planCascade
@@ -547,9 +657,15 @@ public final class GiLiveReceiverSourceChainTests {
                         "authoritativePlanAvailable = true;", planCascade
                 ) > planCascade
                         && unavailableReturn > finalPlanReceipt
+                        && liveObserve.contains(
+                        "shouldContinueAuthoritativePlanning(\n"
+                                + "                this.scheduler.pendingCount(), "
+                                + "this.nextCascadeToEnqueue")
                         && liveObserve.indexOf(
                         "return unavailableAuthoritativeSourceStatus(", unavailableReturn
-                ) > unavailableReturn,
+                ) > unavailableReturn
+                        && liveObserve.contains(
+                        "allCascadesHaveSampleableReceiverHistory(stats.receiverVisibleMask())"),
                 "G6 zero-required cascade planning can starve far or miss final near readiness");
         int immediateRemap = liveObserve.indexOf(
                 "this.resources.encodeScrollRemap("
@@ -567,6 +683,16 @@ public final class GiLiveReceiverSourceChainTests {
         );
         require(immediateRemap >= 0 && immediateRemap < firstSourceQuery
                         && liveObserve.contains("shouldEncodeProvisionalNearScrollRemap(")
+                        && liveObserve.indexOf(
+                        "shouldDeferAuthoritativeScrollHandoffUntilNearSource(",
+                        firstSourceQuery
+                ) > firstSourceQuery
+                        && liveObserve.indexOf(
+                        "installAuthoritativeEpoch(", firstSourceQuery
+                ) > liveObserve.indexOf(
+                        "shouldDeferAuthoritativeScrollHandoffUntilNearSource(",
+                        firstSourceQuery
+                )
                         && count(liveObserve, "provisionalReceiverHistoryCanBind(") == 2
                         && liveObserve.contains("this.completion.admit(\n                    0, 0, true, 0L")
                         && liveObserve.contains("advanceReceiverOrigin(epoch, 0);")
@@ -599,10 +725,25 @@ public final class GiLiveReceiverSourceChainTests {
         String nativeLiveEncode = slice(
                 nativeSource, "func encodeCascade(", "private func writeParams("
         );
+        int semanticStageGuard = nativeLiveEncode.indexOf("if stageSemanticCells {");
+        int semanticStageCopy = nativeLiveEncode.indexOf(
+                "sharedStaging.cells.contents().copyMemory(", semanticStageGuard
+        );
+        int semanticStageBind = nativeLiveEncode.indexOf(
+                "encoder.setBuffer(sharedStaging.cells", semanticStageCopy
+        );
         require(completionPublication.contains(
                         "latencyRecoveryIsReceiverVisible(")
                         && completionPublication.contains(
                         "pending, this.exactMasks[0], (stats.readyMask() & 1) != 0")
+                        && completionPublication.indexOf(
+                        "logResetOrScrollLatencySample(pending, submitIndex, stats);")
+                        < completionPublication.indexOf(
+                        "this.latency.recordPendingReady(submitIndex);")
+                        && liveCoordinator.contains(
+                        "\"1\".equals(System.getenv(\"METALLUM_BENCHMARK\"))")
+                        && liveCoordinator.contains(
+                        "METALLUM_BENCHMARK EVENT=GI_G6_LATENCY_SAMPLE")
                         && nativeWriteParams.contains(
                         "let sampleable = carrierSafe ? receiverBrickMasks[cascade] : 0")
                         && nativeWriteParams.contains(
@@ -624,14 +765,21 @@ public final class GiLiveReceiverSourceChainTests {
                         && nativeLiveEncode.contains(
                         "let source = remapOnly ? nil : direct.liveTransportSnapshot(")
                         && nativeLiveEncode.contains("if let source {")
+                        && nativeLiveEncode.contains(
+                        "stagedSemanticCascade != cascade")
+                        && nativeLiveEncode.contains(
+                        "stagedSemanticFieldGeneration != header.fieldGeneration")
+                        && semanticStageGuard >= 0
+                        && semanticStageCopy > semanticStageGuard
+                        && semanticStageBind > semanticStageCopy
                         && completionPublication.contains(
                         "shouldCloseOpenFullResetRoot(")
                         && completionPublication.contains(
                         "this.fullResetRootOpen, this.activeEpochAuthoritative, true")
                         && completionPublication.contains(
                         "this.fullResetRootOpen = false;"),
-                "G6 SLA visibility diverged from exact native receiver admission or full-reset "
-                        + "root closes before latest authoritative all-ready publication");
+                "G6 SLA visibility, cap-bounded semantic staging, or full-reset publication "
+                        + "ownership diverged from the live receiver contract");
         int finalIdentityReadiness = liveObserve.indexOf("observeCompletion(stats, submitIndex);");
         require(finalIdentityReadiness > observedUpdate,
                 "G6 recorded old-epoch readiness before applying the submit's final identity");
@@ -1266,6 +1414,10 @@ public final class GiLiveReceiverSourceChainTests {
             }
         }
         return -1;
+    }
+
+    private static boolean close(final float left, final float right) {
+        return Math.abs(left - right) <= 1.0E-6F;
     }
 
     private static void require(final boolean condition, final String message) {

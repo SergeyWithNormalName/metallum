@@ -1,14 +1,23 @@
 package com.metallum.client.gi.semantic;
 
+import com.metallum.client.gi.field.GiFieldLayout;
+
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 /** Worker-local deterministic reducer combining cloned state with quads actually emitted by Sodium. */
 public final class GiSemanticSectionBuilder {
+    public static final int MAX_OBSERVATIONS = 65_536;
+    /**
+     * C0 now carries 4,096 cells. Reusing the large reduction workspace per Sodium worker keeps
+     * block-scale GI from allocating roughly a megabyte of temporary primitive arrays for every
+     * rebuilt section. The finished immutable snapshot never aliases this workspace.
+     */
+    private static final ThreadLocal<Accumulators> WORKSPACE =
+            ThreadLocal.withInitial(Accumulators::new);
     private static final Comparator<GiSemanticQuadObservation> OBSERVATION_ORDER = Comparator
             .comparingInt(GiSemanticQuadObservation::localIndex)
             .thenComparingInt(GiSemanticQuadObservation::faceBit)
@@ -40,6 +49,9 @@ public final class GiSemanticSectionBuilder {
         if (this.built) {
             throw new IllegalStateException("G2 section builder was already consumed");
         }
+        if (this.observations.size() >= MAX_OBSERVATIONS) {
+            throw new IllegalStateException("G2 section observation bound exceeded");
+        }
         this.observations.add(Objects.requireNonNull(observation, "observation"));
     }
 
@@ -49,14 +61,19 @@ public final class GiSemanticSectionBuilder {
         }
         this.built = true;
         this.observations.sort(OBSERVATION_ORDER);
-        Accumulators data = new Accumulators();
-        for (GiSemanticStateSeed state : this.states) {
-            accumulateState(data, state);
+        Accumulators data = WORKSPACE.get();
+        data.acquire();
+        try {
+            for (GiSemanticStateSeed state : this.states) {
+                accumulateState(data, state);
+            }
+            for (GiSemanticQuadObservation observation : this.observations) {
+                accumulateObservation(data, observation);
+            }
+            return finish(data, this.observations.size());
+        } finally {
+            data.release();
         }
-        for (GiSemanticQuadObservation observation : this.observations) {
-            accumulateObservation(data, observation);
-        }
-        return finish(data, this.observations.size());
     }
 
     private void accumulateState(final Accumulators data, final GiSemanticStateSeed state) {
@@ -68,7 +85,7 @@ public final class GiSemanticSectionBuilder {
         boolean paletteFallback = paletteId == GiSemanticPalette.FALLBACK_ID
                 && !GiSemanticPalette.FALLBACK_KEY.equals(state.canonicalMaterialKey());
         for (int cascade = 0; cascade < 3; cascade++) {
-            int divisor = 1 << (cascade + 1);
+            int divisor = GiFieldLayout.cellSizeBlocks(cascade);
             int cell = GiSemanticSectionSnapshot.cascadeCellIndex(
                     cascade, blockX / divisor, blockY / divisor, blockZ / divisor
             );
@@ -111,7 +128,7 @@ public final class GiSemanticSectionBuilder {
                         data.seedEmission[cell * 3 + channel] += (long) emission * emissionWeight;
                     }
                 }
-                selectMaterial(data.seedMaterialWeights, cell, paletteId, occupancy);
+                data.addSeedMaterial(cell, paletteId, occupancy);
                 int mask = state.conservativeFaceMask();
                 for (int face = 0; face < 6; face++) {
                     if ((mask & 1 << face) != 0) {
@@ -134,7 +151,7 @@ public final class GiSemanticSectionBuilder {
         boolean paletteFallback = paletteId == GiSemanticPalette.FALLBACK_ID
                 && !GiSemanticPalette.FALLBACK_KEY.equals(observation.canonicalMaterialKey());
         for (int cascade = 0; cascade < 3; cascade++) {
-            int divisor = 1 << (cascade + 1);
+            int divisor = GiFieldLayout.cellSizeBlocks(cascade);
             int cell = GiSemanticSectionSnapshot.cascadeCellIndex(
                     cascade, blockX / divisor, blockY / divisor, blockZ / divisor
             );
@@ -171,18 +188,12 @@ public final class GiSemanticSectionBuilder {
                     data.quadEmission[cell * 3 + channel] += (long) emission * emissionWeight;
                 }
             }
-            selectMaterial(data.quadMaterialWeights, cell, paletteId, weight);
+            data.addQuadMaterial(cell, paletteId, weight);
         }
     }
 
-    private static void selectMaterial(
-            final Map<Long, Long> materialWeights, final int cell, final int id, final int weight
-    ) {
-        long key = (long) cell << 32 | id & 0xffff_ffffL;
-        materialWeights.merge(key, (long) weight, Math::addExact);
-    }
-
     private static GiSemanticSectionSnapshot finish(final Accumulators data, final int observedQuads) {
+        data.reduceMaterialWeights();
         short[] albedo = new short[GiSemanticSectionSnapshot.CELL_COUNT * 3];
         short[] emission = new short[GiSemanticSectionSnapshot.CELL_COUNT * 4];
         byte[] occupancy = new byte[GiSemanticSectionSnapshot.CELL_COUNT];
@@ -230,9 +241,8 @@ public final class GiSemanticSectionBuilder {
             medium[cell] = (byte) (hasObservedGeometry
                     ? data.quadMediumMask[cell] : data.seedMediumMask[cell]);
             provenance[cell] = (byte) data.provenance[cell];
-            materialIds[cell] = (short) dominantMaterial(
-                    hasObservedGeometry ? data.quadMaterialWeights : data.seedMaterialWeights, cell
-            );
+            materialIds[cell] = (short) (hasObservedGeometry
+                    ? data.quadDominantMaterial[cell] : data.seedDominantMaterial[cell]);
             long albedoWeight = hasObservedGeometry
                     ? data.quadAlbedoWeight[cell] : data.seedAlbedoWeight[cell];
             long[] albedoSource = hasObservedGeometry ? data.quadAlbedo : data.seedAlbedo;
@@ -267,13 +277,18 @@ public final class GiSemanticSectionBuilder {
                 }
             }
         }
-        return new GiSemanticSectionSnapshot(
+        return GiSemanticSectionSnapshot.takeOwnership(
                 albedo, emission, occupancy, medium, validity, provenance, faces, coverage,
                 materialIds, observedQuads, fallbackCells
         );
     }
 
     private static final class Accumulators {
+        private static final int SEED_MATERIAL_CONTRIBUTION_CAPACITY =
+                GiSemanticSectionSeed.BLOCK_COUNT * GiFieldLayout.CASCADE_COUNT;
+        private static final int INITIAL_QUAD_MATERIAL_CONTRIBUTION_CAPACITY =
+                GiSemanticSectionSeed.BLOCK_COUNT * GiFieldLayout.CASCADE_COUNT;
+
         private final int[] totalBlocks = new int[GiSemanticSectionSnapshot.CELL_COUNT];
         private final int[] knownBlocks = new int[GiSemanticSectionSnapshot.CELL_COUNT];
         private final boolean[] content = new boolean[GiSemanticSectionSnapshot.CELL_COUNT];
@@ -295,23 +310,136 @@ public final class GiSemanticSectionBuilder {
         private final long[] quadEmissionIntensity = new long[GiSemanticSectionSnapshot.CELL_COUNT];
         private final long[] quadEmissionArea = new long[GiSemanticSectionSnapshot.CELL_COUNT];
         private final long[] quadFaces = new long[GiSemanticSectionSnapshot.CELL_COUNT * 6];
-        private final Map<Long, Long> seedMaterialWeights = new HashMap<>();
-        private final Map<Long, Long> quadMaterialWeights = new HashMap<>();
+        private final long[] seedMaterialContributions =
+                new long[SEED_MATERIAL_CONTRIBUTION_CAPACITY];
+        private long[] quadMaterialContributions =
+                new long[INITIAL_QUAD_MATERIAL_CONTRIBUTION_CAPACITY];
+        private final int[] seedDominantMaterial = new int[GiSemanticSectionSnapshot.CELL_COUNT];
+        private final int[] quadDominantMaterial = new int[GiSemanticSectionSnapshot.CELL_COUNT];
+        private int seedMaterialContributionCount;
+        private int quadMaterialContributionCount;
+        private boolean inUse;
+
+        private void acquire() {
+            if (this.inUse) {
+                throw new IllegalStateException("G2 worker reduction workspace was re-entered");
+            }
+            this.inUse = true;
+        }
+
+        private void addSeedMaterial(final int cell, final int id, final int weight) {
+            if (this.seedMaterialContributionCount >= this.seedMaterialContributions.length) {
+                throw new IllegalStateException("G2 seed material contribution bound exceeded");
+            }
+            this.seedMaterialContributions[this.seedMaterialContributionCount++] =
+                    packMaterialContribution(cell, id, weight);
+        }
+
+        private void addQuadMaterial(final int cell, final int id, final int weight) {
+            int required = Math.addExact(this.quadMaterialContributionCount, 1);
+            if (required > this.quadMaterialContributions.length) {
+                int grown = Math.max(required, Math.addExact(
+                        this.quadMaterialContributions.length,
+                        Math.max(1, this.quadMaterialContributions.length >>> 1)
+                ));
+                this.quadMaterialContributions = Arrays.copyOf(
+                        this.quadMaterialContributions, grown
+                );
+            }
+            this.quadMaterialContributions[this.quadMaterialContributionCount++] =
+                    packMaterialContribution(cell, id, weight);
+        }
+
+        private void reduceMaterialWeights() {
+            reduceMaterialContributions(
+                    this.seedMaterialContributions,
+                    this.seedMaterialContributionCount,
+                    this.seedDominantMaterial
+            );
+            reduceMaterialContributions(
+                    this.quadMaterialContributions,
+                    this.quadMaterialContributionCount,
+                    this.quadDominantMaterial
+            );
+        }
+
+        private void release() {
+            Arrays.fill(this.totalBlocks, 0);
+            Arrays.fill(this.knownBlocks, 0);
+            Arrays.fill(this.content, false);
+            Arrays.fill(this.fallback, false);
+            Arrays.fill(this.occupancySum, 0L);
+            Arrays.fill(this.seedMediumMask, 0);
+            Arrays.fill(this.quadMediumMask, 0);
+            Arrays.fill(this.provenance, 0);
+            Arrays.fill(this.seedAlbedo, 0L);
+            Arrays.fill(this.seedAlbedoWeight, 0L);
+            Arrays.fill(this.seedEmission, 0L);
+            Arrays.fill(this.seedEmissionWeight, 0L);
+            Arrays.fill(this.seedEmissionIntensity, 0L);
+            Arrays.fill(this.seedFaces, 0L);
+            Arrays.fill(this.quadAlbedo, 0L);
+            Arrays.fill(this.quadAlbedoWeight, 0L);
+            Arrays.fill(this.quadEmission, 0L);
+            Arrays.fill(this.quadEmissionWeight, 0L);
+            Arrays.fill(this.quadEmissionIntensity, 0L);
+            Arrays.fill(this.quadEmissionArea, 0L);
+            Arrays.fill(this.quadFaces, 0L);
+            this.seedMaterialContributionCount = 0;
+            this.quadMaterialContributionCount = 0;
+            this.inUse = false;
+        }
     }
 
-    private static int dominantMaterial(final Map<Long, Long> weights, final int cell) {
-        long prefix = (long) cell << 32;
-        long bestWeight = -1L;
+    private static long packMaterialContribution(
+            final int cell, final int id, final int weight
+    ) {
+        if (cell < 0 || cell >= GiSemanticSectionSnapshot.CELL_COUNT
+                || id < 0 || id >= GiSemanticPalette.DEFAULT_CAPACITY
+                || weight <= 0 || weight > GiSemanticPacking.UNORM16_MAX) {
+            throw new IllegalArgumentException("Invalid G2 material contribution");
+        }
+        return ((long) cell << 32) | ((long) id << 16) | (weight & 0xffffL);
+    }
+
+    /**
+     * Reduces packed primitive contributions in O(n log n), then walks each cell's contiguous
+     * material run exactly once. This replaces the old boxed HashMap plus one whole-map scan per
+     * content cell, which became quadratic when C0 grew from 512 to 4,096 cells.
+     */
+    private static void reduceMaterialContributions(
+            final long[] contributions, final int count, final int[] dominantMaterial
+    ) {
+        Arrays.fill(dominantMaterial, GiSemanticPalette.FALLBACK_ID);
+        Arrays.sort(contributions, 0, count);
+        int cursor = 0;
+        int activeCell = -1;
         int bestId = GiSemanticPalette.FALLBACK_ID;
-        for (Map.Entry<Long, Long> entry : weights.entrySet()) {
-            if ((entry.getKey() & 0xffff_ffff_0000_0000L) != prefix) continue;
-            int id = (int) (long) entry.getKey();
-            long weight = entry.getValue();
-            if (weight > bestWeight || weight == bestWeight && id < bestId) {
-                bestWeight = weight;
+        long bestWeight = -1L;
+        while (cursor < count) {
+            long first = contributions[cursor];
+            long key = first & 0xffff_ffff_ffff_0000L;
+            int cell = (int) (first >>> 32);
+            int id = (int) (first >>> 16) & 0xffff;
+            long totalWeight = 0L;
+            do {
+                totalWeight = Math.addExact(
+                        totalWeight, contributions[cursor] & 0xffffL
+                );
+                cursor++;
+            } while (cursor < count
+                    && (contributions[cursor] & 0xffff_ffff_ffff_0000L) == key);
+            if (cell != activeCell) {
+                if (activeCell >= 0) dominantMaterial[activeCell] = bestId;
+                activeCell = cell;
                 bestId = id;
+                bestWeight = totalWeight;
+            } else if (totalWeight > bestWeight
+                    || totalWeight == bestWeight && id < bestId) {
+                bestId = id;
+                bestWeight = totalWeight;
             }
         }
-        return bestId;
+        if (activeCell >= 0) dominantMaterial[activeCell] = bestId;
     }
 }

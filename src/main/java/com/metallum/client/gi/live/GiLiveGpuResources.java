@@ -1,5 +1,6 @@
 package com.metallum.client.gi.live;
 
+import com.metallum.client.gi.field.GiFieldLayout;
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
 import com.metallum.client.gi.semantic.GiSemanticValidity;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
@@ -27,6 +28,14 @@ public final class GiLiveGpuResources implements AutoCloseable {
 
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
+    /**
+     * Explicit opt-in for a bounded, benchmark-only asynchronous atlas probe.  The permanent
+     * G6 budget deliberately excludes this diagnostic packet: ordinary clients do not allocate
+     * it, and it never participates in the production telemetry/accounting path.
+     */
+    private static final boolean DEBUG_PROBE_ENABLED = "1".equals(
+            System.getenv("METALLUM_GI_G6_DEBUG_PROBE")
+    );
 
     /**
      * Reused render-thread telemetry view. The object identity is stable for the resource
@@ -37,6 +46,8 @@ public final class GiLiveGpuResources implements AutoCloseable {
         private int readyMask;
         private boolean buildInFlight;
         private int shaderLibraryMode;
+        private int receiverVisibleMask;
+        private int lastBindVisibleMask;
         private long worldGeneration;
         private long clipmapGeneration;
         private long contentGeneration;
@@ -71,6 +82,8 @@ public final class GiLiveGpuResources implements AutoCloseable {
 
         private void validate() {
             if ((readyMask & ~GiLiveLayout.READY_MASK_ALL) != 0
+                    || (receiverVisibleMask & ~GiLiveLayout.READY_MASK_ALL) != 0
+                    || (lastBindVisibleMask & ~GiLiveLayout.READY_MASK_ALL) != 0
                     || shaderLibraryMode < 1 || shaderLibraryMode > 2
                     || worldGeneration < 0L || clipmapGeneration < 0L
                     || contentGeneration < 0L || staticSourceEpoch < 0L
@@ -113,6 +126,8 @@ public final class GiLiveGpuResources implements AutoCloseable {
         public int readyMask() { return this.readyMask; }
         public boolean buildInFlight() { return this.buildInFlight; }
         public int shaderLibraryMode() { return this.shaderLibraryMode; }
+        public int receiverVisibleMask() { return this.receiverVisibleMask; }
+        public int lastBindVisibleMask() { return this.lastBindVisibleMask; }
         public long worldGeneration() { return this.worldGeneration; }
         public long clipmapGeneration() { return this.clipmapGeneration; }
         public long contentGeneration() { return this.contentGeneration; }
@@ -147,6 +162,132 @@ public final class GiLiveGpuResources implements AutoCloseable {
         }
     }
 
+    /** One immutable texel returned by the explicit G6 visual-probe diagnostic. */
+    public record DebugProbeSample(
+            int cascade,
+            int worldX,
+            int worldY,
+            int worldZ,
+            int localX,
+            int localY,
+            int localZ,
+            int flags,
+            float[] shCoefficients,
+            int confidence,
+            int surfaceCoverage
+    ) {
+        public DebugProbeSample {
+            if (cascade < 0 || cascade >= GiLiveLayout.CASCADE_COUNT
+                    || localX < 0 || localX >= GiLiveLayout.EDGE
+                    || localY < 0 || localY >= GiLiveLayout.EDGE
+                    || localZ < 0 || localZ >= GiLiveLayout.EDGE
+                    || shCoefficients == null || shCoefficients.length != 12
+                    || confidence < 0 || confidence > 255
+                    || surfaceCoverage < 0 || surfaceCoverage > 255) {
+                throw new IllegalArgumentException("Invalid G6 debug-probe sample");
+            }
+            shCoefficients = shCoefficients.clone();
+            for (float coefficient : shCoefficients) {
+                if (!Float.isFinite(coefficient)) {
+                    throw new IllegalArgumentException("Non-finite G6 debug-probe SH coefficient");
+                }
+            }
+        }
+
+        @Override
+        public float[] shCoefficients() {
+            return this.shCoefficients.clone();
+        }
+
+        public float shRed0() { return this.shCoefficients[0]; }
+        public float shRed1() { return this.shCoefficients[1]; }
+        public float shRed2() { return this.shCoefficients[2]; }
+        public float shRed3() { return this.shCoefficients[3]; }
+        public float shGreen0() { return this.shCoefficients[4]; }
+        public float shGreen1() { return this.shCoefficients[5]; }
+        public float shGreen2() { return this.shCoefficients[6]; }
+        public float shGreen3() { return this.shCoefficients[7]; }
+        public float shBlue0() { return this.shCoefficients[8]; }
+        public float shBlue1() { return this.shCoefficients[9]; }
+        public float shBlue2() { return this.shCoefficients[10]; }
+        public float shBlue3() { return this.shCoefficients[11]; }
+        public int coverage() { return this.surfaceCoverage; }
+    }
+
+    /**
+     * Immutable result of the one-shot diagnostic.  All identity values are copied from native's
+     * snapshot and compared with the exact live epoch before this receipt is exposed.
+     */
+    public record DebugProbeCapture(
+            long worldGeneration,
+            long clipmapGeneration,
+            long paletteGeneration,
+            long contentGeneration,
+            long staticSourceEpoch,
+            long dynamicSourceEpoch,
+            long environmentEpoch,
+            long fieldGeneration,
+            long sourceTick,
+            int[] receiverOrigins,
+            int readyMask,
+            int receiverVisibleMask,
+            int sampleValidMask,
+            DebugProbeSample[] samples
+    ) {
+        public DebugProbeCapture {
+            if (worldGeneration <= 0L || clipmapGeneration <= 0L || paletteGeneration <= 0L
+                    || contentGeneration <= 0L
+                    || staticSourceEpoch <= 0L || dynamicSourceEpoch <= 0L
+                    || environmentEpoch <= 0L || fieldGeneration <= 0L || sourceTick < 0L
+                    || receiverOrigins == null
+                    || receiverOrigins.length != GiLiveLayout.CASCADE_COUNT * 3
+                    || (readyMask & ~GiLiveLayout.READY_MASK_ALL) != 0
+                    || (receiverVisibleMask & ~GiLiveLayout.READY_MASK_ALL) != 0
+                    || (sampleValidMask & ~((1 << GiLiveDebugProbeLayout.MAX_SAMPLES) - 1)) != 0
+                    || samples == null || samples.length != GiLiveDebugProbeLayout.MAX_SAMPLES) {
+                throw new IllegalArgumentException("Invalid G6 debug-probe capture");
+            }
+            receiverOrigins = receiverOrigins.clone();
+            samples = samples.clone();
+            for (DebugProbeSample sample : samples) {
+                Objects.requireNonNull(sample, "G6 debug-probe sample");
+            }
+        }
+
+        @Override
+        public int[] receiverOrigins() {
+            return this.receiverOrigins.clone();
+        }
+
+        @Override
+        public DebugProbeSample[] samples() {
+            return this.samples.clone();
+        }
+    }
+
+    private record DebugProbeExpectation(
+            GiLiveEpoch epoch,
+            long sourceTick,
+            int readyMask,
+            int receiverMask,
+            int[] cascades,
+            int[] worldXs,
+            int[] worldYs,
+            int[] worldZs
+    ) {
+        private DebugProbeExpectation {
+            Objects.requireNonNull(epoch, "epoch");
+            if (sourceTick < 0L || readyMask != GiLiveLayout.READY_MASK_ALL
+                    || receiverMask != GiLiveLayout.READY_MASK_ALL) {
+                throw new IllegalArgumentException("Invalid expected G6 debug-probe identity");
+            }
+            cascades = requireProbeCoordinates(cascades, "cascades");
+            worldXs = requireProbeCoordinates(worldXs, "world X");
+            worldYs = requireProbeCoordinates(worldYs, "world Y");
+            worldZs = requireProbeCoordinates(worldZs, "world Z");
+        }
+    }
+
     private final Thread ownerThread;
     private final Consumer<MemorySegment> deferredRelease;
     private final Arena arena;
@@ -156,11 +297,19 @@ public final class GiLiveGpuResources implements AutoCloseable {
     private final int[] preparedValidSurfaces = new int[GiLiveLayout.CASCADE_COUNT];
     private final int[] preparedUnknownCells = new int[GiLiveLayout.CASCADE_COUNT];
     private final MemorySegment statsPacket;
+    /** Null unless the process explicitly requested the benchmark-only debug route. */
+    private final MemorySegment debugProbeRequest;
+    /** Null unless the process explicitly requested the benchmark-only debug route. */
+    private final MemorySegment debugProbeResult;
     private final Stats statsView = new Stats();
     private MemorySegment context;
     @Nullable private GiLiveEpoch activeEpoch;
     private GiLiveLayout.ResetKind activeResetKind = GiLiveLayout.ResetKind.EXPLICIT;
     private long activeSourceTick;
+    @Nullable private DebugProbeExpectation debugProbeExpectation;
+    private boolean debugProbeStarted;
+    private boolean debugProbeDelivered;
+    private int debugProbeLastStatus = GiLiveDebugProbeLayout.STATUS_REJECTED;
 
     private GiLiveGpuResources(
             final MemorySegment context,
@@ -176,6 +325,12 @@ public final class GiLiveGpuResources implements AutoCloseable {
             this.cells[slot] = arena.allocate(GiLiveLayout.CELLS_BYTES, Long.BYTES);
         }
         this.statsPacket = arena.allocate(GiLiveLayout.STATS_BYTES, Long.BYTES);
+        this.debugProbeRequest = DEBUG_PROBE_ENABLED
+                ? arena.allocate(GiLiveDebugProbeLayout.REQUEST_BYTES, Long.BYTES)
+                : MemorySegment.NULL;
+        this.debugProbeResult = DEBUG_PROBE_ENABLED
+                ? arena.allocate(GiLiveDebugProbeLayout.RESULT_BYTES, Long.BYTES)
+                : MemorySegment.NULL;
     }
 
     /** Verifies the dylib oracle word-for-word before a live context is admitted. */
@@ -237,6 +392,59 @@ public final class GiLiveGpuResources implements AutoCloseable {
         }
     }
 
+    /** Validates the separately gated diagnostic ABI without changing the production contract. */
+    private static void validateNativeDebugProbeAbi() {
+        GiLiveDebugProbeLayout.validateJavaLayouts();
+        if (MetalNativeBridge.metallum_gi_live_debug_probe_abi_version_v1()
+                != GiLiveDebugProbeLayout.ABI_VERSION) {
+            throw new IllegalStateException("Native G6 debug-probe ABI version mismatch");
+        }
+        try (Arena probe = Arena.ofConfined()) {
+            MemorySegment layout = probe.allocate(GiLiveDebugProbeLayout.LAYOUT_BYTES, Long.BYTES);
+            layout.fill((byte) 0x55);
+            int status = MetalNativeBridge.metallum_gi_live_debug_probe_layout_v1(
+                    layout, layout.byteSize()
+            );
+            if (status != GiLiveDebugProbeLayout.STATUS_OK) {
+                throw new IllegalStateException(
+                        "Native G6 debug-probe layout query failed: " + status
+                );
+            }
+            int[] expected = {
+                    GiLiveDebugProbeLayout.ABI_VERSION,
+                    GiLiveDebugProbeLayout.LAYOUT_BYTES,
+                    GiLiveDebugProbeLayout.REQUEST_BYTES,
+                    GiLiveDebugProbeLayout.RESULT_BYTES,
+                    GiLiveDebugProbeLayout.MAX_SAMPLES,
+                    GiLiveDebugProbeLayout.STATUS_OK,
+                    GiLiveDebugProbeLayout.STATUS_INVALID,
+                    GiLiveDebugProbeLayout.STATUS_BUSY,
+                    GiLiveDebugProbeLayout.STATUS_STALE,
+                    GiLiveDebugProbeLayout.STATUS_WRONG_THREAD,
+                    GiLiveDebugProbeLayout.STATUS_REJECTED,
+                    GiLiveDebugProbeLayout.READBACK_BYTES
+            };
+            for (int index = 0; index < expected.length; index++) {
+                int actual = layout.get(LE_INT, (long) index * Integer.BYTES);
+                if (actual != expected[index]) {
+                    throw new IllegalStateException(
+                            "Native G6 debug-probe layout mismatch at word " + index
+                                    + ": expected " + expected[index] + ", got " + actual
+                    );
+                }
+            }
+            for (int index = expected.length;
+                 index < GiLiveDebugProbeLayout.LAYOUT_BYTES / Integer.BYTES;
+                 index++) {
+                if (layout.get(LE_INT, (long) index * Integer.BYTES) != 0) {
+                    throw new IllegalStateException(
+                            "Native G6 debug-probe reserved layout word is non-zero: " + index
+                    );
+                }
+            }
+        }
+    }
+
     /** Precreates the live atlas/PSOs and binds it to the unforgeable G3 owner. */
     public static @Nullable GiLiveGpuResources create(
             final MemorySegment device,
@@ -251,6 +459,9 @@ public final class GiLiveGpuResources implements AutoCloseable {
             return null;
         }
         validateNativeAbi();
+        if (DEBUG_PROBE_ENABLED) {
+            validateNativeDebugProbeAbi();
+        }
         MemorySegment context = liveOwner.createContext(device, commandQueue);
         if (MetalNativeBridge.isNullHandle(context)) {
             return null;
@@ -382,8 +593,9 @@ public final class GiLiveGpuResources implements AutoCloseable {
     }
 
     /**
-     * Admits at most eight receiver bricks. The full semantic cascade is copied only once for
-     * this field generation; later batches reuse the preallocated cascade packet.
+     * Admits one bounded receiver-brick batch. The full semantic cascade is copied once into its
+     * persistent Java packet for this field generation. Native re-stages that packet whenever
+     * the single cap-bounded Metal staging buffer changes cascade ownership.
      */
     public int encodeBricks(
             final MemorySegment commandBuffer,
@@ -536,6 +748,120 @@ public final class GiLiveGpuResources implements AutoCloseable {
         return queryStats();
     }
 
+    /**
+     * Begins the exactly-once benchmark probe after the complete current field is receiver
+     * visible.  The request and response packets are persistent arena allocations; no render
+     * submission waits for the blit or performs a CPU readback.
+     */
+    public int beginDebugProbe(
+            final int[] cascades,
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        assertUsable();
+        if (this.debugProbeRequest.equals(MemorySegment.NULL)) {
+            return GiLiveDebugProbeLayout.STATUS_REJECTED;
+        }
+        if (this.debugProbeStarted || this.debugProbeDelivered) {
+            return GiLiveDebugProbeLayout.STATUS_REJECTED;
+        }
+        validateProbeInput(cascades, worldXs, worldYs, worldZs);
+        GiLiveEpoch epoch = this.activeEpoch;
+        Stats stats = queryStats();
+        if (epoch == null || !statsMatchesDebugProbeEpoch(stats, epoch, this.activeSourceTick)
+                || !stats.allCascadesReady()
+                || stats.receiverVisibleMask() != GiLiveLayout.READY_MASK_ALL) {
+            return GiLiveDebugProbeLayout.STATUS_STALE;
+        }
+        this.debugProbeRequest.fill((byte) 0);
+        this.debugProbeRequest.set(
+                LE_INT, GiLiveDebugProbeLayout.REQUEST_ABI_VERSION_OFFSET,
+                GiLiveDebugProbeLayout.ABI_VERSION
+        );
+        this.debugProbeRequest.set(
+                LE_INT, GiLiveDebugProbeLayout.REQUEST_SAMPLE_COUNT_OFFSET,
+                GiLiveDebugProbeLayout.MAX_SAMPLES
+        );
+        for (int index = 0; index < GiLiveDebugProbeLayout.MAX_SAMPLES; index++) {
+            long offset = GiLiveDebugProbeLayout.requestSampleOffset(index);
+            this.debugProbeRequest.set(
+                    LE_INT, offset + GiLiveDebugProbeLayout.REQUEST_SAMPLE_CASCADE_OFFSET,
+                    cascades[index]
+            );
+            this.debugProbeRequest.set(
+                    LE_INT, offset + GiLiveDebugProbeLayout.REQUEST_SAMPLE_WORLD_X_OFFSET,
+                    worldXs[index]
+            );
+            this.debugProbeRequest.set(
+                    LE_INT, offset + GiLiveDebugProbeLayout.REQUEST_SAMPLE_WORLD_Y_OFFSET,
+                    worldYs[index]
+            );
+            this.debugProbeRequest.set(
+                    LE_INT, offset + GiLiveDebugProbeLayout.REQUEST_SAMPLE_WORLD_Z_OFFSET,
+                    worldZs[index]
+            );
+        }
+        int status = MetalNativeBridge.metallum_gi_live_begin_debug_probe_v1(
+                this.context, this.debugProbeRequest
+        );
+        this.debugProbeLastStatus = status;
+        if (status == GiLiveDebugProbeLayout.STATUS_OK) {
+            this.debugProbeExpectation = new DebugProbeExpectation(
+                    epoch, this.activeSourceTick, stats.readyMask(), stats.receiverVisibleMask(),
+                    cascades, worldXs, worldYs, worldZs
+            );
+            this.debugProbeStarted = true;
+        }
+        return status;
+    }
+
+    /**
+     * Polls the one-shot native blit without waiting.  A capture is exposed only if its echoed
+     * epoch, source tick, origins, masks and requested world coordinates still exactly match the
+     * request-time live receiver state.
+     */
+    public @Nullable DebugProbeCapture pollDebugProbe() {
+        assertUsable();
+        if (this.debugProbeResult.equals(MemorySegment.NULL) || !this.debugProbeStarted
+                || this.debugProbeDelivered || this.debugProbeExpectation == null) {
+            return null;
+        }
+        this.debugProbeResult.fill((byte) 0);
+        int status = MetalNativeBridge.metallum_gi_live_poll_debug_probe_v1(
+                this.context, this.debugProbeResult
+        );
+        this.debugProbeLastStatus = status;
+        if (status == GiLiveDebugProbeLayout.STATUS_BUSY) {
+            return null;
+        }
+        DebugProbeExpectation expectation = this.debugProbeExpectation;
+        if (status == GiLiveDebugProbeLayout.STATUS_STALE) {
+            // A movement/source successor won the race with the optional diagnostic blit.
+            // It is not a production failure: clear this one-shot ownership and let the
+            // benchmark re-prove a current receiver tuple before issuing its bounded retry.
+            this.debugProbeStarted = false;
+            this.debugProbeExpectation = null;
+            return null;
+        }
+        this.debugProbeDelivered = true;
+        this.debugProbeExpectation = null;
+        if (status != GiLiveDebugProbeLayout.STATUS_OK) {
+            throw new IllegalStateException("G6 debug-probe poll failed: " + status);
+        }
+        try {
+            return decodeDebugProbeCapture(this.debugProbeResult, expectation);
+        } catch (IllegalArgumentException invalid) {
+            throw new IllegalStateException("G6 debug-probe receipt failed exact validation", invalid);
+        }
+    }
+
+    /** Most recent begin/poll status for the benchmark's bounded STALE retry only. */
+    public int debugProbeLastStatus() {
+        assertUsable();
+        return this.debugProbeLastStatus;
+    }
+
     private Stats queryStats() {
         this.statsPacket.fill((byte) 0);
         int status = MetalNativeBridge.metallum_gi_live_get_stats_v1(
@@ -679,8 +1005,7 @@ public final class GiLiveGpuResources implements AutoCloseable {
     static Stats decodeStats(final MemorySegment packet, final Stats target) {
         Objects.requireNonNull(packet, "packet");
         Objects.requireNonNull(target, "target");
-        if (packet.byteSize() < GiLiveLayout.STATS_BYTES
-                || packet.get(LE_INT, GiLiveLayout.STATS_PADDING_0_OFFSET) != 0) {
+        if (packet.byteSize() < GiLiveLayout.STATS_BYTES) {
             throw new IllegalArgumentException("Invalid G6 native stats packet");
         }
         int inFlight = packet.get(LE_INT, GiLiveLayout.STATS_BUILD_IN_FLIGHT_OFFSET);
@@ -692,6 +1017,15 @@ public final class GiLiveGpuResources implements AutoCloseable {
         target.shaderLibraryMode = packet.get(
                 LE_INT, GiLiveLayout.STATS_SHADER_LIBRARY_MODE_OFFSET
         );
+        int receiverMaskState = packet.get(
+                LE_INT, GiLiveLayout.STATS_RECEIVER_MASK_STATE_OFFSET
+        );
+        if ((receiverMaskState & ~GiLiveLayout.STATS_RECEIVER_MASK_STATE_KNOWN_BITS) != 0) {
+            throw new IllegalArgumentException("Invalid G6 receiver mask state");
+        }
+        target.receiverVisibleMask = receiverMaskState & GiLiveLayout.READY_MASK_ALL;
+        target.lastBindVisibleMask = receiverMaskState
+                >>> GiLiveLayout.STATS_LAST_BIND_VISIBLE_MASK_SHIFT;
         target.worldGeneration = packet.get(LE_LONG, GiLiveLayout.STATS_WORLD_GENERATION_OFFSET);
         target.clipmapGeneration = packet.get(
                 LE_LONG, GiLiveLayout.STATS_CLIPMAP_GENERATION_OFFSET
@@ -873,6 +1207,191 @@ public final class GiLiveGpuResources implements AutoCloseable {
                 );
             }
         }
+    }
+
+    private static void validateProbeInput(
+            final int[] cascades,
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        requireProbeCoordinateLength(cascades, "cascades");
+        requireProbeCoordinateLength(worldXs, "world X");
+        requireProbeCoordinateLength(worldYs, "world Y");
+        requireProbeCoordinateLength(worldZs, "world Z");
+        for (int cascade : cascades) {
+            if (cascade < 0 || cascade >= GiLiveLayout.CASCADE_COUNT) {
+                throw new IllegalArgumentException("G6 debug-probe cascade is outside topology");
+            }
+        }
+    }
+
+    private static int[] requireProbeCoordinates(final int[] values, final String label) {
+        requireProbeCoordinateLength(values, label);
+        return values.clone();
+    }
+
+    private static void requireProbeCoordinateLength(final int[] values, final String label) {
+        if (values == null || values.length != GiLiveDebugProbeLayout.MAX_SAMPLES) {
+            throw new IllegalArgumentException(
+                    "G6 debug-probe " + label + " must contain exactly "
+                            + GiLiveDebugProbeLayout.MAX_SAMPLES + " samples"
+            );
+        }
+    }
+
+    private static boolean statsMatchesDebugProbeEpoch(
+            final Stats stats,
+            final GiLiveEpoch epoch,
+            final long sourceTick
+    ) {
+        return sourceTick >= 0L
+                && stats.worldGeneration() == epoch.worldGeneration()
+                && stats.clipmapGeneration() == epoch.clipmapGeneration()
+                && stats.contentGeneration() == epoch.contentGeneration()
+                && stats.staticSourceEpoch() == epoch.staticSourceEpoch()
+                && stats.dynamicSourceEpoch() == epoch.dynamicSourceEpoch()
+                && stats.environmentEpoch() == epoch.environmentEpoch()
+                && stats.fieldGeneration() == epoch.version()
+                && stats.sourceTick() == sourceTick;
+    }
+
+    private static DebugProbeCapture decodeDebugProbeCapture(
+            final MemorySegment packet,
+            final DebugProbeExpectation expected
+    ) {
+        if (packet.byteSize() != GiLiveDebugProbeLayout.RESULT_BYTES
+                || packet.get(LE_INT, GiLiveDebugProbeLayout.RESULT_ABI_VERSION_OFFSET)
+                != GiLiveDebugProbeLayout.ABI_VERSION
+                || packet.get(LE_INT, GiLiveDebugProbeLayout.RESULT_SAMPLE_COUNT_OFFSET)
+                != GiLiveDebugProbeLayout.MAX_SAMPLES) {
+            throw new IllegalArgumentException("Invalid G6 debug-probe result header");
+        }
+        long worldGeneration = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_WORLD_GENERATION_OFFSET
+        );
+        long clipmapGeneration = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_CLIPMAP_GENERATION_OFFSET
+        );
+        long paletteGeneration = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_PALETTE_GENERATION_OFFSET
+        );
+        long contentGeneration = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_CONTENT_GENERATION_OFFSET
+        );
+        long staticSourceEpoch = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_STATIC_SOURCE_EPOCH_OFFSET
+        );
+        long dynamicSourceEpoch = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_DYNAMIC_SOURCE_EPOCH_OFFSET
+        );
+        long environmentEpoch = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_ENVIRONMENT_EPOCH_OFFSET
+        );
+        long fieldGeneration = packet.get(
+                LE_LONG, GiLiveDebugProbeLayout.RESULT_FIELD_GENERATION_OFFSET
+        );
+        long sourceTick = packet.get(LE_LONG, GiLiveDebugProbeLayout.RESULT_SOURCE_TICK_OFFSET);
+        int readyMask = packet.get(LE_INT, GiLiveDebugProbeLayout.RESULT_READY_MASK_OFFSET);
+        int receiverMask = packet.get(LE_INT, GiLiveDebugProbeLayout.RESULT_RECEIVER_MASK_OFFSET);
+        int validMask = packet.get(LE_INT, GiLiveDebugProbeLayout.RESULT_SAMPLE_VALID_MASK_OFFSET);
+        GiLiveEpoch epoch = expected.epoch();
+        if (worldGeneration != epoch.worldGeneration()
+                || clipmapGeneration != epoch.clipmapGeneration()
+                || paletteGeneration != epoch.paletteGeneration()
+                || contentGeneration != epoch.contentGeneration()
+                || staticSourceEpoch != epoch.staticSourceEpoch()
+                || dynamicSourceEpoch != epoch.dynamicSourceEpoch()
+                || environmentEpoch != epoch.environmentEpoch()
+                || fieldGeneration != epoch.version()
+                || sourceTick != expected.sourceTick()
+                || readyMask != expected.readyMask()
+                || receiverMask != expected.receiverMask()
+                || validMask != (1 << GiLiveDebugProbeLayout.MAX_SAMPLES) - 1) {
+            throw new IllegalArgumentException("Stale or incomplete G6 debug-probe result");
+        }
+        int[] origins = new int[GiLiveLayout.CASCADE_COUNT * 3];
+        for (int index = 0; index < origins.length; index++) {
+            origins[index] = packet.get(
+                    LE_INT,
+                    GiLiveDebugProbeLayout.RESULT_RECEIVER_ORIGINS_OFFSET
+                            + (long) index * Integer.BYTES
+            );
+            GiLiveEpoch.Origin expectedOrigin = epoch.origin(index / 3);
+            int expectedComponent = switch (index % 3) {
+                case 0 -> expectedOrigin.x();
+                case 1 -> expectedOrigin.y();
+                default -> expectedOrigin.z();
+            };
+            if (origins[index] != expectedComponent) {
+                throw new IllegalArgumentException("G6 debug-probe receiver origin drifted");
+            }
+        }
+        DebugProbeSample[] samples = new DebugProbeSample[GiLiveDebugProbeLayout.MAX_SAMPLES];
+        for (int index = 0; index < samples.length; index++) {
+            long offset = GiLiveDebugProbeLayout.resultSampleOffset(index);
+            int cascade = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_CASCADE_OFFSET
+            );
+            int worldX = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_WORLD_X_OFFSET
+            );
+            int worldY = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_WORLD_Y_OFFSET
+            );
+            int worldZ = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_WORLD_Z_OFFSET
+            );
+            if (cascade != expected.cascades()[index]
+                    || worldX != expected.worldXs()[index]
+                    || worldY != expected.worldYs()[index]
+                    || worldZ != expected.worldZs()[index]) {
+                throw new IllegalArgumentException("G6 debug-probe sample identity drifted");
+            }
+            int localX = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_LOCAL_X_OFFSET
+            );
+            int localY = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_LOCAL_Y_OFFSET
+            );
+            int localZ = packet.get(
+                    LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_LOCAL_Z_OFFSET
+            );
+            GiLiveEpoch.Origin origin = epoch.origin(cascade);
+            int cellSize = GiFieldLayout.cellSizeBlocks(cascade);
+            if (localX != Math.floorDiv(worldX - origin.x(), cellSize)
+                    || localY != Math.floorDiv(worldY - origin.y(), cellSize)
+                    || localZ != Math.floorDiv(worldZ - origin.z(), cellSize)) {
+                throw new IllegalArgumentException("G6 debug-probe local coordinate drifted");
+            }
+            float[] sh = new float[12];
+            for (int coefficient = 0; coefficient < sh.length; coefficient++) {
+                sh[coefficient] = packet.get(
+                        LE_FLOAT,
+                        offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_SH_COEFFICIENTS_OFFSET
+                                + (long) coefficient * Float.BYTES
+                );
+            }
+            samples[index] = new DebugProbeSample(
+                    cascade, worldX, worldY, worldZ, localX, localY, localZ,
+                    packet.get(LE_INT, offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_FLAGS_OFFSET),
+                    sh,
+                    Byte.toUnsignedInt(packet.get(
+                            ValueLayout.JAVA_BYTE,
+                            offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_CONFIDENCE_OFFSET
+                    )),
+                    Byte.toUnsignedInt(packet.get(
+                            ValueLayout.JAVA_BYTE,
+                            offset + GiLiveDebugProbeLayout.RESULT_SAMPLE_SURFACE_COVERAGE_OFFSET
+                    ))
+            );
+        }
+        return new DebugProbeCapture(
+                worldGeneration, clipmapGeneration, paletteGeneration, contentGeneration,
+                staticSourceEpoch,
+                dynamicSourceEpoch, environmentEpoch, fieldGeneration, sourceTick,
+                origins, readyMask, receiverMask, validMask, samples
+        );
     }
 
     private record CellCounts(int validSurfaces, int unknown) {

@@ -29,6 +29,8 @@ public final class GiLiveReceiverShaderPatcher {
     private static final String FRAGMENT_INPUT_ANCHOR = "in float metallumSkyVisibility;";
     private static final String AMBIENT_ANCHOR =
             "    vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));";
+    private static final String MAX_SPARSE_RECIPROCAL = "8.0";
+    private static final String INWARD_SURFACE_EPSILON = "0.0009765625";
 
     private GiLiveReceiverShaderPatcher() {
     }
@@ -45,6 +47,24 @@ public final class GiLiveReceiverShaderPatcher {
 
     public static boolean isPatched(final String source) {
         return source != null && source.contains(MARKER);
+    }
+
+    /** CPU reference for the generated outer-to-inner reliability handoff. */
+    static float combineCascadeSample(
+            final float coarser,
+            final boolean coarserValid,
+            final float inner,
+            final boolean innerValid,
+            final float spatialFade,
+            final float knownSupport
+    ) {
+        if (!innerValid) return coarserValid ? coarser : 0.0F;
+        if (!coarserValid) return inner;
+        if (!Float.isFinite(spatialFade) || !Float.isFinite(knownSupport)) return coarser;
+        float fade = Math.clamp(spatialFade, 0.0F, 1.0F);
+        float support = Math.clamp(knownSupport, 0.0F, 1.0F);
+        float weight = fade * support;
+        return Math.fma(inner - coarser, weight, coarser);
     }
 
     private static Result patchVertex(final String source) {
@@ -91,10 +111,8 @@ public final class GiLiveReceiverShaderPatcher {
                         + "                if (metallumGiConfidence > 0.0) {\n"
                         + "                    vec3 metallumGiIncomingAmbient = max("
                         + GiReceiverBindingAbi.VARYING + ".rgb, vec3(0.0));\n"
-                        + "                    diffuse = metallumGiFallbackAmbient"
-                        + " * (1.0 - metallumGiConfidence)\n"
-                        + "                            + metallumGiIncomingAmbient"
-                        + " * metallumGiConfidence;\n"
+                        + "                    diffuse = metallumGiFallbackAmbient\n"
+                        + "                            + metallumGiIncomingAmbient;\n"
                         + "                }";
         patched = replaceExactlyOnce(patched, AMBIENT_ANCHOR, composition);
         if (patched == null) {
@@ -185,6 +203,9 @@ public final class GiLiveReceiverShaderPatcher {
                     float metallumGiCascadeFade0 = 0.0;
                     float metallumGiCascadeFade1 = 0.0;
                     float metallumGiCascadeFade2 = 0.0;
+                    float metallumGiKnownSupport0 = 0.0;
+                    float metallumGiKnownSupport1 = 0.0;
+                    float metallumGiKnownSupport2 = 0.0;
                 %4$s
                     %5$s = vec4(0.0);
                     vec4 metallumGiBlended = vec4(0.0);
@@ -196,13 +217,15 @@ public final class GiLiveReceiverShaderPatcher {
                     if (metallumGiCascadeValid1) {
                         metallumGiBlended = metallumGiBlendedValid
                                 ? mix(metallumGiBlended, metallumGiCascadeValue1,
-                                metallumGiCascadeFade1) : metallumGiCascadeValue1;
+                                metallumGiCascadeFade1 * metallumGiKnownSupport1)
+                                : metallumGiCascadeValue1;
                         metallumGiBlendedValid = true;
                     }
                     if (metallumGiCascadeValid0) {
                         metallumGiBlended = metallumGiBlendedValid
                                 ? mix(metallumGiBlended, metallumGiCascadeValue0,
-                                metallumGiCascadeFade0) : metallumGiCascadeValue0;
+                                metallumGiCascadeFade0 * metallumGiKnownSupport0)
+                                : metallumGiCascadeValue0;
                         metallumGiBlendedValid = true;
                     }
                     if (metallumGiBlendedValid) {
@@ -224,7 +247,11 @@ public final class GiLiveReceiverShaderPatcher {
                     if (metallumGiContractReady
                             && (%1$s.receiverState.x & (1u << %2$d)) != 0u
                             && metallumGiFaceCode != 0u) {
-                        vec3 metallumGiLocal%2$d = (metallumGiWorldPosition
+                        // Move only across the known face plane. This resolves the exact
+                        // normal-axis tie without inventing tangent ownership metadata.
+                        vec3 metallumGiSurfacePosition%2$d = metallumGiWorldPosition
+                                - metallumGiFaceNormal * %7$s;
+                        vec3 metallumGiLocal%2$d = (metallumGiSurfacePosition%2$d
                                 - vec3(%1$s.cascadeOrigins[%2$d].xyz))
                                 * %1$s.cascadeScaleAndCellSize[%2$d].xyz;
                         bool metallumGiInside%2$d = all(greaterThanEqual(
@@ -288,8 +315,10 @@ public final class GiLiveReceiverShaderPatcher {
                                     %4$s, metallumGiSampleUvw%2$d, 0.0);
                             vec4 metallumGiShBlueValue%2$d = textureLod(
                                     %5$s, metallumGiSampleUvw%2$d, 0.0);
-                            float metallumGiConfidence%2$d = textureLod(
-                                    %6$s, metallumGiSampleUvw%2$d, 0.0).r;
+                            vec2 metallumGiConfidenceCoverage%2$d = textureLod(
+                                    %6$s, metallumGiSampleUvw%2$d, 0.0).rg;
+                            float metallumGiSurfaceCoverage%2$d =
+                                    metallumGiConfidenceCoverage%2$d.g;
                             bool metallumGiFinite%2$d =
                                     !any(isnan(metallumGiShRedValue%2$d))
                                     && !any(isinf(metallumGiShRedValue%2$d))
@@ -297,8 +326,20 @@ public final class GiLiveReceiverShaderPatcher {
                                     && !any(isinf(metallumGiShGreenValue%2$d))
                                     && !any(isnan(metallumGiShBlueValue%2$d))
                                     && !any(isinf(metallumGiShBlueValue%2$d))
-                                    && !isnan(metallumGiConfidence%2$d)
-                                    && !isinf(metallumGiConfidence%2$d);
+                                    && !any(isnan(metallumGiConfidenceCoverage%2$d))
+                                    && !any(isinf(metallumGiConfidenceCoverage%2$d));
+                            bool metallumGiCoverageValid%2$d = metallumGiFinite%2$d
+                                    && metallumGiSurfaceCoverage%2$d > 0.0
+                                    && metallumGiSurfaceCoverage%2$d <= 1.0;
+                            float metallumGiSparseScale%2$d =
+                                    metallumGiCoverageValid%2$d
+                                    ? min(1.0 / metallumGiSurfaceCoverage%2$d, %8$s) : 0.0;
+                            metallumGiShRedValue%2$d *= metallumGiSparseScale%2$d;
+                            metallumGiShGreenValue%2$d *= metallumGiSparseScale%2$d;
+                            metallumGiShBlueValue%2$d *= metallumGiSparseScale%2$d;
+                            metallumGiKnownSupport%2$d = metallumGiCoverageValid%2$d
+                                    ? clamp(metallumGiConfidenceCoverage%2$d.r
+                                    * metallumGiSparseScale%2$d, 0.0, 1.0) : 0.0;
                             vec3 metallumGiIrradiance%2$d = vec3(
                                     metallumGiShRedValue%2$d.x + dot(
                                     metallumGiShRedValue%2$d.yzw, metallumGiFaceNormal),
@@ -306,9 +347,9 @@ public final class GiLiveReceiverShaderPatcher {
                                     metallumGiShGreenValue%2$d.yzw, metallumGiFaceNormal),
                                     metallumGiShBlueValue%2$d.x + dot(
                                     metallumGiShBlueValue%2$d.yzw, metallumGiFaceNormal));
-                            metallumGiCascadeValue%2$d = metallumGiFinite%2$d
+                            metallumGiCascadeValue%2$d = metallumGiCoverageValid%2$d
                                     ? vec4(max(metallumGiIrradiance%2$d, vec3(0.0)),
-                                    clamp(metallumGiConfidence%2$d, 0.0, 1.0))
+                                    metallumGiKnownSupport%2$d)
                                     : vec4(0.0);
                             float metallumGiEdge%2$d = min(min(
                                     metallumGiLocal%2$d.x, 1.0 - metallumGiLocal%2$d.x),
@@ -319,7 +360,11 @@ public final class GiLiveReceiverShaderPatcher {
                             metallumGiCascadeFade%2$d = smoothstep(
                                     0.0, float(%1$s.atlasState.y) / 32.0,
                                     metallumGiEdge%2$d);
-                            metallumGiCascadeValid%2$d = true;
+                            // A sampleable brick is only a read-safety proof. An invalid/unknown
+                            // near cell legitimately stores zero confidence and must not mask a
+                            // valid coarser cascade while the player moves or a scroll converges.
+                            metallumGiCascadeValid%2$d =
+                                    metallumGiKnownSupport%2$d > 0.0;
                             }
                         }
                     }
@@ -329,7 +374,9 @@ public final class GiLiveReceiverShaderPatcher {
                     GiReceiverBindingAbi.SH_RED_SAMPLER,
                     GiReceiverBindingAbi.SH_GREEN_SAMPLER,
                     GiReceiverBindingAbi.SH_BLUE_SAMPLER,
-                    GiReceiverBindingAbi.CONFIDENCE_SAMPLER
+                    GiReceiverBindingAbi.CONFIDENCE_SAMPLER,
+                    INWARD_SURFACE_EPSILON,
+                    MAX_SPARSE_RECIPROCAL
             ));
         }
         return source.toString().stripTrailing();
@@ -357,13 +404,32 @@ public final class GiLiveReceiverShaderPatcher {
                     || !source.contains("sampleableBrickMasks[3]")
                     || !source.contains("receiverState.x & (1u << 2)")
                     || !source.contains("mix(metallumGiBlended, metallumGiCascadeValue0")
+                    || !source.contains("metallumGiCascadeFade0 * metallumGiKnownSupport0")
+                    || !source.contains("metallumGiCascadeFade1 * metallumGiKnownSupport1")
+                    || !source.contains("metallumGiCascadeValid0 =")
+                    || !source.contains("metallumGiKnownSupport0 > 0.0")
+                    || !source.contains("metallumGiCascadeValid1 =")
+                    || !source.contains("metallumGiKnownSupport1 > 0.0")
+                    || !source.contains("metallumGiCascadeValid2 =")
+                    || !source.contains("metallumGiKnownSupport2 > 0.0")
+                    || countOccurrences(source, "metallumGiConfidenceCoverage") < 9
+                    || countOccurrences(source, ".rg;") < 3
+                    || countOccurrences(source, "metallumGiSurfaceCoverage") < 12
+                    || countOccurrences(source, "min(1.0 / metallumGiSurfaceCoverage") != 3
+                    || countOccurrences(source, ", " + MAX_SPARSE_RECIPROCAL + ")") < 3
+                    || countOccurrences(source, "metallumGiSparseScale") < 15
+                    || countOccurrences(source, "- metallumGiFaceNormal * "
+                    + INWARD_SURFACE_EPSILON) != 3
                     || !source.contains("((a_Position.x >> 30u) & 3u)")) {
                 return new Result(source, false, "G6 vertex receiver structure is incomplete");
             }
         } else if (countOccurrences(source,
                 "in vec4 " + GiReceiverBindingAbi.VARYING + ";") != 1
                 || source.contains("sampler3D " + GiReceiverBindingAbi.SH_RED_SAMPLER)
-                || !source.contains("vec3 diffuse = metallumGiFallbackAmbient;")) {
+                || !source.contains("vec3 diffuse = metallumGiFallbackAmbient;")
+                || !source.contains("diffuse = metallumGiFallbackAmbient")
+                || !source.contains("+ metallumGiIncomingAmbient;")
+                || source.contains("metallumGiIncomingAmbient * metallumGiConfidence")) {
             return new Result(source, false, "G6 fragment receiver structure is incomplete");
         }
         return new Result(source, true, "none");

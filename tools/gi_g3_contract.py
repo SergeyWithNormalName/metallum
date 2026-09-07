@@ -113,7 +113,7 @@ def verify_runtime(root: Path, evidence: dict[str, Any]) -> None:
         active_gi = active_payload["global_illumination"]
         populated = active_gi["dirty_completed_total"] - previous["dirty_completed_total"]
         if populated != active_stage["frames"] * tier["maximum_observed_bricks_per_active_frame"]:
-            raise ContractError("G3 active work is not capped at eight dirty bricks per frame")
+            raise ContractError("G3 active work does not match its declared dirty-brick cap")
 
     if summary_path is not None:
         summary = strict_object(summary_path)
@@ -152,7 +152,7 @@ def verify_source(root: Path) -> None:
     for token in (
             "CASCADE_COUNT = GiFieldLayout.CASCADE_COUNT",
             "CELLS_PER_AXIS = GiFieldLayout.CELLS_PER_AXIS", "BRICK_EDGE_CELLS = 8",
-            "MAX_DRAIN_PER_FRAME = 8", "MAX_STATIC_SOURCES_PER_BRICK = 16",
+            "MAX_DRAIN_PER_FRAME = 16", "MAX_STATIC_SOURCES_PER_BRICK = 16",
     ):
         if token not in layout:
             raise ContractError(f"G3 fixed topology token is missing: {token}")
@@ -176,7 +176,8 @@ def verify_source(root: Path) -> None:
             raise ContractError(f"G3 camera-independent static epoch is missing: {token}")
     for token in (
             "RGBA16_FLOAT = 115", "R8_UINT = 13", "HEADER_BYTES = 160",
-            "STATS_BYTES = 168", "captureSliceOnce", "deferredRelease.accept",
+            "STATS_BYTES = 168", "JAVA_PERSISTENT_PACKET_BYTES", "captureSliceOnce",
+            "deferredRelease.accept",
     ):
         if token not in resources:
             raise ContractError(f"G3 Java/native resource contract is missing: {token}")
@@ -190,7 +191,8 @@ def verify_source(root: Path) -> None:
         raise ContractError("G3 active telemetry or GI_INJECT attribution is missing")
     for token in (
             ".rgba16Float", ".r8Uint", "descriptor.storageMode = .private",
-            "MetallumGiDirectSourceContextV1", "memoryBarrier(scope: .textures)",
+            "MetallumGiDirectSourceContextV1", "maxDirtyBricks = 16",
+            "memoryBarrier(scope: .textures)",
             "metallum_gi_direct_source_publish_scheduler_v1",
     ):
         if token not in native:
@@ -291,7 +293,7 @@ def verify(root: Path) -> None:
         raise ContractError("G3 mechanical verification contains a non-PASS result")
     verify_source(root)
     verify_runtime(root, evidence)
-    print("GI G3 direct-source/evidence/field-only contract passed")
+    print("GI G3 current source contract and retained historical B8 receipt passed")
 
 
 def main() -> None:

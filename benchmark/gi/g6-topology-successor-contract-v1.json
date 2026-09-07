@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "gi-g6-topology-successor-contract-v1",
+  "stage": "G6_TOPOLOGY_SUCCESSOR",
+  "status": "IMPLEMENTED_PENDING_RUNTIME_EVIDENCE",
+  "decision": "HISTORICAL_RECEIPTS_RETAINED_NEW_TOPOLOGY_UNATTESTED",
+  "historical_evidence_sha256": {
+    "benchmark/gi/g0-acceptance-v1.json": "27bfb9f8e7c2546e8afbafa41110f4e118c2b6fc738c7af2f21db9ad56234130",
+    "benchmark/gi/g1-field-evidence-v1.json": "cde2718bcce613c14672df592c08a4d0ce36d1708906d2c9d1b3de17aad3e0df",
+    "benchmark/gi/g2-semantic-evidence-v1.json": "0fdd0a3f0b621c721e84022d3ebf38864ccfd5611a9f681d88fcaf6aa50ff163",
+    "benchmark/gi/g3-direct-source-evidence-v1.json": "8e0e3036819d39af1c866f194a7cd2a67a14c15dda49651246cc87b3c6752987",
+    "benchmark/gi/g4-transport-evidence-v1.json": "bcb38af01b658f6e3fe923ab56218a2bf4515f49d07705c4eaf9cd8f8d354ae3",
+    "benchmark/gi/g6-live-evidence-v1.json": "3806951a140ce0e7496c9e0adc3853c26f067ef694f1ff7e9827149bf8643f31"
+  },
+  "runtime_source_sha256": {
+    "src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java": "f75a0b304d079b14fdf594acf5c77db09ef864c8ab1530b038ae16a40d85447f",
+    "src/main/java/com/metallum/client/gi/capture/GiSemanticCaptureScope.java": "5fc06d8e7269fbe63ea71c5593842d647853d8cc348bba153c1eefb20a0a5871",
+    "src/main/java/com/metallum/client/gi/semantic/GiSemanticSectionBuilder.java": "b66ff9fc428272079ef9a81677a772b232e6841ce5de4ca2866d4ee63a7272a2",
+    "src/main/java/com/metallum/client/gi/semantic/GiSemanticSectionReservation.java": "b6777613cddf20bbd0b48865cf107619880ba7bcad0ac5362a64597030970aab",
+    "src/main/java/com/metallum/client/gi/semantic/GiSemanticSectionSnapshot.java": "cac0885a421d4a1f918313e907e88e84bc8dc306693c458cd983463561f8b26a",
+    "src/test/java/com/metallum/client/gi/field/GiFieldTests.java": "f0055ab035f47ae6ef22cafc4718d1e9da6f4e0036316f53bc587373ef4faedc",
+    "src/test/java/com/metallum/client/gi/field/GiSemanticGpuEncoderTests.java": "9c546e890bc0f28da22cf0633c352838dd25263ae99bcfd3a1c30b3b60c83955",
+    "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java": "57a5bf13b1bb6196515ea07c13b9f3c3411134c482d623015b3119373e11d6f7",
+    "src/test/java/com/metallum/client/gi/source/GiDynamicSourceInjectionTests.java": "8b8536d8702109249c59c6b289b1a20894eae25436aa18a5acbced42b212c469"
+  },
+  "topology": {
+    "cascade_count": 3,
+    "cells_per_axis": 32,
+    "cell_sizes_blocks": [1, 4, 8],
+    "origin_snap_blocks": [2, 4, 8],
+    "near_span_blocks": 32
+  },
+  "transport": {
+    "maximum_distance_cells": 8,
+    "form_quadrature": "projected_solid_angle_l1_half_cosine",
+    "axis_bin_solid_angle": 0.8054316831613232,
+    "edge_bin_solid_angle": 0.48157053442524556,
+    "corner_bin_solid_angle": 0.24436676278603597,
+    "form_weight_normalization": 5.463719420620535,
+    "confidence_weight_normalization": 29.17999846648958
+  },
+  "evidence_boundary": {
+    "historical_receipts_reused_as_current": false,
+    "current_topology_has_live_matrix_receipt": false,
+    "required_before_acceptance": [
+      "source_and_bundled_metal_validation",
+      "fresh_g6_live_receipt",
+      "fresh_g6_matrix_receipt",
+      "fresh_static_visual_pair"
+    ]
+  }
+}

@@ -140,7 +140,7 @@ for token in \
     'G6 final census must follow MEASURE_END' \
     'G6 final census must precede COMPLETE' \
     'phase=TORCH_ON measured_frame=400' \
-    'G6 torch-on screenshot marker is outside the confirmed torch epoch' \
+    'torch-on screenshot marker is outside the confirmed torch epoch' \
     'matrix_event_count' \
     'G6 matrix must emit exactly 22 event receipts' \
     'G6 orbit changed field generation or latency-class samples' \
@@ -209,7 +209,7 @@ from pathlib import Path
 import sys
 
 runner = Path(sys.argv[1]).read_text(encoding="utf-8")
-start = runner.index('if [ "$GI_LIVE" -eq 1 ]; then\n'
+start = runner.index('elif [ "$GI_LIVE" -eq 1 ]; then\n'
                      '    [ "$GI_G2_CAPTURE_ENV" -eq 0 ]')
 end = runner.index('elif [ "$GI_G5_RECEIVER_ENV" -eq 1 ]; then', start)
 g6_profile = runner[start:end]
@@ -270,7 +270,8 @@ PY
 for token in \
     'GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.INVALID' \
     'G6_TORCH_ON_SCREENSHOT_MEASURED_FRAME = 400' \
-    '&& GiLiveRuntime.isRequested()' \
+    '&& this.route.torchEpoch() != null' \
+    '&& this.route.torchEpoch() == null' \
     '!this.torchEpochAppliedLogged || this.torchEpochRemovalRequested' \
     'phase=TORCH_ON measured_frame={}' \
     'GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();' \
@@ -304,12 +305,13 @@ for token in \
 done
 
 for token in \
-    'GI_G6_MATRIX;' \
+    $'GI_G6_MATRIX,\n        GI_VISUAL_PROBE;' \
     'G6_MATRIX_RECEIPT_ALL = (1 << 9) - 1' \
     'G6_MATRIX_RELOAD_RECOVERY_GAP_FRAMES = 270' \
     'G6_MATRIX_STATIC_RECOVERY_GAP_FRAMES = 200' \
     'G6_MATRIX_TELEPORT_STABILIZATION_TIMEOUT_FRAMES = 260' \
     'G6_MATRIX_DIMENSION_STABILIZATION_TIMEOUT_FRAMES = 470' \
+    'G6_MATRIX_PRE_ACTION_CLEAN_TIMEOUT_FRAMES = 64' \
     'G6_MATRIX_TELEPORT_RECOVERY_GAP_FRAMES = 260' \
     'G6_MATRIX_RESET_RECOVERY_GAP_FRAMES = 190' \
     'G6_MATRIX_DIMENSION_RECOVERY_GAP_FRAMES = 470' \
@@ -382,7 +384,7 @@ nether_enter = controller.index(
     '} else if (frame == config.netherEnterFrame()) {', teleport_return
 )
 nether_return_driver = controller.index(
-    '} else if (frame == config.netherReturnFrame()) {', nether_enter
+    '} else if (frame >= config.netherReturnFrame()', nether_enter
 )
 driver_end = controller.index(
     '    private GiLiveRuntime.FinalSnapshot requireCleanG6MatrixSnapshot(',
@@ -396,13 +398,69 @@ if teleport_out_body.count('requireNearReadyG6MatrixSnapshot(') != 1 \
     )
 for action, body in (
         ("TELEPORT_RETURN", controller[teleport_return:nether_enter]),
-        ("NETHER_ENTER", controller[nether_enter:nether_return_driver]),
-        ("NETHER_RETURN", controller[nether_return_driver:driver_end])):
+        ("NETHER_ENTER", controller[nether_enter:nether_return_driver])):
     if body.count('requireCleanG6MatrixSnapshot(') != 1 \
             or 'requireNearReadyG6MatrixSnapshot(' in body:
         raise SystemExit(
             f"GI G6 runner contract FAILED: {action} accepted a near-only field"
         )
+nether_return_body = controller[nether_return_driver:driver_end]
+for token in (
+        '(this.g6MatrixReceiptMask & G6_MATRIX_RECEIPT_NETHER) == 0',
+        'this.g6MatrixAwaitingClientAction == null',
+        'this.g6MatrixAwaitingRecovery == null',
+        'g6MatrixPreActionCleanWaitExpired(frame, requestedFrame)',
+        'GiLiveRuntime.FinalSnapshot snapshot = cleanG6MatrixSnapshotOrNull();',
+        'EVENT=GI_G6_MATRIX_PRE_ACTION_WAIT',
+        'status=WAITING',
+        'waited_frames={}',
+        'G6MatrixServerAction.NETHER_RETURN, requestedFrame, snapshot'):
+    if token not in nether_return_body:
+        raise SystemExit(
+            f"GI G6 runner contract FAILED: NETHER_RETURN bounded clean wait lost {token!r}"
+        )
+if 'requireNearReadyG6MatrixSnapshot(' in nether_return_body \
+        or 'G6MatrixServerAction.NETHER_RETURN, frame, snapshot' in nether_return_body:
+    raise SystemExit(
+        "GI G6 runner contract FAILED: NETHER_RETURN accepted near-only state or shifted requested_frame"
+    )
+clean_gate = controller.index(
+    'private GiLiveRuntime.FinalSnapshot cleanG6MatrixSnapshotOrNull()'
+)
+clean_gate_end = controller.index(
+    'static boolean g6MatrixPreActionCleanWaitExpired(', clean_gate
+)
+clean_gate_body = controller[clean_gate:clean_gate_end]
+for token in (
+        'GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY',
+        '!GiLiveRuntime.finalReceiptIsCurrent(snapshot, GiLiveRuntime.deviceGeneration())',
+        'snapshot.readyMask() != 7',
+        'snapshot.buildInFlight()',
+        'snapshot.staleRejects() != 0L',
+        'snapshot.rejectedCount() != 0L'):
+    if token not in clean_gate_body:
+        raise SystemExit(
+            f"GI G6 runner contract FAILED: deferred full-field gate lost {token!r}"
+        )
+recovery_begin = controller.index(
+    'private void beginG6MatrixRecovery(\n'
+    '            final String action,\n'
+    '            final int requestedFrame,\n'
+    '            final GiLiveRuntime.FinalSnapshot baseline,\n'
+    '            final int latencyClass,\n'
+    '            final int receiptBit,\n'
+    '            final boolean actionVisible,\n'
+    '            final int stabilizationTimeoutFrames'
+)
+recovery_begin_end = controller.index(
+    'private void beginG6MatrixTerrainRecovery(', recovery_begin
+)
+recovery_begin_body = controller[recovery_begin:recovery_begin_end]
+if ('this.g6MatrixRecoveryRequestedFrame = requestedFrame;' not in recovery_begin_body
+        or 'requestedFrame, stabilizationTimeoutFrames' not in recovery_begin_body):
+    raise SystemExit(
+        "GI G6 runner contract FAILED: recovery deadline is no longer request-anchored"
+    )
 near_gate = controller.index(
     'private GiLiveRuntime.FinalSnapshot requireNearReadyG6MatrixSnapshot('
 )

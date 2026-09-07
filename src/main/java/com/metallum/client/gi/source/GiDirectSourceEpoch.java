@@ -60,4 +60,24 @@ public record GiDirectSourceEpoch(
                 && (this.g2ContentGeneration > previous.g2ContentGeneration
                 || this.staticLightRegistryEpoch > previous.staticLightRegistryEpoch);
     }
+
+    /**
+     * A live G2 publication that changes only per-brick content may rebase queued G3 work.
+     * Every structural/source identity remains exact; the newer immutable field is still used
+     * when each retained brick is eventually prepared.
+     */
+    boolean isLiveInputSuccessorOf(final GiDirectSourceEpoch previous) {
+        Objects.requireNonNull(previous, "previous");
+        return this.g2WorldGeneration == previous.g2WorldGeneration
+                && this.g2ResourceEpoch == previous.g2ResourceEpoch
+                && this.g2MaterialEpoch == previous.g2MaterialEpoch
+                && this.g2ClipmapGeneration == previous.g2ClipmapGeneration
+                && this.g2PaletteGeneration == previous.g2PaletteGeneration
+                && this.staticLightWorld.equals(previous.staticLightWorld)
+                && this.environmentEpoch == previous.environmentEpoch
+                && this.g2ContentGeneration >= previous.g2ContentGeneration
+                && this.staticLightRegistryEpoch >= previous.staticLightRegistryEpoch
+                && (this.g2ContentGeneration > previous.g2ContentGeneration
+                || this.staticLightRegistryEpoch > previous.staticLightRegistryEpoch);
+    }
 }

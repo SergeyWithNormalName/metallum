@@ -22,6 +22,9 @@ public final class GiSemanticCpuTests {
         coordinatesAreFloorCorrect();
         paletteIsVersionedDeterministicAndBounded();
         reducerIsOrderIndependentAndUsesAggregateMaterialWeight();
+        workerWorkspaceReuseDoesNotAliasPublishedSnapshots();
+        builderRejectsUnboundedObservationRetention();
+        blockScaleNearCellsDoNotMergeFloorAndAir();
         acceptedQuadOverridesSeedMediumAndMaterial();
         unknownQuadMaterialFailsClosed();
         controllerGatesReloadAndRetiresCandidateLeases();
@@ -129,6 +132,88 @@ public final class GiSemanticCpuTests {
                 "six-direction quad weights changed");
         require(forward.validity()[cell] == (byte) GiSemanticValidity.KNOWN_CONTENT.abiId(),
                 "complete cloned state did not produce known content");
+    }
+
+    private static void workerWorkspaceReuseDoesNotAliasPublishedSnapshots() {
+        GiSemanticPalette palette = palette(1L, 1L, 1L);
+        GiSemanticSectionSeed firstSeed = GiSemanticSectionSeed.acceptedEmptyBuilder()
+                .set(GiSemanticStateSeed.content(
+                        0, MATERIAL_A, 1.0F, GiSemanticPacking.FACE_POS_Y,
+                        GiSemanticProvenance.MATERIAL_DERIVED
+                )).build();
+        GiSemanticSectionSnapshot first = build(palette, firstSeed, List.of(
+                observation(MATERIAL_A, GiSemanticPacking.FACE_POS_Y, 100,
+                        1.0F, 0.0F, 0.0F)
+        ));
+        String firstDigest = first.digest();
+        int cell = GiSemanticSectionSnapshot.cascadeCellIndex(0, 0, 0, 0);
+        int firstRed = Short.toUnsignedInt(first.albedoRgb()[cell * 3]);
+
+        GiSemanticSectionSeed secondSeed = GiSemanticSectionSeed.acceptedEmptyBuilder()
+                .set(GiSemanticStateSeed.content(
+                        0, MATERIAL_B, 1.0F, GiSemanticPacking.FACE_POS_Y,
+                        GiSemanticProvenance.MATERIAL_DERIVED
+                )).build();
+        GiSemanticSectionSnapshot second = build(palette, secondSeed, List.of(
+                observation(MATERIAL_B, GiSemanticPacking.FACE_POS_Y, 100,
+                        0.0F, 0.0F, 1.0F)
+        ));
+
+        require(first.digest().equals(firstDigest)
+                        && Short.toUnsignedInt(first.dominantMaterialIds()[cell])
+                        == palette.idFor(MATERIAL_A)
+                        && Short.toUnsignedInt(first.albedoRgb()[cell * 3]) == firstRed,
+                "reused G2 worker workspace mutated a published snapshot");
+        require(Short.toUnsignedInt(second.dominantMaterialIds()[cell])
+                        == palette.idFor(MATERIAL_B),
+                "reused G2 worker workspace retained the preceding material reduction");
+    }
+
+    private static void builderRejectsUnboundedObservationRetention() {
+        GiSemanticSectionBuilder builder = new GiSemanticSectionBuilder(
+                palette(1L, 1L, 1L), GiSemanticSectionSeed.acceptedEmptyBuilder().build()
+        );
+        GiSemanticQuadObservation repeated = observation(
+                MATERIAL_A, GiSemanticPacking.FACE_POS_Y, 1,
+                1.0F, 0.0F, 0.0F
+        );
+        for (int index = 0; index < GiSemanticSectionBuilder.MAX_OBSERVATIONS; index++) {
+            builder.observe(repeated);
+        }
+        try {
+            builder.observe(repeated);
+        } catch (IllegalStateException expected) {
+            return;
+        }
+        throw new AssertionError("G2 builder retained observations beyond its fixed bound");
+    }
+
+    private static void blockScaleNearCellsDoNotMergeFloorAndAir() {
+        GiSemanticPalette palette = palette(1L, 1L, 1L);
+        GiSemanticSectionSeed section = GiSemanticSectionSeed.acceptedEmptyBuilder()
+                .set(GiSemanticStateSeed.content(
+                        0, MATERIAL_A, 1.0F, GiSemanticPacking.FACE_POS_Y,
+                        GiSemanticProvenance.MATERIAL_DERIVED
+                )).build();
+        GiSemanticSectionSnapshot snapshot = build(palette, section, List.of());
+        int floor = GiSemanticSectionSnapshot.cascadeCellIndex(0, 0, 0, 0);
+        int airAbove = GiSemanticSectionSnapshot.cascadeCellIndex(0, 0, 1, 0);
+        int adjacentAir = GiSemanticSectionSnapshot.cascadeCellIndex(0, 1, 0, 0);
+        require(snapshot.validity()[floor]
+                        == (byte) GiSemanticValidity.KNOWN_CONTENT.abiId()
+                        && snapshot.validity()[airAbove]
+                        == (byte) GiSemanticValidity.KNOWN_EMPTY.abiId()
+                        && snapshot.validity()[adjacentAir]
+                        == (byte) GiSemanticValidity.KNOWN_EMPTY.abiId(),
+                "G2 C0 merged a one-block surface with adjacent air into a false solid volume");
+        require(GiSemanticSectionSnapshot.CASCADE_CELL_EDGES[0] == 16
+                        && GiSemanticSectionSnapshot.CELL_COUNT == 4_168
+                        && GiSemanticSectionSnapshot.PAYLOAD_BYTES == 112_536L,
+                "G2 block-scale section topology/accounting differs");
+        require(GiFieldCandidateBudget.DEFAULT_MAX_BYTES >= Math.multiplyExact(
+                        (long) GiFieldCandidateBudget.DEFAULT_MAX_CANDIDATES,
+                        GiSemanticSectionSnapshot.PAYLOAD_BYTES
+                ), "G2 default candidate byte cap cannot admit its declared concurrency");
     }
 
     private static void unknownQuadMaterialFailsClosed() {
@@ -352,7 +437,9 @@ public final class GiSemanticCpuTests {
         require(controller.updateCamera(world, -1, -1, -1), "second camera +2 did not advance snapped origin");
         GiSemanticFieldSnapshot after = requireNonNull(controller.fieldSnapshot(world), "field missing after scroll");
         int retained = after.cellIndexForWorld(0, -2, -2, -2);
-        int exposed = after.cellIndexForWorld(0, 29, -2, -2);
+        // C0 is 32 one-block cells and its 2-block origin snap scrolls two cells at once.
+        // After the second +2 m snap the newly exposed positive-x slab is [12, 14).
+        int exposed = after.cellIndexForWorld(0, 12, -2, -2);
         require(retained >= 0 && after.validity(retained) == GiSemanticValidity.KNOWN_EMPTY,
                 "camera scroll discarded overlapping negative-coordinate truth");
         require(exposed >= 0 && after.validity(exposed) == GiSemanticValidity.UNKNOWN,

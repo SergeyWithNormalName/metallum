@@ -51,9 +51,10 @@ for token in \
     'requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 ' \
     'state=READY arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND' \
     'phase=WARMUP presented_frame=[0-9]+ resources=5 bindings=5 ' \
+    'g4_accounted_bytes=22917480 ' \
     'carrier_skips=0 g5_carrier_writes=[1-9][0-9]* ' \
     'drawn_g5_carrier_slices=[1-9][0-9]* status=PASS vertex_only=true ' \
-    'g5_combined_accounted_bytes=$((22637928 + g5_allocated_bytes))' \
+    'g5_combined_accounted_bytes=$((22917480 + g5_allocated_bytes))' \
     'METALLUM_BENCHMARK EVENT=GI_G5_FINAL state=READY carrier_skips=0 g5_carrier_writes=[1-9][0-9]* drawn_g5_carrier_slices=[1-9][0-9]* status=PASS' \
     'grep -Ec "${g5_final}$"' \
     'grep -nE "${g5_final}$"' \

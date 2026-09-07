@@ -148,7 +148,7 @@ public final class MetalDevice implements GpuDeviceBackend {
      * reactive ring on the render thread at every resolution transition.
      */
     private static final int TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY = 2;
-    private static final long GI_G4_ACCOUNTED_BYTES = 22_637_928L;
+    private static final long GI_G4_ACCOUNTED_BYTES = 22_917_480L;
     private static final long GI_TOTAL_BUDGET_BYTES = 25_165_824L;
 
     private record RendererGenerationKey(
@@ -1188,6 +1188,74 @@ public final class MetalDevice implements GpuDeviceBackend {
     public String giLiveDebugSummary() {
         GiLiveCoordinator live = this.giLiveCoordinator;
         return live == null ? "g6_coordinator=null" : live.debugSummary();
+    }
+
+    /**
+     * Starts the seven-texel G6 benchmark probe.  It is intentionally unavailable outside the
+     * benchmark process and delegates current epoch/source/origin ownership to the live
+     * coordinator; callers provide only fixed world-space sample locations.
+     */
+    public int beginGiLiveDebugProbe(
+            final int[] cascades,
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiLiveLayout.STATUS_REJECTED;
+        }
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? GiLiveLayout.STATUS_REJECTED
+                : live.beginDebugProbe(cascades, worldXs, worldYs, worldZs);
+    }
+
+    /** Polls the benchmark probe only; returns {@code null} while native's blit is pending. */
+    public GiLiveGpuResources.@Nullable DebugProbeCapture pollGiLiveDebugProbe() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return null;
+        }
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? null : live.pollDebugProbe();
+    }
+
+    /** Status companion for a bounded benchmark retry after an optional probe became stale. */
+    public int giLiveDebugProbeLastStatus() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiLiveLayout.STATUS_REJECTED;
+        }
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? GiLiveLayout.STATUS_REJECTED : live.debugProbeLastStatus();
+    }
+
+    /** Starts a benchmark-only G3 C0 point probe; it never waits for GPU completion. */
+    public int beginGiDirectDebugProbe(
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiDirectSourceGpuResources.STATUS_REJECTED;
+        }
+        GiDirectSourceCoordinator direct = this.giDirectSourceCoordinator;
+        return direct == null ? GiDirectSourceGpuResources.STATUS_REJECTED
+                : direct.beginDebugProbe(worldXs, worldYs, worldZs);
+    }
+
+    public GiDirectSourceGpuResources.@Nullable DebugProbeCapture pollGiDirectDebugProbe() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return null;
+        }
+        GiDirectSourceCoordinator direct = this.giDirectSourceCoordinator;
+        return direct == null ? null : direct.pollDebugProbe();
+    }
+
+    public int giDirectDebugProbeLastStatus() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiDirectSourceGpuResources.STATUS_REJECTED;
+        }
+        GiDirectSourceCoordinator direct = this.giDirectSourceCoordinator;
+        return direct == null ? GiDirectSourceGpuResources.STATUS_REJECTED
+                : direct.debugProbeLastStatus();
     }
 
     long currentSubmitIndex() {
@@ -3554,6 +3622,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 latestCarrierSafe,
                 latestFrameCompatible,
                 stats.readyMask(),
+                proofMatches ? stats.lastBindVisibleMask() : 0,
                 stats.fieldGeneration(),
                 stats.sourceTick()
         );

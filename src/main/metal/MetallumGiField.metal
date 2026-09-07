@@ -273,9 +273,13 @@ inline bool metallum_gi_direct_visible_to_source(
         int3 position = start + int3(round(normalize(delta) * float(step)));
         if (all(position == previous)) continue;
         previous = position;
-        if (!metallum_gi_direct_inside(position) || metallum_gi_direct_occludes(geometry, position)) {
-            return false;
-        }
+        if (!metallum_gi_direct_inside(position)) return false;
+        // ceil(distance) bounds the loop, but component-wise round() can reach a diagonal
+        // endpoint one iteration early. The endpoint is the emissive CONTENT cell itself, not
+        // an intervening occluder; treating it as geometry made common diagonal point lights
+        // disappear from the direct field and therefore from the one-bounce transport.
+        if (all(position == source)) return true;
+        if (metallum_gi_direct_occludes(geometry, position)) return false;
     }
     return metallum_gi_direct_inside(source);
 }
@@ -371,7 +375,7 @@ kernel void metallum_gi_direct_inject_v1(
         energy += max(header.skyRgbAndEnabled.rgb, float3(0.0f)) * header.skyRgbAndEnabled.w;
     }
 
-    const int cellSize = brick.cascade == 0u ? 2 : (brick.cascade == 1u ? 4 : 8);
+    const int cellSize = brick.cascade == 0u ? 1 : (brick.cascade == 1u ? 4 : 8);
     // Source coordinates are relative to this cascade origin.  The producer
     // duplicates the bounded source list per brick/cascade, avoiding loss of
     // block precision at large absolute Minecraft world coordinates.

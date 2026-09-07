@@ -289,8 +289,8 @@ public final class GiReceiverCpuTests {
                         && GiReceiverLayout.PARAM_ABI_VERSION_OFFSET == 44,
                 "G5 parameter packet order differs from Swift");
         require(GiReceiverLayout.EDGE == 32
-                        && GiReceiverLayout.CELL_SIZE_BLOCKS == 2
-                        && GiReceiverLayout.SPAN_BLOCKS == 64,
+                        && GiReceiverLayout.CELL_SIZE_BLOCKS == 1
+                        && GiReceiverLayout.SPAN_BLOCKS == 32,
                 "G5 receiver no longer addresses the frozen G4 near cascade");
         GiReceiverBindingAbi.requireLegal();
     }
@@ -322,10 +322,10 @@ public final class GiReceiverCpuTests {
                 -64.0F, 20.0F, 128.0F, -64, 20, 128
         );
         GiReceiverMath.TextureCoordinate last = GiReceiverMath.worldToTexture(
-                -0.001F, 83.999F, 191.999F, -64, 20, 128
+                -32.001F, 51.999F, 159.999F, -64, 20, 128
         );
         GiReceiverMath.TextureCoordinate outside = GiReceiverMath.worldToTexture(
-                0.0F, 84.0F, 192.0F, -64, 20, 128
+                -32.0F, 52.0F, 160.0F, -64, 20, 128
         );
         require(origin.inside() && origin.u() == 0.0F
                         && last.inside() && last.u() < 1.0F
@@ -343,10 +343,29 @@ public final class GiReceiverCpuTests {
         GiReceiverMath.Vec3 physical = GiReceiverMath.replaceApproximateAmbient(
                 fallback, albedo, incoming, 1.0F
         );
-        require(close(physical.x(), 1.0F * GiReceiverLayout.INVERSE_PI)
-                        && close(physical.y(), 1.0F * GiReceiverLayout.INVERSE_PI)
-                        && close(physical.z(), 0.5F * GiReceiverLayout.INVERSE_PI),
-                "G5 receiver albedo/pi was not applied exactly once");
+        require(close(physical.x(), fallback.x() + 1.0F * GiReceiverLayout.INVERSE_PI)
+                        && close(physical.y(), fallback.y() + 1.0F * GiReceiverLayout.INVERSE_PI)
+                        && close(physical.z(), fallback.z() + 0.5F * GiReceiverLayout.INVERSE_PI),
+                "G5 receiver did not add the physical correction with albedo/pi exactly once");
+        require(GiReceiverMath.replaceApproximateAmbient(
+                        fallback, albedo, incoming, 0.25F).equals(physical),
+                "G5 incorrectly used known-path confidence as a second energy weight");
+        require(GiReceiverMath.replaceApproximateAmbient(
+                        fallback, albedo, new GiReceiverMath.Vec3(0.0F, 0.0F, 0.0F), 1.0F)
+                        .equals(fallback),
+                "Known occlusion darkened the exact ambient fallback");
+        GiReceiverMath.Vec3 redOnly = GiReceiverMath.replaceApproximateAmbient(
+                fallback,
+                new GiReceiverMath.Vec3(1.0F, 1.0F, 1.0F),
+                new GiReceiverMath.Vec3(2.0F, 0.0F, 0.0F),
+                1.0F
+        );
+        require(redOnly.x() > fallback.x()
+                        && close(redOnly.y(), fallback.y())
+                        && close(redOnly.z(), fallback.z()),
+                "Red one-bounce transport invented green or blue ambient energy");
+        require(close(redOnly.x(), fallback.x() + 2.0F * GiReceiverLayout.INVERSE_PI),
+                "Red one-bounce transport was attenuated or gained in the receiver composition");
     }
 
     private static boolean close(final float actual, final float expected) {

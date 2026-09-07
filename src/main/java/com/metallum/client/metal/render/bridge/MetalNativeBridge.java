@@ -487,6 +487,16 @@ public final class MetalNativeBridge {
                     "metallum_gi_direct_source_abi_version_v1",
                     FunctionDescriptor.of(INT)
             );
+            giDirectDebugProbeAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_debug_probe_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giDirectDebugProbeLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_debug_probe_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
             giDirectSourceLayoutV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_layout_v1",
@@ -529,6 +539,16 @@ public final class MetalNativeBridge {
                             INT, ValueLayout.ADDRESS, INT, INT,
                             ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG
                     )
+            );
+            giDirectBeginDebugProbeV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_begin_debug_probe_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giDirectPollDebugProbeV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_poll_debug_probe_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
             );
             giDirectSourceGetStatsV1 = downcallWithoutCritical(
                     lookup,
@@ -633,6 +653,16 @@ public final class MetalNativeBridge {
                     "metallum_gi_live_abi_version_v1",
                     FunctionDescriptor.of(INT)
             );
+            giLiveDebugProbeAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_debug_probe_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giLiveDebugProbeLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_debug_probe_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
             giLiveLayoutV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_live_layout_v1",
@@ -662,6 +692,16 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT,
                             ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG
                     )
+            );
+            giLiveBeginDebugProbeV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_begin_debug_probe_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giLivePollDebugProbeV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_poll_debug_probe_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
             );
             giLiveBindVertexV1 = downcallWithoutCritical(
                     lookup,
@@ -1295,6 +1335,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle giSemanticGetStatsV1;
     private static final MethodHandle giSemanticReleaseContextV1;
     private static final MethodHandle giDirectSourceAbiVersionV1;
+    private static final MethodHandle giDirectDebugProbeAbiVersionV1;
+    private static final MethodHandle giDirectDebugProbeLayoutV1;
     private static final MethodHandle giDirectSourceLayoutV1;
     private static final MethodHandle giDirectSourceCreateContextV1;
     private static final MethodHandle giDirectSourceEncodeDirtyV1;
@@ -1302,6 +1344,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle giDirectSourceRelabelV1;
     private static final MethodHandle giDirectSourceResetV1;
     private static final MethodHandle giDirectSourceCaptureSliceOnceV1;
+    private static final MethodHandle giDirectBeginDebugProbeV1;
+    private static final MethodHandle giDirectPollDebugProbeV1;
     private static final MethodHandle giDirectSourceGetStatsV1;
     private static final MethodHandle giDirectSourcePublishSchedulerV1;
     private static final MethodHandle giDirectSourceReleaseContextV1;
@@ -1318,10 +1362,14 @@ public final class MetalNativeBridge {
     private static final MethodHandle giTransportPollDebugCaptureV1;
     private static final MethodHandle giTransportReleaseContextV1;
     private static final MethodHandle giLiveAbiVersionV1;
+    private static final MethodHandle giLiveDebugProbeAbiVersionV1;
+    private static final MethodHandle giLiveDebugProbeLayoutV1;
     private static final MethodHandle giLiveLayoutV1;
     private static final MethodHandle giLiveCreateContextV1;
     private static final MethodHandle giLiveInvalidateV1;
     private static final MethodHandle giLiveEncodeCascadeV1;
+    private static final MethodHandle giLiveBeginDebugProbeV1;
+    private static final MethodHandle giLivePollDebugProbeV1;
     private static final MethodHandle giLiveBindVertexV1;
     private static final MethodHandle giLiveGetStatsV1;
     private static final MethodHandle giLiveReleaseContextV1;
@@ -2352,6 +2400,54 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static int metallum_gi_direct_debug_probe_abi_version_v1() {
+        try {
+            return (int) giDirectDebugProbeAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_debug_probe_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_debug_probe_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        requireDestinationBounds(destination, destinationBytes, "G3 debug probe layout");
+        try {
+            return (int) giDirectDebugProbeLayoutV1.invokeExact(
+                    segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_debug_probe_layout_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_begin_debug_probe_v1(
+            final MemorySegment context,
+            final MemorySegment request
+    ) {
+        try {
+            return (int) giDirectBeginDebugProbeV1.invokeExact(
+                    segment(context), segment(request), request.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_begin_debug_probe_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_poll_debug_probe_v1(
+            final MemorySegment context,
+            final MemorySegment result
+    ) {
+        try {
+            return (int) giDirectPollDebugProbeV1.invokeExact(
+                    segment(context), segment(result), result.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_poll_debug_probe_v1", throwable);
+        }
+    }
+
     public static int metallum_gi_direct_source_get_stats_v1(
             final MemorySegment context,
             final MemorySegment destination,
@@ -2560,6 +2656,28 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static int metallum_gi_live_debug_probe_abi_version_v1() {
+        try {
+            return (int) giLiveDebugProbeAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_debug_probe_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_debug_probe_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        requireDestinationBounds(destination, destinationBytes, "G6 debug probe layout");
+        try {
+            return (int) giLiveDebugProbeLayoutV1.invokeExact(
+                    segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_debug_probe_layout_v1", throwable);
+        }
+    }
+
     public static int metallum_gi_live_layout_v1(
             final MemorySegment destination,
             final long destinationBytes
@@ -2615,6 +2733,32 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_live_encode_cascade_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_begin_debug_probe_v1(
+            final MemorySegment context,
+            final MemorySegment request
+    ) {
+        try {
+            return (int) giLiveBeginDebugProbeV1.invokeExact(
+                    segment(context), segment(request), request.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_begin_debug_probe_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_poll_debug_probe_v1(
+            final MemorySegment context,
+            final MemorySegment result
+    ) {
+        try {
+            return (int) giLivePollDebugProbeV1.invokeExact(
+                    segment(context), segment(result), result.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_poll_debug_probe_v1", throwable);
         }
     }
 

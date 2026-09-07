@@ -157,7 +157,7 @@ public final class GiSemanticFieldGpuResources implements AutoCloseable {
                 CAPTURE_REQUEST_BYTES, CAPTURE_INFO_BYTES,
                 GiSemanticGpuSnapshot.CASCADE_COUNT, GiSemanticGpuSnapshot.EDGE,
                 GiSemanticGpuSnapshot.MIP_COUNT,
-                2, 4, 8,
+                1, 4, 8,
                 8, 8, 4, 2, 4, 2, 1,
                 SEMANTIC_VERSION,
                 STATUS_STALE, STATUS_BUSY, STATUS_CAPTURE_CONSUMED, STATUS_WRONG_THREAD,

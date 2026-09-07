@@ -1,6 +1,7 @@
 package com.metallum.client.gi.live;
 
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
+import com.metallum.client.gi.transport.GiTransportLayout;
 
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.StructLayout;
@@ -11,7 +12,7 @@ import static java.lang.foreign.MemoryLayout.PathElement.groupElement;
 
 /** Exact Java/Swift ABI and fixed topology for the G6 three-cascade live field. */
 public final class GiLiveLayout {
-    public static final int ABI_VERSION = 1;
+    public static final int ABI_VERSION = 2;
     public static final int LAYOUT_BYTES = 160;
     public static final int LAYOUT_WORDS = LAYOUT_BYTES / Integer.BYTES;
     public static final int HEADER_BYTES = 192;
@@ -26,9 +27,13 @@ public final class GiLiveLayout {
     public static final int ATLAS_DEPTH = EDGE * CASCADE_COUNT;
     public static final int IN_FLIGHT_SLOTS = 3;
     public static final int READY_MASK_ALL = (1 << CASCADE_COUNT) - 1;
+    public static final int STATS_LAST_BIND_VISIBLE_MASK_SHIFT = 8;
+    public static final int STATS_RECEIVER_MASK_STATE_KNOWN_BITS = READY_MASK_ALL
+            | (READY_MASK_ALL << STATS_LAST_BIND_VISIBLE_MASK_SHIFT);
     public static final int ITERATION_COUNT = 1;
     public static final int MAXIMUM_DISTANCE = 8;
-    public static final float FORM_WEIGHT_NORMALIZATION = (float) 29.17999846648958;
+    public static final float FORM_WEIGHT_NORMALIZATION =
+            (float) GiTransportLayout.FORM_WEIGHT_NORMALIZATION;
     public static final float FP16_ABSOLUTE_TOLERANCE = 1.0F / 1_024.0F;
     public static final float FP16_RELATIVE_TOLERANCE = 1.0F / 512.0F;
     public static final int FLAGS_NONE = 0;
@@ -50,7 +55,12 @@ public final class GiLiveLayout {
     public static final int BRICKS_PER_AXIS = EDGE / BRICK_EDGE;
     public static final int BRICKS_PER_CASCADE = BRICKS_PER_AXIS
             * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
-    public static final int MAX_BRICKS_PER_SUBMIT = 8;
+    /**
+     * Bounds one serialized live-transport dispatch. Sixteen closes a 32-brick exposed scroll
+     * slab in two asynchronous completions while leaving ample headroom below the 64-bit
+     * brick-mask topology.
+     */
+    public static final int MAX_BRICKS_PER_SUBMIT = 16;
     public static final long ALL_BRICKS_MASK = -1L;
 
     public static final int SH_RED_TEXTURE_SLOT = 6;
@@ -172,7 +182,7 @@ public final class GiLiveLayout {
 
     public static final StructLayout STATS_LAYOUT = MemoryLayout.structLayout(
             LE_INT.withName("readyMask"), LE_INT.withName("buildInFlight"),
-            LE_INT.withName("shaderLibraryMode"), LE_INT.withName("padding0"),
+            LE_INT.withName("shaderLibraryMode"), LE_INT.withName("receiverMaskState"),
             LE_LONG.withName("worldGeneration"),
             LE_LONG.withName("clipmapGeneration"),
             LE_LONG.withName("contentGeneration"),
@@ -195,7 +205,7 @@ public final class GiLiveLayout {
     public static final int STATS_READY_MASK_OFFSET = 0;
     public static final int STATS_BUILD_IN_FLIGHT_OFFSET = 4;
     public static final int STATS_SHADER_LIBRARY_MODE_OFFSET = 8;
-    public static final int STATS_PADDING_0_OFFSET = 12;
+    public static final int STATS_RECEIVER_MASK_STATE_OFFSET = 12;
     public static final int STATS_WORLD_GENERATION_OFFSET = 16;
     public static final int STATS_CLIPMAP_GENERATION_OFFSET = 24;
     public static final int STATS_CONTENT_GENERATION_OFFSET = 32;
@@ -256,6 +266,8 @@ public final class GiLiveLayout {
         requireOffset(HEADER_LAYOUT, "resetKind", HEADER_RESET_KIND_OFFSET);
         requireOffset(HEADER_LAYOUT, "reserved1", HEADER_RESERVED_1_OFFSET);
         requireOffset(STATS_LAYOUT, "worldGeneration", STATS_WORLD_GENERATION_OFFSET);
+        requireOffset(STATS_LAYOUT, "receiverMaskState",
+                STATS_RECEIVER_MASK_STATE_OFFSET);
         requireOffset(STATS_LAYOUT, "transportDispatches", STATS_TRANSPORT_DISPATCHES_OFFSET);
         requireOffset(STATS_LAYOUT, "resetWorld", STATS_RESET_WORLD_OFFSET);
         requireOffset(STATS_LAYOUT, "resetDevice", STATS_RESET_DEVICE_OFFSET);

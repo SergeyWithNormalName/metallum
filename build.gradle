@@ -1636,12 +1636,14 @@ tasks.register("giG4TransportContractTest", Exec) {
 	description = "Validates G4 frozen one-bounce evidence, energy/resource gates and field-only scope"
 	inputs.file("tools/gi_g4_contract.py")
 	inputs.file("benchmark/gi/g4-transport-evidence-v1.json")
+	inputs.file("benchmark/gi/g6-topology-successor-contract-v1.json")
 	inputs.files(
 		"benchmark/routes/gi-g4-overworld-v1.json",
 		"build.gradle",
 		"docs/GI_G4.md",
 		"scripts/run_metal_benchmark.sh",
 		"tools/gi_g3_contract.py",
+		"tools/gi_g6_topology_successor_contract.py",
 		"tools/gi_release_contract_guard.sh",
 		"tools/metal_benchmark_report.py",
 		"tools/test_gi_g4_runner_contract.sh",
@@ -1787,6 +1789,20 @@ tasks.register("giG6RunnerContractTest", Exec) {
 	commandLine "bash", "tools/test_gi_g6_runner_contract.sh"
 }
 
+tasks.register("giVisualProbeRunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates the isolated non-attested GI ON/OFF visual-probe route and capture wiring"
+	inputs.files(
+		"benchmark/routes/hdrtest-gi-visual-probe-v1.json",
+		"docs/GI_VISUAL_PROBE.md",
+		"scripts/run_metal_benchmark.sh",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"tools/metal_benchmark_fixture.py",
+		"tools/test_gi_visual_probe_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_visual_probe_runner_contract.sh"
+}
+
 tasks.register("giG6EvidenceContractTest", Exec) {
 	group = "verification"
 	description = "Verifies the immutable source-bound G6 live, matrix and static-capture evidence"
@@ -1803,6 +1819,31 @@ tasks.register("giG6EvidenceContractTest", Exec) {
 	)
 	inputs.dir("benchmark/gi/evidence/gi-g6-live-2026-08-30-v1")
 	commandLine "python3", "tools/gi_g6_evidence_contract.py", "--root", "."
+}
+
+tasks.register("giG6TopologySuccessorContractTest", Exec) {
+	group = "verification"
+	description = "Separates block-scale C0 successor topology from immutable G0-G6 evidence"
+	inputs.files(
+		"benchmark/gi/g6-topology-successor-contract-v1.json",
+		"benchmark/gi/g0-acceptance-v1.json",
+		"benchmark/gi/g1-field-evidence-v1.json",
+		"benchmark/gi/g2-semantic-evidence-v1.json",
+		"benchmark/gi/g3-direct-source-evidence-v1.json",
+		"benchmark/gi/g4-transport-evidence-v1.json",
+		"benchmark/gi/g6-live-evidence-v1.json",
+		"tools/gi_g6_topology_successor_contract.py",
+		"src/main/java/com/metallum/client/gi/field/GiFieldLayout.java",
+		"src/main/java/com/metallum/client/gi/source/GiDirectSourceLayout.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportLayout.java",
+		"src/main/java/com/metallum/client/gi/live/GiLiveLayout.java",
+		"src/main/java/com/metallum/client/gi/live/GiLiveGpuResources.java",
+		"src/main/metal/MetallumGiTransport.metal",
+		"src/main/native/MetallumNative.swift",
+		"src/test/java/com/metallum/client/gi/field/GiFieldTests.java",
+		"src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java"
+	)
+	commandLine "python3", "tools/gi_g6_topology_successor_contract.py", "--root", "."
 }
 
 tasks.register("giStageGateContractTest", Exec) {
@@ -1850,7 +1891,9 @@ tasks.named("check") {
 	dependsOn(tasks.named("giG5ReceiverContractTest"))
 	dependsOn(tasks.named("giG5RunnerContractTest"))
 	dependsOn(tasks.named("giG6RunnerContractTest"))
+	dependsOn(tasks.named("giVisualProbeRunnerContractTest"))
 	dependsOn(tasks.named("giG6EvidenceContractTest"))
+	dependsOn(tasks.named("giG6TopologySuccessorContractTest"))
 	dependsOn(tasks.named("giReleaseContractGuardTest"))
 	dependsOn(tasks.named("giStageGateContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))

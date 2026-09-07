@@ -72,7 +72,11 @@ public final class GiReceiverSourceChainTests {
                         && fragment.source().contains("in vec4 metallumGiIncomingIrradiance;")
                         && fragment.source().contains("vec3 diffuse = metallumGiFallbackAmbient;")
                         && fragment.source().contains("if (metallumGiConfidence > 0.0)")
-                        && !fragment.source().contains("mix(metallumGiFallbackAmbient")
+                        && fragment.source().contains(
+                        "diffuse = metallumGiFallbackAmbient")
+                        && fragment.source().contains("+ metallumGiIncomingAmbient;")
+                        && !fragment.source().contains(
+                        "metallumGiIncomingAmbient * metallumGiConfidence")
                         && count(fragment.source(), "0.31830988618") == 1,
                 "G5 fragment retained a texture receiver or lost the single albedo/pi composition");
         require(GiReceiverShaderPatcher.patch(

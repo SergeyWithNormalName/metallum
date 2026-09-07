@@ -132,6 +132,21 @@ public final class GiTransportSourceChainTests {
                         .contains("waitUntilCompleted"),
                 "G4 interactive debug capture blocks the render thread on GPU completion");
 
+        String transportShader = Files.readString(Path.of("src/main/metal/MetallumGiTransport.metal"));
+        require(transportShader.contains("metallumGiTransportConfidenceWeightNormalization")
+                        && transportShader.contains("metallum_gi_transport_direction_solid_angle")
+                        && transportShader.contains("float formWeight = formDirectionWeight")
+                        && transportShader.contains("float confidenceWeight = confidenceDirectionWeight")
+                        && transportShader.contains("knownWeight += confidenceWeight;")
+                        && transportShader.contains("float formFactor = metallumGiTransportPi * formWeight"
+                                + " * sourceSupport;"),
+                "G4 coupled projected-solid-angle energy and confidence weights");
+        require(transportShader.contains("faceSum += float(cell.faceWeights[face])")
+                        && transportShader.contains("/ (directionLength * faceSum)")
+                        && transportShader.contains("if (state == metallumGiTransportValidityContent) {")
+                        && transportShader.contains("return MetallumGiTransportPathOccluded;"),
+                "G4 source-wise face normalization or nearest-content radial occlusion changed");
+
         System.out.println("G4 Java source-chain contract tests passed");
     }
 

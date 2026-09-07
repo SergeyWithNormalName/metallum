@@ -116,6 +116,32 @@ public final class GiDirectDirtyQueue {
         this.epochFullVolumeEnqueued = false;
     }
 
+    /**
+     * Advances a live content header without throwing away already-aged pending bricks.
+     * Accepted GPU work must be retired before this boundary, so no in-flight owner can be
+     * relabelled to a packet it did not encode.
+     */
+    public void rebaseLiveInputEpoch(final GiDirectSourceEpoch next) {
+        Objects.requireNonNull(next, "next");
+        if (this.epoch == null || !next.isLiveInputSuccessorOf(this.epoch)) {
+            throw new IllegalArgumentException(
+                    "G3 live-input rebase is not a strict same-grid successor; previous="
+                            + this.epoch + ", next=" + next
+            );
+        }
+        if (this.inFlightCount != 0) {
+            throw new IllegalStateException("G3 live-input rebase retained in-flight ownership");
+        }
+        this.epoch = next;
+        // These counters describe one native header identity. Retained pending work will execute
+        // under the new header, while already completed older-header work remains admissible only
+        // through the live per-brick stamp proof (never frozen G4's 192-brick proof).
+        this.epochQueued = this.pendingCount;
+        this.epochCompleted = 0L;
+        this.epochDiscarded = 0L;
+        this.epochFullVolumeEnqueued = false;
+    }
+
     public OfferResult enqueue(final GiDirectSourceEpoch expected, final int brickId, final long tick) {
         GiDirectSourceLayout.validateBrickId(brickId);
         advanceTick(tick);
@@ -155,7 +181,7 @@ public final class GiDirectDirtyQueue {
         }
     }
 
-    /** Enqueues at most the fixed 192 logical bricks; processing remains capped at eight. */
+    /** Enqueues at most the fixed 192 logical bricks; processing remains capped at sixteen. */
     public void enqueueAll(final GiDirectSourceEpoch expected, final long tick) {
         this.fullVolumeRebuilds = Math.incrementExact(this.fullVolumeRebuilds);
         this.epochFullVolumeEnqueued = true;

@@ -52,7 +52,7 @@ public final class GiTransportGpuValidation {
     private static final int BARRIER_Z = 5;
     private static final float DIRECT_IRRADIANCE = 65_504.0F;
     private static final long G2_CONSERVATIVE_BYTES = 18_022_528L;
-    private static final long G3_NATIVE_ACCOUNTED_BYTES = 1_104_096L;
+    private static final long G3_NATIVE_ACCOUNTED_BYTES = 1_313_760L;
     private static final long G3_END_TO_END_BYTES = G3_NATIVE_ACCOUNTED_BYTES
             + GiDirectSourceGpuResources.JAVA_PERSISTENT_PACKET_BYTES;
     private static final long GI_BUDGET_BYTES = 25_165_824L;
@@ -603,7 +603,7 @@ public final class GiTransportGpuValidation {
                                 && stats.accountedBytes() == stats.persistentBytes()
                                 + stats.stagingBytes() + stats.readbackBytes()
                                 && GiDirectSourceGpuResources.JAVA_PERSISTENT_PACKET_BYTES
-                                == 70_216L
+                                == 140_104L
                                 && GiTransportLayout.JAVA_PERSISTENT_PACKET_BYTES == 524_608L
                                 && G2_CONSERVATIVE_BYTES + G3_END_TO_END_BYTES
                                 + stats.accountedBytes()
@@ -1081,7 +1081,7 @@ public final class GiTransportGpuValidation {
                     "complete G3 scheduler publication failed");
             GiDirectSourceGpuResources.Stats stats = this.resources.stats();
             require(stats.ready() && !stats.buildInFlight()
-                            && stats.batches() == 24L
+                            && stats.batches() == 12L
                             && stats.dirtyBricks() == GiDirectSourceLayout.TOTAL_BRICKS
                             && stats.geometryApplyDispatches() == GiDirectSourceLayout.TOTAL_BRICKS
                             && stats.directInjectDispatches() == GiDirectSourceLayout.TOTAL_BRICKS

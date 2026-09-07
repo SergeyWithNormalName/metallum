@@ -177,8 +177,10 @@ native schedules one asynchronous blit into its preallocated shared buffer;
 Java polls without waiting and publishes a middle-Z CPU preview of the captured
 indirect SH DC field. This adds no terrain, fragment or present binding and no
 GPU wait in the frame loop. The debug-only Java destinations add `1,081,344`
-bytes, bringing the diagnostic end-to-end total to `23,719,272` bytes, still
-below the 24 MiB gate; benchmark mode allocates none of these destinations.
+bytes. With the current G3 B16 successor this brings the diagnostic end-to-end
+total to `23,998,824` bytes, still below the 24 MiB gate; benchmark mode
+allocates none of these destinations. The accepted historical B8 receipt used
+`23,719,272` bytes and remains immutable.
 
 ## Fixed numerical and resource gates
 
@@ -189,11 +191,14 @@ below the 24 MiB gate; benchmark mode allocates none of these destinations.
 - FP16 reconstruction absolute tolerance: `1/1024` irradiance unit.
 - Global captured energy tolerance: `max(1/1024, reflectedInput / 512)` per
   channel (`0.1953125%` relative above the absolute floor).
-- G2 conservative end-to-end (`18,022,528`) + G3 native `allocatedSize`
-  (`1,104,096`) and persistent Java FFM packets (`70,216`) + G4 native
-  `allocatedSize` (`2,916,480`) and persistent Java FFM packets (`524,608`)
-  totals `22,637,928` bytes and must remain at or below `25,165,824` bytes
-  (24 MiB). Small on-heap Java control objects are outside this byte census.
+- Current G3 B16 successor accounting is G2 conservative end-to-end
+  (`18,022,528`) + G3 native `allocatedSize` (`1,313,760`) and persistent Java
+  FFM packets (`140,104`) + G4 native `allocatedSize` (`2,916,480`) and
+  persistent Java FFM packets (`524,608`), totalling `22,917,480` bytes. It
+  must remain at or below `25,165,824` bytes (24 MiB). The immutable G4 B8
+  receipt retains its original `22,637,928`-byte census; it is historical
+  evidence, not the current source allocation. Small on-heap Java control
+  objects are outside this byte census.
 - No `Arena.allocate`, `makeBuffer`, `makeTexture` or readback in repeated frame
   iterations. G3/G4 staging/output/debug resources and PSOs are precreated at
   device admission, outside frame submission, and retired through the existing

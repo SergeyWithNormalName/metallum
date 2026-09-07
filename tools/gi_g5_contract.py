@@ -17,7 +17,8 @@ from typing import Any, Callable
 
 
 GI_BUDGET_BYTES = 25_165_824
-G4_ACCOUNTED_BYTES = 22_637_928
+HISTORICAL_B8_G4_ACCOUNTED_BYTES = 22_637_928
+CURRENT_B16_G4_ACCOUNTED_BYTES = 22_917_480
 WORLD_OPAQUE_P95_GATE_MS = 0.30
 WHOLE_GPU_P95_GATE_PERCENT = 2.0
 EVIDENCE_RELATIVE_PATH = Path("benchmark/gi/g5-receiver-evidence-v1.json")
@@ -258,9 +259,10 @@ def verify_benchmark_runner(root: Path) -> None:
             'require_value "$TIMING_DETAIL" "1" "G5 timing detail"',
             'g5_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G5_ADMISSION "',
             'phase=WARMUP presented_frame=[0-9]+ resources=5 bindings=5 ',
+            'g4_accounted_bytes=22917480 ',
             'carrier_skips=0 g5_carrier_writes=[1-9][0-9]* ',
             'drawn_g5_carrier_slices=[1-9][0-9]* status=PASS vertex_only=true ',
-            'g5_combined_accounted_bytes=$((22637928 + g5_allocated_bytes))',
+            'g5_combined_accounted_bytes=$((22917480 + g5_allocated_bytes))',
             'METALLUM_BENCHMARK EVENT=GI_G5_FINAL '
             'state=READY carrier_skips=0 '
             'g5_carrier_writes=[1-9][0-9]* '
@@ -1243,6 +1245,7 @@ def parse_g5_admission(
         label: str,
         expected_arm: str,
         expected_allocated_bytes: int,
+        expected_g4_accounted_bytes: int = CURRENT_B16_G4_ACCOUNTED_BYTES,
 ) -> dict[str, str]:
     admissions = []
     for line in log_text.splitlines():
@@ -1283,7 +1286,7 @@ def parse_g5_admission(
         "phase": "WARMUP",
         "resources": "5",
         "bindings": "5",
-        "g4_accounted_bytes": str(G4_ACCOUNTED_BYTES),
+        "g4_accounted_bytes": str(expected_g4_accounted_bytes),
         "cap_bytes": str(GI_BUDGET_BYTES),
         "shared_texture_bytes": "0",
         "carrier_skips": "0",
@@ -1307,7 +1310,7 @@ def parse_g5_admission(
             f"{label} G5 admission allocated_bytes={allocated_bytes} differs from "
             f"manifest G5 bytes={expected_allocated_bytes}")
     combined_bytes = int(fields["combined_accounted_bytes"])
-    require(combined_bytes == G4_ACCOUNTED_BYTES + allocated_bytes,
+    require(combined_bytes == expected_g4_accounted_bytes + allocated_bytes,
             f"{label} G5 admission combined_accounted_bytes is inconsistent")
     require(combined_bytes <= GI_BUDGET_BYTES,
             f"{label} G5 admission exceeds the diffuse-GI cap")
@@ -1362,6 +1365,7 @@ def verify_runtime_log(
         label: str,
         expected_arm: str,
         expected_allocated_bytes: int,
+        expected_g4_accounted_bytes: int = CURRENT_B16_G4_ACCOUNTED_BYTES,
 ) -> None:
     require(log_text.strip() != "", f"{label} is empty")
     for token in (
@@ -1408,7 +1412,13 @@ def verify_runtime_log(
         require(log_text.count(token) == 1,
                 f"{label} must contain one exact {marker} marker")
 
-    parse_g5_admission(log_text, label, expected_arm, expected_allocated_bytes)
+    parse_g5_admission(
+        log_text,
+        label,
+        expected_arm,
+        expected_allocated_bytes,
+        expected_g4_accounted_bytes,
+    )
     parse_g5_final(log_text, label, expected_arm)
     require(
         log_text.index(ADVANCED_ADMISSION_PREFIX)
@@ -1741,14 +1751,47 @@ def run_self_test() -> None:
         + "requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 "
         + "state=READY arm=candidate field=zero phase=WARMUP presented_frame=1 "
         + "resources=5 bindings=5 allocated_bytes=66560 "
-        + f"g4_accounted_bytes={G4_ACCOUNTED_BYTES} "
-        + f"combined_accounted_bytes={G4_ACCOUNTED_BYTES + 66560} "
+        + f"g4_accounted_bytes={CURRENT_B16_G4_ACCOUNTED_BYTES} "
+        + f"combined_accounted_bytes={CURRENT_B16_G4_ACCOUNTED_BYTES + 66560} "
         + f"cap_bytes={GI_BUDGET_BYTES} shared_texture_bytes=0 "
         + "carrier_skips=0 g5_carrier_writes=64 drawn_g5_carrier_slices=12 "
         + "status=PASS vertex_only=true "
         + "fragment_texture3d=0 sidecar_bytes=0"
     )
     parse_g5_admission(admission, "G5 self-test admission", "candidate", 66560)
+    historical_admission = admission.replace(
+        f"g4_accounted_bytes={CURRENT_B16_G4_ACCOUNTED_BYTES}",
+        f"g4_accounted_bytes={HISTORICAL_B8_G4_ACCOUNTED_BYTES}",
+    ).replace(
+        f"combined_accounted_bytes={CURRENT_B16_G4_ACCOUNTED_BYTES + 66560}",
+        f"combined_accounted_bytes={HISTORICAL_B8_G4_ACCOUNTED_BYTES + 66560}",
+    )
+    parse_g5_admission(
+        historical_admission,
+        "G5 self-test historical B8 admission",
+        "candidate",
+        66560,
+        HISTORICAL_B8_G4_ACCOUNTED_BYTES,
+    )
+    expect_contract_error(
+        lambda: parse_g5_admission(
+            historical_admission,
+            "G5 self-test historical admission under current ledger",
+            "candidate",
+            66560,
+        ),
+        "a historical B8 admission presented as current B16",
+    )
+    expect_contract_error(
+        lambda: parse_g5_admission(
+            admission,
+            "G5 self-test current admission under historical ledger",
+            "candidate",
+            66560,
+            HISTORICAL_B8_G4_ACCOUNTED_BYTES,
+        ),
+        "a current B16 admission presented as historical B8",
+    )
     expect_contract_error(
         lambda: parse_g5_admission(
             admission.replace("g5_carrier_writes=64", "g5_carrier_writes=0"),
@@ -2231,6 +2274,7 @@ def verify_run_artifacts(
             f"G5 run {index} {name}",
             expected_arm,
             expected_allocated_bytes,
+            HISTORICAL_B8_G4_ACCOUNTED_BYTES,
         )
     verify_transcript_receipt(
         resolved["transcript"].read_text(encoding="utf-8"),
@@ -2282,7 +2326,7 @@ def verify_evidence(root: Path, evidence_path: Path) -> str:
         "new_3d_textures": 0,
         "sidecar_bytes": 0,
         "fragment_3d_samples": 0,
-        "g4_accounted_bytes": G4_ACCOUNTED_BYTES,
+        "g4_accounted_bytes": HISTORICAL_B8_G4_ACCOUNTED_BYTES,
         "gi_budget_bytes": GI_BUDGET_BYTES,
     }
     require(scope == expected_scope, "G5 evidence scope widened")
@@ -2292,7 +2336,7 @@ def verify_evidence(root: Path, evidence_path: Path) -> str:
     g5_bytes = finite_number(memory.get("g5_accounted_bytes"), "G5 accounted bytes")
     combined = finite_number(memory.get("combined_accounted_bytes"), "combined GI bytes")
     require(g5_bytes >= 0 and g5_bytes.is_integer(), "G5 accounted bytes must be integral")
-    require(combined == G4_ACCOUNTED_BYTES + g5_bytes,
+    require(combined == HISTORICAL_B8_G4_ACCOUNTED_BYTES + g5_bytes,
             "G5 combined memory does not equal G4 base plus G5 accounting")
     require(combined <= GI_BUDGET_BYTES, "G5 combined memory exceeds 24 MiB")
 

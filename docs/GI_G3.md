@@ -45,7 +45,7 @@ presentation consumer.
 ## Bounded scheduling and lifetime
 
 The logical field contains 192 `8^3` bricks. A fixed render-thread queue drains
-at most eight bricks per frame and coalesces repeated content stamps. The L3
+at most sixteen bricks per frame and coalesces repeated content stamps. The L3
 registry maintains a separate static epoch; dynamic frame publication cannot
 rotate G3. Before an initial or changed static source generation is admitted,
 the registry must remain unchanged for 16 render ticks. This prevents chunk
@@ -58,14 +58,15 @@ update. The one-shot raw slice capture is test/debug-only. Context destruction
 goes through the existing deferred GPU retirement queue; wrong-thread calls
 fail cleanly.
 
-Measured Apple M1 Pro allocation:
+Current B16 allocation contract (native `allocatedSize`, verified by the G3
+Metal validation):
 
 | Item | Bytes |
 | --- | ---: |
 | Private direct + geometry fields | `884,736` |
-| Three staging slots | `210,144` |
+| Three staging slots | `419,808` |
 | Diagnostic readback | `9,216` |
-| Accounted total | `1,104,096` |
+| Accounted total | `1,313,760` |
 | GI hard budget | `25,165,824` |
 
 ## Correctness verification
@@ -80,13 +81,13 @@ confinement, and safe release with work in flight.
 The Java source-chain test rejects camera, lightmap, brightness, screen, depth,
 history, albedo, reflectance, receiver, and transport dependencies. The CPU
 tests cover negative coordinates, deterministic static top-K, dynamic-source
-exclusion, quantized L4 epochs, stale queue rotation, starvation, the eight
+exclusion, quantized L4 epochs, stale queue rotation, starvation, the sixteen
 brick drain cap, explicit full-field accounting, and the separate L3 static
 epoch.
 
 ## Tier B result and retained negative evidence
 
-The final live receipt used the frozen `hdrtest-static-v1` overworld route at
+The retained historical B8 live receipt used the frozen `hdrtest-static-v1` overworld route at
 3024x1964 HDR, Advanced/Balanced, MetalFX and VSync off, with 600 warmup and 600
 measured frames. It completed with nominal thermals and zero timing drops.
 

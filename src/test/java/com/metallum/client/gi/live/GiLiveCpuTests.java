@@ -17,6 +17,9 @@ public final class GiLiveCpuTests {
         epochCarriesEveryIdentityAndThreeAlignedOrigins();
         schedulerOrderCoalescingAndCapacityAreDeterministic();
         epochRotationDiscardsPendingAndInFlightWork();
+        sameGridInputRebasePreservesPendingWork();
+        defaultSchedulerUsesLiveBatchContract();
+        nearBurstProtectsSlaWithoutStarvingOuterCascades();
         asynchronousCompletionIsExactBoundedAndRetrySafe();
         drainBudgetDependsOnSourceTicksNotPresentedFrames();
         fullResetPublishesZeroBeforeAnyReadyField();
@@ -27,6 +30,7 @@ public final class GiLiveCpuTests {
         unfinishedFullResetLatencySurvivesIncrementalOverlap();
         unfinishedScrollLatencySurvivesMovingSourceOverlap();
         unfinishedScrollRetainsItsBasisOnlyBeforeRemapAdmission();
+        simultaneousScrollAndSourceMutationRetainsReceiverOverlap();
         unknownSourceVisibilityDoesNotPoisonCapturedFullResetProgress();
         transferredRootDirtPreservesProductionLikeStreamingProgress();
         openFullResetRetainsChildrenUntilLatestAuthoritativeAllReady();
@@ -213,6 +217,271 @@ public final class GiLiveCpuTests {
                 () -> tracker.admit(0, 0, false, 0L, current.version(), 21L, 4L),
                 "zero-brick G6 work was accepted without a prepared scroll remap"
         );
+    }
+
+    private static void sameGridInputRebasePreservesPendingWork() {
+        GiLiveEpoch first = epoch(1L, 1L, 1L, 1L, 1L);
+        GiLiveEpoch content = epoch(2L, 2L, 1L, 1L, 1L);
+        GiLiveEpoch staticSource = new GiLiveEpoch(
+                3L, content.dimensionId(), content.worldGeneration(),
+                content.resourceEpoch(), content.materialEpoch(),
+                content.clipmapGeneration(), content.paletteGeneration(),
+                content.contentGeneration(), content.staticSourceEpoch() + 1L,
+                content.dynamicSourceEpoch(), content.environmentEpoch(),
+                content.cascade0Origin(), content.cascade1Origin(), content.cascade2Origin()
+        );
+        require(content.isSameGridInputSuccessorOf(first)
+                        && staticSource.isSameGridInputSuccessorOf(content),
+                "G6 same-grid content/static successor was rejected");
+        GiLiveDirtyScheduler scheduler = new GiLiveDirtyScheduler(8, 4);
+        scheduler.rotateEpoch(first);
+        scheduler.enqueue(first, 3, GiLiveUpdateClass.FULL_RESET, 1L);
+        scheduler.enqueue(first, 7, GiLiveUpdateClass.FULL_RESET, 2L);
+        scheduler.rebaseLiveInputEpoch(content);
+        require(scheduler.activeEpoch().equals(content)
+                        && scheduler.telemetry().pending() == 2
+                        && scheduler.telemetry().discarded() == 0L
+                        && scheduler.telemetry().algebraIsExact(),
+                "G6 same-grid rebase discarded pending ownership");
+        require(scheduler.enqueue(content, 7, GiLiveUpdateClass.STATIC_SOURCE, 3L)
+                        == GiLiveDirtyScheduler.OfferResult.COALESCED,
+                "G6 same-grid rebase lost queued coalescing");
+        int[] bricks = new int[4];
+        GiLiveUpdateClass[] classes = new GiLiveUpdateClass[4];
+        int count = scheduler.drainTo(content, 3L, bricks, classes);
+        require(count == 2 && bricks[0] == 3 && bricks[1] == 7
+                        && classes[1] == GiLiveUpdateClass.FULL_RESET,
+                "G6 same-grid rebase changed age or weakened conservative classification");
+
+        GiLiveDirtyScheduler mixed = new GiLiveDirtyScheduler(8, 4);
+        mixed.rotateEpoch(first);
+        mixed.enqueue(first, GiDirectSourceLayout.BRICKS_PER_CASCADE + 1,
+                GiLiveUpdateClass.FULL_RESET, 1L);
+        mixed.enqueue(first, GiDirectSourceLayout.BRICKS_PER_CASCADE + 3,
+                GiLiveUpdateClass.FULL_RESET, 1L);
+        mixed.enqueue(first, 5, GiLiveUpdateClass.BLOCK, 2L);
+        count = mixed.drainTo(first, 2L, bricks, classes);
+        require(count == 1 && bricks[0] == 5,
+                "G6 mixed queue did not keep a batch inside the near cascade");
+        mixed.completeBatch(first, bricks, count);
+        count = mixed.drainTo(first, 3L, bricks, classes);
+        require(count == 2
+                        && bricks[0] == GiDirectSourceLayout.BRICKS_PER_CASCADE + 1
+                        && bricks[1] == GiDirectSourceLayout.BRICKS_PER_CASCADE + 3,
+                "G6 mixed queue crossed cascades or lost stable far ordering");
+
+        GiLiveDirtyScheduler inFlight = new GiLiveDirtyScheduler(8, 4);
+        inFlight.rotateEpoch(first);
+        inFlight.enqueue(first, 1, GiLiveUpdateClass.BLOCK, 1L);
+        require(inFlight.drainTo(first, 1L, bricks, classes) == 1,
+                "G6 rebase in-flight fixture did not drain");
+        try {
+            inFlight.rebaseLiveInputEpoch(content);
+            throw new AssertionError("G6 rebase accepted in-flight ownership");
+        } catch (IllegalStateException expected) {
+            require(inFlight.activeEpoch().equals(first)
+                            && inFlight.telemetry().inFlight() == 1
+                            && inFlight.telemetry().discarded() == 0L,
+                    "rejected G6 rebase mutated in-flight ownership");
+        }
+
+        GiLiveEpoch dynamic = epoch(4L, 3L, 2L, 1L, 1L);
+        require(!dynamic.isSameGridInputSuccessorOf(content)
+                        && !GiLiveCoordinator.shouldRebasePendingScheduler(
+                        content, dynamic, GiLiveUpdateClass.STATIC_SOURCE,
+                        true, false, 0, 2)
+                        && !GiLiveCoordinator.shouldRebasePendingScheduler(
+                        content, staticSource, GiLiveUpdateClass.FULL_RESET,
+                        true, false, 0, 2)
+                        && !GiLiveCoordinator.shouldRebasePendingScheduler(
+                        content, staticSource, GiLiveUpdateClass.STATIC_SOURCE,
+                        true, true, 0, 2)
+                        && GiLiveCoordinator.shouldRebasePendingScheduler(
+                        content, staticSource, GiLiveUpdateClass.STATIC_SOURCE,
+                        true, false, 0, 2)
+                        && !GiLiveCoordinator.shouldRebasePendingScheduler(
+                        content, staticSource, GiLiveUpdateClass.SCROLL,
+                        true, false, 0, 2),
+                "G6 scheduler rebase crossed a structural, dynamic, accepted-write, or origin boundary");
+
+        GiLiveDirtyScheduler pendingOuterScroll = new GiLiveDirtyScheduler();
+        pendingOuterScroll.rotateEpoch(content);
+        for (int local = 0; local < GiDirectSourceLayout.BRICKS_PER_CASCADE; local++) {
+            pendingOuterScroll.enqueue(content, local, GiLiveUpdateClass.SCROLL, 4L);
+            pendingOuterScroll.enqueue(content,
+                    GiDirectSourceLayout.BRICKS_PER_CASCADE + local,
+                    GiLiveUpdateClass.SCROLL, 4L);
+            pendingOuterScroll.enqueue(content,
+                    2 * GiDirectSourceLayout.BRICKS_PER_CASCADE + local,
+                    GiLiveUpdateClass.SCROLL, 4L);
+        }
+        int nearCount = pendingOuterScroll.drainTo(content, 4L, bricks, classes);
+        require(nearCount == bricks.length,
+                "G6 pending-scroll rebase fixture did not drain one near batch");
+        pendingOuterScroll.completeBatch(content, bricks, nearCount);
+        long discardedBefore = pendingOuterScroll.telemetry().discarded();
+        int pendingBefore = pendingOuterScroll.pendingCount();
+        pendingOuterScroll.rebaseLiveInputEpoch(staticSource);
+        require(pendingOuterScroll.activeEpoch().equals(staticSource)
+                        && pendingOuterScroll.pendingCount() == pendingBefore
+                        && pendingOuterScroll.ownedCount() == pendingBefore
+                        && pendingOuterScroll.telemetry().discarded() == discardedBefore
+                        && pendingOuterScroll.algebraIsExact(),
+                "same-grid source child discarded unfinished outer-scroll ownership");
+    }
+
+    private static void nearBurstProtectsSlaWithoutStarvingOuterCascades() {
+        GiLiveEpoch first = epoch(1L, 1L, 1L, 1L, 1L);
+        GiLiveEpoch content = epoch(2L, 2L, 1L, 1L, 1L);
+        GiLiveDirtyScheduler scheduler = new GiLiveDirtyScheduler();
+        scheduler.rotateEpoch(first);
+        for (int local = 0; local < GiDirectSourceLayout.BRICKS_PER_CASCADE; local++) {
+            scheduler.enqueue(first, local, GiLiveUpdateClass.FULL_RESET, 0L);
+            scheduler.enqueue(first, GiDirectSourceLayout.BRICKS_PER_CASCADE + local,
+                    GiLiveUpdateClass.FULL_RESET, 0L);
+            scheduler.enqueue(first, 2 * GiDirectSourceLayout.BRICKS_PER_CASCADE + local,
+                    GiLiveUpdateClass.FULL_RESET, 0L);
+        }
+        int[] fullBatch = new int[GiLiveLayout.MAX_BRICKS_PER_SUBMIT];
+        GiLiveUpdateClass[] fullClasses =
+                new GiLiveUpdateClass[GiLiveLayout.MAX_BRICKS_PER_SUBMIT];
+        GiLiveEpoch active = first;
+        int nearBatchCount = Math.ceilDiv(
+                GiDirectSourceLayout.BRICKS_PER_CASCADE,
+                GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+        );
+        for (long tick = 0L; tick < nearBatchCount; tick++) {
+            int count = scheduler.drainTo(active, tick, fullBatch, fullClasses);
+            int expected = Math.min(
+                    GiLiveLayout.MAX_BRICKS_PER_SUBMIT,
+                    GiDirectSourceLayout.BRICKS_PER_CASCADE
+                            - Math.toIntExact(tick) * GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+            );
+            require(count == expected
+                            && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 0,
+                    "G6 full near field did not receive its complete SLA burst");
+            scheduler.completeBatch(active, fullBatch, count);
+            if (tick == 3L) {
+                scheduler.rebaseLiveInputEpoch(content);
+                active = content;
+            }
+        }
+        long firstOuterTick = nearBatchCount;
+        int count = scheduler.drainTo(active, firstOuterTick, fullBatch, fullClasses);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 1,
+                "G6 rebase reset the near quota or starved the middle cascade");
+        scheduler.completeBatch(active, fullBatch, count);
+        count = scheduler.drainTo(active, firstOuterTick + 1L, fullBatch, fullClasses);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 2,
+                "G6 empty near queue did not alternate to the far cascade");
+        scheduler.completeBatch(active, fullBatch, count);
+        count = scheduler.drainTo(active, firstOuterTick + 2L, fullBatch, fullClasses);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 1,
+                "G6 outer backlog did not switch back to a prepared middle cascade");
+        scheduler.completeBatch(active, fullBatch, count);
+
+        for (int local = 0; local < GiDirectSourceLayout.BRICKS_PER_CASCADE; local++) {
+            scheduler.enqueue(active, local, GiLiveUpdateClass.BLOCK, firstOuterTick + 3L);
+        }
+        count = scheduler.drainTo(active, firstOuterTick + 3L, fullBatch, fullClasses);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 0,
+                "G6 new near work did not preempt the remaining outer backlog");
+        scheduler.completeBatch(active, fullBatch, count);
+        require(scheduler.telemetry().algebraIsExact(),
+                "G6 near/outer quota broke scheduler ownership algebra");
+
+        GiLiveDirtyScheduler sustained = new GiLiveDirtyScheduler();
+        sustained.rotateEpoch(first);
+        for (int local = 0; local < GiDirectSourceLayout.BRICKS_PER_CASCADE; local++) {
+            sustained.enqueue(first, local, GiLiveUpdateClass.BLOCK, 0L);
+            sustained.enqueue(first, GiDirectSourceLayout.BRICKS_PER_CASCADE + local,
+                    GiLiveUpdateClass.FULL_RESET, 0L);
+            sustained.enqueue(first, 2 * GiDirectSourceLayout.BRICKS_PER_CASCADE + local,
+                    GiLiveUpdateClass.FULL_RESET, 0L);
+        }
+        for (long tick = 0L; tick < GiLiveDirtyScheduler.MAX_CONSECUTIVE_NEAR_BATCHES;
+                tick++) {
+            count = sustained.drainTo(first, tick, fullBatch, fullClasses);
+            require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                            && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 0,
+                    "G6 sustained near work lost its full-cascade priority burst");
+            sustained.completeBatch(first, fullBatch, count);
+            for (int index = 0; index < count; index++) {
+                sustained.enqueue(first, fullBatch[index], GiLiveUpdateClass.BLOCK, tick + 1L);
+            }
+        }
+        long quotaOuterTick = GiLiveDirtyScheduler.MAX_CONSECUTIVE_NEAR_BATCHES;
+        count = sustained.drainTo(first, quotaOuterTick, fullBatch, fullClasses);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 1,
+                "G6 sustained near work starved the first outer quota batch");
+        sustained.completeBatch(first, fullBatch, count);
+        for (long tick = quotaOuterTick + 1L;
+                tick <= quotaOuterTick + GiLiveDirtyScheduler.MAX_CONSECUTIVE_NEAR_BATCHES;
+                tick++) {
+            count = sustained.drainTo(first, tick, fullBatch, fullClasses);
+            require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                            && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 0,
+                    "G6 outer quota interrupted more than one sustained near batch");
+            sustained.completeBatch(first, fullBatch, count);
+            for (int index = 0; index < count; index++) {
+                sustained.enqueue(first, fullBatch[index], GiLiveUpdateClass.BLOCK, tick + 1L);
+            }
+        }
+        long farQuotaTick = quotaOuterTick
+                + GiLiveDirtyScheduler.MAX_CONSECUTIVE_NEAR_BATCHES + 1L;
+        count = sustained.drainTo(first, farQuotaTick, fullBatch, fullClasses);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && GiDirectSourceLayout.cascadeForBrickId(fullBatch[0]) == 2,
+                "G6 sustained near work starved the alternating far quota batch");
+        sustained.completeBatch(first, fullBatch, count);
+        require(sustained.telemetry().algebraIsExact(),
+                "G6 sustained quota broke scheduler ownership algebra");
+    }
+
+    private static void defaultSchedulerUsesLiveBatchContract() {
+        GiLiveEpoch epoch = epoch(1L, 1L, 1L, 1L, 1L);
+        GiLiveDirtyScheduler scheduler = new GiLiveDirtyScheduler();
+        scheduler.rotateEpoch(epoch);
+        for (int brick = 0; brick < GiDirectSourceLayout.BRICKS_PER_CASCADE; brick++) {
+            scheduler.enqueue(epoch, brick, GiLiveUpdateClass.SCROLL, 0L);
+        }
+        int[] bricks = new int[GiLiveLayout.MAX_BRICKS_PER_SUBMIT];
+        GiLiveUpdateClass[] classes =
+                new GiLiveUpdateClass[GiLiveLayout.MAX_BRICKS_PER_SUBMIT];
+        int count = scheduler.drainTo(epoch, 1L, bricks, classes);
+        require(count == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && scheduler.drainTo(epoch, 1L, bricks, classes) == 0
+                        && scheduler.inFlightCount() == GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+                        && scheduler.algebraIsExact(),
+                "default G6 scheduler drifted from the live batch contract");
+        scheduler.completeBatch(epoch, bricks, count);
+        require(scheduler.algebraIsExact(),
+                "live batch completion broke scheduler ownership algebra");
+
+        GiLiveDirtyScheduler scrollSlab = new GiLiveDirtyScheduler();
+        scrollSlab.rotateEpoch(epoch);
+        int exposedSlabBricks = 32;
+        for (int brick = 0; brick < exposedSlabBricks; brick++) {
+            scrollSlab.enqueue(epoch, brick, GiLiveUpdateClass.SCROLL, 0L);
+        }
+        int completionBoundaries = 0;
+        for (long tick = 1L; scrollSlab.ownedCount() != 0; tick++) {
+            count = scrollSlab.drainTo(epoch, tick, bricks, classes);
+            require(count > 0 && count <= GiLiveLayout.MAX_BRICKS_PER_SUBMIT,
+                    "G6 exposed scroll slab exceeded its batch bound");
+            scrollSlab.completeBatch(epoch, bricks, count);
+            completionBoundaries++;
+        }
+        require(completionBoundaries == Math.ceilDiv(
+                        exposedSlabBricks, GiLiveLayout.MAX_BRICKS_PER_SUBMIT)
+                        && completionBoundaries == 2
+                        && scrollSlab.algebraIsExact(),
+                "G6 32-brick scroll slab retained more than two serialized completions");
     }
 
     private static void drainBudgetDependsOnSourceTicksNotPresentedFrames() {
@@ -459,10 +728,46 @@ public final class GiLiveCpuTests {
         require(GiLiveCoordinator.sourceEnvironmentIdentityReady(1L)
                         && GiLiveCoordinator.sourceEnvironmentIdentityReady(Long.MIN_VALUE),
                 "G6 rejected a valid signed G3 environment digest");
+        require(GiLiveCoordinator.unavailableEnvironmentHistoryCanBind(
+                        false, true, true, true, 41L)
+                        && !GiLiveCoordinator.unavailableEnvironmentHistoryCanBind(
+                        true, true, true, true, 41L)
+                        && !GiLiveCoordinator.unavailableEnvironmentHistoryCanBind(
+                        false, false, true, true, 41L)
+                        && !GiLiveCoordinator.unavailableEnvironmentHistoryCanBind(
+                        false, true, false, true, 41L)
+                        && !GiLiveCoordinator.unavailableEnvironmentHistoryCanBind(
+                        false, true, true, false, 41L)
+                        && !GiLiveCoordinator.unavailableEnvironmentHistoryCanBind(
+                        false, true, true, true, 0L),
+                "unavailable G3 identity retained history across an unsafe boundary");
+        require(GiLiveCoordinator.retrySourceHistoryCanBind(
+                        true, GiLiveUpdateClass.BLOCK, false)
+                        && GiLiveCoordinator.retrySourceHistoryCanBind(
+                        true, GiLiveUpdateClass.STATIC_SOURCE, false)
+                        && GiLiveCoordinator.retrySourceHistoryCanBind(
+                        true, GiLiveUpdateClass.SCROLL, true)
+                        && !GiLiveCoordinator.retrySourceHistoryCanBind(
+                        true, GiLiveUpdateClass.SCROLL, false)
+                        && !GiLiveCoordinator.retrySourceHistoryCanBind(
+                        false, GiLiveUpdateClass.FULL_RESET, true),
+                "transient source retry hid compatible history or crossed a reset boundary");
         require(GiLiveCoordinator.retryWouldRepeatNonIdempotentScroll(true, true)
                         && !GiLiveCoordinator.retryWouldRepeatNonIdempotentScroll(true, false)
                         && !GiLiveCoordinator.retryWouldRepeatNonIdempotentScroll(false, true),
                 "G6 scroll-remap completion retry is no longer terminal only when unsafe");
+        require(GiLiveCoordinator.recoveredUnavailableEnvironmentMatchesObserved(
+                        true, GiLiveUpdateClass.FULL_RESET, 41L, 41L, true),
+                "valid D -> unavailable -> valid D retained a stale deferred reset");
+        require(!GiLiveCoordinator.recoveredUnavailableEnvironmentMatchesObserved(
+                        true, GiLiveUpdateClass.FULL_RESET, 41L, 43L, true)
+                        && !GiLiveCoordinator.recoveredUnavailableEnvironmentMatchesObserved(
+                        true, GiLiveUpdateClass.FULL_RESET, 41L, 41L, false)
+                        && !GiLiveCoordinator.recoveredUnavailableEnvironmentMatchesObserved(
+                        false, GiLiveUpdateClass.FULL_RESET, 41L, 41L, true)
+                        && !GiLiveCoordinator.recoveredUnavailableEnvironmentMatchesObserved(
+                        true, GiLiveUpdateClass.BLOCK, 41L, 41L, true),
+                "unavailable-environment recovery consumed a real successor mutation");
     }
 
     private static void latencyRecoveryUsesTheReceiverVisibleCoverageBoundary() {
@@ -672,6 +977,126 @@ public final class GiLiveCpuTests {
                 "coalesced source dirt lost the 48-brick scroll basis algebra");
     }
 
+    /**
+     * Scripted movement regression: a physical one-brick scroll and a source mutation arrive in
+     * the same observation. The coordinate change must rotate old brick ownership, but the
+     * completed remap keeps its 3x4x4 receiver history sampleable. A later source successor on
+     * that already-remapped grid must rebase its pending work without blanking that overlap.
+     */
+    private static void simultaneousScrollAndSourceMutationRetainsReceiverOverlap() {
+        GiLiveEpoch beforeScroll = epoch(1L, 1L, 1L, 1L, 1L);
+        GiLiveEpoch scrollWithSourceMutation = new GiLiveEpoch(
+                2L, beforeScroll.dimensionId(), beforeScroll.worldGeneration(),
+                beforeScroll.resourceEpoch(), beforeScroll.materialEpoch(),
+                beforeScroll.clipmapGeneration() + 1L, beforeScroll.paletteGeneration(),
+                beforeScroll.contentGeneration(), beforeScroll.staticSourceEpoch() + 1L,
+                beforeScroll.dynamicSourceEpoch(), beforeScroll.environmentEpoch(),
+                new GiLiveEpoch.Origin(-56, -32, -16),
+                new GiLiveEpoch.Origin(-96, -64, -32),
+                new GiLiveEpoch.Origin(-192, -128, -64)
+        );
+        GiLiveEpoch sourceSuccessor = new GiLiveEpoch(
+                3L, scrollWithSourceMutation.dimensionId(),
+                scrollWithSourceMutation.worldGeneration(),
+                scrollWithSourceMutation.resourceEpoch(),
+                scrollWithSourceMutation.materialEpoch(),
+                scrollWithSourceMutation.clipmapGeneration(),
+                scrollWithSourceMutation.paletteGeneration(),
+                scrollWithSourceMutation.contentGeneration(),
+                scrollWithSourceMutation.staticSourceEpoch() + 1L,
+                scrollWithSourceMutation.dynamicSourceEpoch(),
+                scrollWithSourceMutation.environmentEpoch(),
+                scrollWithSourceMutation.cascade0Origin(),
+                scrollWithSourceMutation.cascade1Origin(),
+                scrollWithSourceMutation.cascade2Origin()
+        );
+        require(!scrollWithSourceMutation.isSameGridInputSuccessorOf(beforeScroll)
+                        && sourceSuccessor.isSameGridInputSuccessorOf(scrollWithSourceMutation),
+                "movement/source trace lost its coordinate-rotate then same-grid boundary");
+
+        GiLivePublication publication = new GiLivePublication();
+        publication.beginEpoch(beforeScroll, GiLiveUpdateClass.FULL_RESET, 0L);
+        publication.publishReady(beforeScroll, 1L);
+        publication.beginEpoch(scrollWithSourceMutation, GiLiveUpdateClass.SCROLL, 2L);
+        require(publication.snapshot().coverage()
+                        == GiLivePublication.CoverageState.EXACT_VALID_ONLY
+                        && GiLiveCoordinator.provisionalReceiverHistoryCanBind(
+                        false, true, GiLiveUpdateClass.SCROLL, true
+                ), "completed scroll remap did not keep compatible receiver history bindable");
+
+        int c0OneBrick = GiDirectSourceLayout.BRICK_EDGE_CELLS
+                * GiDirectSourceLayout.cellSizeBlocks(0);
+        long remappedReceiverMask = GiLiveCoordinator.scrollRetainedExactMask(
+                GiLiveLayout.ALL_BRICKS_MASK, 0, c0OneBrick, 0, 0
+        );
+        long exposedSlabMask = ~remappedReceiverMask;
+        require(Long.bitCount(remappedReceiverMask) == 48
+                        && Long.bitCount(exposedSlabMask) == 16,
+                "one-brick remap did not preserve exactly the 3x4x4 receiver overlap");
+        long retainedInteriorFootprint = GiLiveReceiverShaderPatcher.exactTrilinearFootprintMask(
+                20.0 / 32.0, 20.0 / 32.0, 20.0 / 32.0
+        );
+        long newlyExposedFootprint = GiLiveReceiverShaderPatcher.exactTrilinearFootprintMask(
+                28.0 / 32.0, 20.0 / 32.0, 20.0 / 32.0
+        );
+        require((retainedInteriorFootprint & remappedReceiverMask) == retainedInteriorFootprint
+                        && (newlyExposedFootprint & remappedReceiverMask)
+                        != newlyExposedFootprint,
+                "scroll remap made retained terrain unsampleable or exposed slab sampleable");
+
+        GiLiveDirtyScheduler scheduler = new GiLiveDirtyScheduler();
+        scheduler.rotateEpoch(beforeScroll);
+        scheduler.enqueue(beforeScroll, 0, GiLiveUpdateClass.SCROLL, 2L);
+        scheduler.enqueue(beforeScroll, 1, GiLiveUpdateClass.SCROLL, 2L);
+        scheduler.enqueue(beforeScroll, 2, GiLiveUpdateClass.SCROLL, 2L);
+        scheduler.rotateEpoch(scrollWithSourceMutation);
+        require(scheduler.telemetry().discarded() == 3L
+                        && scheduler.pendingCount() == 0
+                        && !GiLiveCoordinator.shouldRebasePendingScheduler(
+                        beforeScroll, scrollWithSourceMutation, GiLiveUpdateClass.SCROLL,
+                        true, false, 0, 3
+                ), "coordinate rotate retained untranslatable old-grid scheduler ownership");
+
+        for (int local = 0; local < GiLiveLayout.BRICKS_PER_CASCADE; local++) {
+            if ((exposedSlabMask & (1L << local)) != 0L) {
+                scheduler.enqueue(scrollWithSourceMutation, local,
+                        GiLiveUpdateClass.SCROLL, 3L);
+            }
+        }
+        int pendingAfterRemap = scheduler.pendingCount();
+        long discardedAfterCoordinateRotate = scheduler.telemetry().discarded();
+        require(pendingAfterRemap == 16
+                        && GiLiveCoordinator.shouldRebasePendingScheduler(
+                        scrollWithSourceMutation, sourceSuccessor,
+                        GiLiveUpdateClass.STATIC_SOURCE,
+                        true, false, 0, pendingAfterRemap
+                ), "post-remap same-grid source successor was not eligible to preserve work");
+        scheduler.rebaseLiveInputEpoch(sourceSuccessor);
+        require(scheduler.pendingCount() == pendingAfterRemap
+                        && scheduler.telemetry().discarded() == discardedAfterCoordinateRotate
+                        && scheduler.algebraIsExact(),
+                "same-grid source successor discarded translated exposed-slab work");
+
+        long sourceAffected = GiLiveCoordinator.expandTransportHalo(1L << 0);
+        long sourceBaseExact = remappedReceiverMask & ~sourceAffected;
+        long sourceRequired = GiLiveCoordinator.requiredToConverge(
+                sourceBaseExact, sourceAffected
+        );
+        long exactAfterSourcePlan = GiLiveCoordinator.exactMaskAfterPlan(
+                remappedReceiverMask, sourceRequired, false
+        );
+        long receiverSampleableAfterSourcePlan = remappedReceiverMask;
+        publication.beginEpoch(sourceSuccessor, GiLiveUpdateClass.STATIC_SOURCE, 3L);
+        require(publication.snapshot().coverage()
+                        == GiLivePublication.CoverageState.EXACT_VALID_ONLY
+                        && receiverSampleableAfterSourcePlan == remappedReceiverMask
+                        && (retainedInteriorFootprint & receiverSampleableAfterSourcePlan)
+                        == retainedInteriorFootprint
+                        && (exactAfterSourcePlan & ~(sourceAffected | exposedSlabMask))
+                        == (remappedReceiverMask & ~(sourceAffected | exposedSlabMask)),
+                "source successor erased stable remapped overlap outside its affected halo");
+    }
+
     private static void unknownSourceVisibilityDoesNotPoisonCapturedFullResetProgress() {
         long semanticBlock = 1L << 3;
         long unknownSticky = GiLiveCoordinator.stickyKnownAffectedMask(
@@ -710,7 +1135,8 @@ public final class GiLiveCpuTests {
         // Regression for the v6 teleport churn: 190 same-root children temporarily need ALL
         // visibility zero, but their authoritative source says no near-cascade brick changed.
         // With known dirt kept separately, one bounded 8-brick batch advances on every source
-        // tick and reaches all 64 bits on tick 8. The old poisoned model rebuilds bits 0..7
+        // tick and reaches all 64 bits within the bounded batch count. The old poisoned model
+        // rebuilds the first batch forever
         // forever because ALL is ORed into every authoritative plan.
         long correctedExact = 0L;
         long poisonedExact = 0L;
@@ -752,12 +1178,16 @@ public final class GiLiveCpuTests {
             if (correctedExact == GiLiveLayout.ALL_BRICKS_MASK && firstReadyTick < 0) {
                 firstReadyTick = child + 1;
             }
-            require(Long.bitCount(correctedExact) == Math.min(64, (child + 1) * 8),
-                    "same-root full-reset progress was not monotonic and eight-brick bounded");
+            require(Long.bitCount(correctedExact) == Math.min(
+                            64, (child + 1) * GiLiveLayout.MAX_BRICKS_PER_SUBMIT),
+                    "same-root full-reset progress was not monotonic and batch bounded");
         }
-        require(firstReadyTick == 8
+        require(firstReadyTick == Math.ceilDiv(
+                        GiLiveLayout.BRICKS_PER_CASCADE,
+                        GiLiveLayout.MAX_BRICKS_PER_SUBMIT)
                         && correctedExact == GiLiveLayout.ALL_BRICKS_MASK
-                        && poisonedExact == 0xffL,
+                        && poisonedExact == takeLowestBits(
+                        GiLiveLayout.ALL_BRICKS_MASK, GiLiveLayout.MAX_BRICKS_PER_SUBMIT),
                 "190-child churn regression did not distinguish recoverable from poisoned masks");
     }
 
@@ -794,15 +1224,27 @@ public final class GiLiveCpuTests {
                 "root ownership did not move from sticky ALL into exact/required progress");
 
         long sourceBit = 1L << 21;
-        long anchored = GiLiveCoordinator.conservativeMaskAfterAcceptedPlan(
+        long sourceHalo = GiLiveCoordinator.expandTransportHalo(sourceBit);
+        long preDispatchBase = GiLiveLayout.ALL_BRICKS_MASK & ~sourceHalo;
+        long transferred = GiLiveCoordinator.conservativeMaskAfterAcceptedPlan(
                 true, 0L, sourceBit
         );
-        require(anchored == GiLiveCoordinator.expandTransportHalo(sourceBit)
-                        && GiLiveCoordinator.retainedProvisionalAffectedMask(
-                        GiLiveUpdateClass.STATIC_SOURCE,
-                        anchored, 0L, true, false
-                ) == anchored,
-                "accepted source transfer vanished before the first physical G6 dispatch");
+        long noDrainChildRequired = GiLiveCoordinator.requiredToConverge(
+                preDispatchBase,
+                GiLiveCoordinator.authoritativePlanAffectedMask(transferred, 0L)
+        );
+        long completed = takeLowestBits(sourceHalo, GiLiveLayout.MAX_BRICKS_PER_SUBMIT);
+        long partialExact = preDispatchBase | completed;
+        long partialChildRequired = GiLiveCoordinator.requiredToConverge(
+                partialExact,
+                GiLiveCoordinator.authoritativePlanAffectedMask(transferred, 0L)
+        );
+        require(transferred == 0L
+                        && noDrainChildRequired == sourceHalo
+                        && (partialChildRequired & completed) == 0L
+                        && (partialChildRequired & (sourceHalo & ~completed))
+                        == (sourceHalo & ~completed),
+                "accepted plan lost queued dirt or re-invalidated completed exact bricks");
         require(GiLiveCoordinator.stickyKnownPhysicalDirt(
                         GiLiveUpdateClass.STATIC_SOURCE, 1L << 3, 0L, false
                 ) == (1L << 3)
@@ -814,7 +1256,7 @@ public final class GiLiveCpuTests {
 
         // Production-like v8 model: the audit accumulator remains ALL after TELEPORT, but only
         // untransferred current dirt participates in each child plan. Twelve real source changes
-        // re-dirty their exact halos; after they stop, eight-brick batches converge. The old model
+        // re-dirty their exact halos; after they stop, bounded batches converge. The old model
         // keeps reapplying cumulative ALL and therefore never advances beyond the first byte.
         long correctedExact = exact;
         long poisonedExact = exact;
@@ -852,7 +1294,8 @@ public final class GiLiveCpuTests {
         }
         require(firstReadyChild > 0 && firstReadyChild <= 64
                         && correctedExact == GiLiveLayout.ALL_BRICKS_MASK
-                        && poisonedExact == 0xffL,
+                        && poisonedExact == takeLowestBits(
+                        GiLiveLayout.ALL_BRICKS_MASK, GiLiveLayout.MAX_BRICKS_PER_SUBMIT),
                 "transferred TELEPORT dirt did not converge under 190 exact-identity children");
     }
 
@@ -920,16 +1363,48 @@ public final class GiLiveCpuTests {
                         true, true, true, -1),
                 "negative full-reset publication stability was accepted");
         require(GiLiveCoordinator.shouldContinueAuthoritativePlanning(0, 1)
-                        && !GiLiveCoordinator.shouldContinueAuthoritativePlanning(1, 1)
+                        && GiLiveCoordinator.shouldContinueAuthoritativePlanning(1, 1)
                         && !GiLiveCoordinator.shouldContinueAuthoritativePlanning(
                         0, GiLiveLayout.CASCADE_COUNT
                 ),
-                "zero-required cascade planning no longer stops only on work or final cascade");
-        require(GiLiveCoordinator.unavailableAuthoritativeSourceStatus(false)
-                        == GiLiveCoordinator.STATUS_INPUT_NOT_READY
-                        && GiLiveCoordinator.unavailableAuthoritativeSourceStatus(true)
-                        == GiLiveCoordinator.STATUS_NO_WORK,
-                "partial authoritative near recovery was hidden or provisional-only input bound");
+                "authoritative planning stopped before every available cascade was coalesced");
+        require(GiLiveCoordinator.unavailableAuthoritativeSourceStatus(
+                        false, GiLiveLayout.READY_MASK_ALL)
+                        == GiLiveCoordinator.STATUS_RETAINED_HISTORY
+                        && GiLiveCoordinator.unavailableAuthoritativeSourceStatus(
+                        true, GiLiveLayout.READY_MASK_ALL)
+                        == GiLiveCoordinator.STATUS_NO_WORK
+                        && GiLiveCoordinator.unavailableAuthoritativeSourceStatus(false, 4)
+                        == GiLiveCoordinator.STATUS_INPUT_NOT_READY,
+                "authoritative source gap hid complete receiver history or exposed partial input");
+        require(GiLiveCoordinator.allCascadesHaveSampleableReceiverHistory(
+                        GiLiveLayout.READY_MASK_ALL)
+                        && !GiLiveCoordinator.allCascadesHaveSampleableReceiverHistory(0)
+                        && !GiLiveCoordinator.allCascadesHaveSampleableReceiverHistory(4),
+                "native all-cascade receiver-history proof admitted a partial tuple");
+        expectIllegalArgument(() -> GiLiveCoordinator.unavailableAuthoritativeSourceStatus(
+                        false, 8),
+                "out-of-range authoritative receiver mask was accepted");
+        expectIllegalArgument(() ->
+                        GiLiveCoordinator.allCascadesHaveSampleableReceiverHistory(8),
+                "out-of-range retry receiver mask was accepted");
+        require(GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                        false, GiLiveUpdateClass.SCROLL, true, 1)
+                        && GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                        false, GiLiveUpdateClass.SCROLL, true, 2)
+                        && !GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                        false, GiLiveUpdateClass.SCROLL, true, 0)
+                        && !GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                        true, GiLiveUpdateClass.SCROLL, true, 1)
+                        && !GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                        false, GiLiveUpdateClass.BLOCK, true, 1)
+                        && !GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                        false, GiLiveUpdateClass.SCROLL, false, 1),
+                "outer G3 source could still preempt a completed provisional C0 scroll remap");
+        expectIllegalArgument(() ->
+                        GiLiveCoordinator.shouldDeferAuthoritativeScrollHandoffUntilNearSource(
+                                false, GiLiveUpdateClass.SCROLL, true, 3),
+                "out-of-range authoritative source cascade was accepted");
         for (int child = 0; child < 190; child++) {
             int nextCascade = 0;
             int planned = 0;
@@ -1044,6 +1519,29 @@ public final class GiLiveCpuTests {
         );
         require(GiLiveRuntime.finalReceiptIsCurrent(current, secondGeneration),
                 "current exact G6 terrain receipt was rejected");
+        require(GiLiveRuntime.latestTerrainAllCascadeBindingIsUsable(
+                        current, secondGeneration),
+                "current all-cascade G6 terrain binding was rejected");
+
+        GiLiveRuntime.FinalSnapshot retainedSuccessor = new GiLiveRuntime.FinalSnapshot(
+                secondGeneration,
+                4, true, 0L, 0L, 1L,
+                42L, 100L, 1L, 8, 16, true,
+                1L, 8, 16, true,
+                1L, 8, 16, true,
+                1L, 8, 16, true,
+                1L, 1L, 0L, 0, 0, true, 1L,
+                2L, 0L, 2L, 0L, 0L,
+                true, secondGeneration, 100L,
+                true, secondGeneration, 201L, GiLiveLayout.STATUS_OK,
+                true, true, 4, true, GiLiveLayout.READY_MASK_ALL,
+                42L, 100L
+        );
+        require(GiLiveRuntime.latestTerrainAllCascadeBindingIsUsable(
+                        retainedSuccessor, secondGeneration)
+                        && retainedSuccessor.readyMask() != GiLiveLayout.READY_MASK_ALL
+                        && retainedSuccessor.buildInFlight(),
+                "G6 retained all-cascade receiver was rejected during successor rebuild");
 
         GiLiveRuntime.FinalSnapshot noAdmission = finalReceipt(
                 secondGeneration, false, -1L, -1L,
@@ -1060,6 +1558,9 @@ public final class GiLiveCpuTests {
         );
         require(!GiLiveRuntime.finalReceiptIsCurrent(laterFallback, secondGeneration),
                 "historical G6 admission survived a newer zero/fallback terrain bind");
+        require(!GiLiveRuntime.latestTerrainAllCascadeBindingIsUsable(
+                        laterFallback, secondGeneration),
+                "zero G6 terrain binding passed motion continuity");
 
         GiLiveRuntime.FinalSnapshot partialTerrain = finalReceipt(
                 secondGeneration, true, secondGeneration, 100L,
@@ -1068,6 +1569,9 @@ public final class GiLiveCpuTests {
         );
         require(!GiLiveRuntime.finalReceiptIsCurrent(partialTerrain, secondGeneration),
                 "G6 final paired an all-cascade census with a partial terrain receipt");
+        require(!GiLiveRuntime.latestTerrainAllCascadeBindingIsUsable(
+                        partialTerrain, secondGeneration),
+                "partial G6 visible mask passed all-cascade motion continuity");
 
         GiLiveRuntime.FinalSnapshot recreatedDevice = finalReceipt(
                 secondGeneration, true, firstGeneration, 100L,
@@ -1109,9 +1613,11 @@ public final class GiLiveCpuTests {
                 1L, 8, 16, true,
                 1L, 8, 16, true,
                 1L, 1L, 0L, 0, 0, true, 1L,
+                0L, 0L, 0L, 0L, 0L,
                 admissionEmitted, admissionGeneration, admissionSubmit,
                 true, terrainGeneration, terrainSubmit, bindStatus,
                 carrierSafe, frameCompatible, terrainReadyMask, exactMaskNonzero,
+                exactMaskNonzero ? terrainReadyMask : 0,
                 terrainFieldGeneration, terrainSourceTick
         );
     }

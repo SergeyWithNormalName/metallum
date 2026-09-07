@@ -10,7 +10,7 @@ public final class GiDirectSourceLayout {
     public static final int BRICKS_PER_AXIS = CELLS_PER_AXIS / BRICK_EDGE_CELLS;
     public static final int BRICKS_PER_CASCADE = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
     public static final int TOTAL_BRICKS = CASCADE_COUNT * BRICKS_PER_CASCADE;
-    public static final int MAX_DRAIN_PER_FRAME = 8;
+    public static final int MAX_DRAIN_PER_FRAME = 16;
     public static final int MAX_STATIC_SOURCES_PER_BRICK = 16;
 
     private GiDirectSourceLayout() {

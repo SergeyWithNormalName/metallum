@@ -34,10 +34,25 @@ public final class GiDirectSourceSourceChainTests {
         }
         resourceReloadRootEpochIsExplicitlyGuarded();
         metadataOnlyRelabelIsWiredAndNonDestructive();
+        liveContentRebasePreservesPendingOwnership();
         coherentEnvironmentBoundaryIsLiveOnlyAndFailClosedAtWorldStart();
         asynchronousAcceptedBatchIsRetiredExactlyOnce();
         sameCommandLiveHandoffIsExactAndFailClosed();
         cumulativeLiveMasksAreAcknowledgedPerCascadeAndRaceClosed();
+        roundedDdaExcludesOnlyTheActualSourceEndpoint();
+    }
+
+    private static void roundedDdaExcludesOnlyTheActualSourceEndpoint() throws IOException {
+        String metal = Files.readString(Path.of("src/main/metal/MetallumGiField.metal"));
+        int start = metal.indexOf("inline bool metallum_gi_direct_visible_to_source(");
+        int end = metal.indexOf("\n}\n", start);
+        require(start >= 0 && end > start, "G3 direct-source visibility helper is missing");
+        String helper = metal.substring(start, end);
+        int inside = helper.indexOf("if (!metallum_gi_direct_inside(position)) return false;");
+        int endpoint = helper.indexOf("if (all(position == source)) return true;");
+        int occluder = helper.indexOf("if (metallum_gi_direct_occludes(geometry, position)) return false;");
+        require(inside >= 0 && endpoint > inside && occluder > endpoint,
+                "G3 rounded DDA can classify its emissive endpoint as an intervening occluder");
     }
 
     private static void resourceReloadRootEpochIsExplicitlyGuarded() throws IOException {
@@ -122,6 +137,38 @@ public final class GiDirectSourceSourceChainTests {
                         && !relabelBody.contains("populationMasks = (0, 0, 0)")
                         && !relabelBody.contains("populationCompleted = 0"),
                 "G3 metadata-only relabel destroys field readiness or population proof");
+    }
+
+    private static void liveContentRebasePreservesPendingOwnership() throws IOException {
+        String queue = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java"
+        ));
+        String coordinator = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java"
+        ));
+        int retirement = coordinator.indexOf("int retirementStatus = retireAcceptedBatch();");
+        int rebase = coordinator.indexOf("boolean liveInputRebase =");
+        require(retirement >= 0 && rebase > retirement
+                        && coordinator.contains("nextEpoch.isLiveInputSuccessorOf(previousEpoch)")
+                        && coordinator.contains("dynamicSources != null")
+                        && coordinator.contains("!dynamicSourceChanged && !environmentChanged")
+                        && coordinator.contains("!originsChanged")
+                        && coordinator.contains("this.acceptedBatch.pending()")
+                        && coordinator.contains("this.dirtyQueue.inFlightCount() != 0")
+                        && coordinator.contains("this.dirtyQueue.rebaseLiveInputEpoch(nextEpoch)")
+                        && coordinator.contains("Arrays.fill(this.cachedLiveSources, null)"),
+                "G3 live content rebase is not guarded by retired exact ownership");
+        require(queue.contains("public void rebaseLiveInputEpoch(")
+                        && queue.contains("this.inFlightCount != 0")
+                        && queue.contains("this.epoch = next;")
+                        && queue.contains("this.epochQueued = this.pendingCount;")
+                        && queue.contains("this.epochFullVolumeEnqueued = false;")
+                        && !queue.substring(
+                        queue.indexOf("public void rebaseLiveInputEpoch("),
+                        queue.indexOf("\n    public OfferResult enqueue", queue.indexOf(
+                                "public void rebaseLiveInputEpoch("))
+                ).contains("this.discarded++"),
+                "G3 content rebase drops ownership or retains a frozen population proof");
     }
 
     private static void coherentEnvironmentBoundaryIsLiveOnlyAndFailClosedAtWorldStart()
@@ -351,13 +398,19 @@ public final class GiDirectSourceSourceChainTests {
                 "G6 authoritative plan body is missing");
         String plan = live.substring(planStart, planEnd);
         int nativePlan = plan.indexOf("this.resources.planCascade(");
+        int retainedBasis = plan.indexOf(
+                "this.handoffRetainedMasks[cascade] = baseExact;", nativePlan
+        );
+        int stickyTransfer = plan.indexOf(
+                "conservativeMaskAfterAcceptedPlan(", retainedBasis
+        );
         int transfer = plan.indexOf("this.direct.transferLiveAffectedBrickMask(");
-        require(nativePlan >= 0 && transfer > nativePlan
+        require(nativePlan >= 0 && retainedBasis > nativePlan
+                        && stickyTransfer > retainedBasis && transfer > stickyTransfer
                         && plan.substring(nativePlan, transfer).contains(
                         "if (status != GiLiveLayout.STATUS_OK)")
-                        && plan.contains("conservativeMaskAfterAcceptedPlan(")
                         && plan.contains("source.affectedBrickMask()"),
-                "G6 clears source ownership before native plan success or loses pre-dispatch dirt");
+                "G6 plan did not atomically move sticky dirt into retained exact/required ownership");
 
         int directStart = swift.indexOf("private final class MetallumGiDirectSourceContextV1");
         int directEnd = swift.indexOf(

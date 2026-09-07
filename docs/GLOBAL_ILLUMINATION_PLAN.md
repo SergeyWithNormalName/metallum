@@ -155,9 +155,11 @@ emission = 0, sun/sky = 0, local sources = 0  =>  transported GI = 0
   truth. Для held/entity lights на G6 нужен отдельный bounded world-space
   collector с expiry/epoch. View-frustum/top-K snapshot direct renderer не может
   быть источником GI: иначе поворот камеры изменит off-screen illumination.
-- Непрямой свет не складывается вслепую с vanilla lightmap. При достаточной
-  confidence GI замещает соответствующую approximation ambient/indirect term;
-  L3/L4 direct terms остаются отдельными.
+- Непрямой свет не складывается с vanilla lightmap. Positive known-path
+  confidence допускает поверх отдельного non-GI ambient fallback ровно
+  вычисленную one-bounce correction без gain и без повторного умножения энергии
+  на confidence; нулевой confidence сохраняет fallback точно. L3/L4 direct
+  terms остаются отдельными.
 
 ### 4.5. Доказательства
 
@@ -398,7 +400,7 @@ emission, camera-independent L4 AIR environment и только static L3
 `BLOCK/STATIC_CACHE` до view admission. Albedo/`rho/pi`, transport, bounce,
 receiver и image binding отсутствуют. Source/bundled Metal Validation прошли
 zero/red/sealed/aperture/repeat-hash/stale/thread/lifetime проверки. Учтённый
-объём — `1,104,096` bytes при 24 MiB cap.
+объём исторического B8 receipt — `1,104,096` bytes при 24 MiB cap.
 
 Live Tier B на frozen 600+600 fixture выполнил ровно одну initial population:
 192 queued/completed, 0 discarded, 0 pending, максимум 8 bricks/frame.
@@ -408,6 +410,11 @@ Live Tier B на frozen 600+600 fixture выполнил ровно одну ini
 rejected evidence. Текущий статус — `G3_COMPLETE_FIELD_ONLY`; отдельно
 запрошенный G4 также прошёл собственный field-only stop-gate. Полный контракт
 G3: `docs/GI_G3.md`.
+
+Текущий G6 stability successor поднял тот же bounded cap до 16
+bricks/frame, не меняя field topology, shader math или исторический
+receipt. Current G3 native/Java census равен `1,313,760 + 140,104 =
+1,453,864` bytes; G2+G3 — `19,476,392`, G2+G3+G4 — `22,917,480`.
 
 ### G4 — детерминированный one-bounce diffuse transport
 
@@ -480,10 +487,13 @@ production FPS claim. На момент G4 G5 оставался заблоки�
 Композиция:
 
 - L3/L4 direct и local GGX остаются неизменными.
-- При valid confidence GI замещает соответствующую approximate ambient/indirect
-  часть; при confidence=0 получается точный существующий fallback.
-- Нельзя просто прибавить GI поверх vanilla ambient/lightmap и назвать двойную
-  энергию bounce.
+- При valid known-path confidence GI сохраняет non-GI ambient fallback и
+  прибавляет ровно physicalIndirect из G4/G6: без художественного gain, без
+  повторного `rho/pi` и без повторного confidence weight. Поэтому даже слабый
+  цветной transport не теряется под поканальным `max`, а результат не может
+  стать темнее GI-off; при confidence=0 получается точный существующий fallback.
+- Нельзя прибавлять GI к vanilla lightmap, повторно применять receiver albedo
+  или усиливать поле произвольным коэффициентом и называть это bounce.
 
 Dry performance gate до визуальной настройки:
 
@@ -508,8 +518,8 @@ Dry performance gate до визуальной настройки:
 Статус реализации от 28 августа 2026: первый vertex-stage кандидат установлен
 default-off для Sodium solid/cutout/translucent. Он использует четыре
 vertex-only read G4 SH/confidence (`texture 6..9`) и `buffer 25`, передаёт
-готовое normal-aware irradiance во fragment, заменяет только approximate
-ambient при positive confidence и сохраняет точный fallback при нуле.
+готовое normal-aware irradiance во fragment, добавляет exact one-bounce
+correction при positive confidence и сохраняет точный fallback при нуле.
 
 После P1 carrier-аудита единственный допустимый axis-normal carrier
 version-locked к `CompactChunkVertex` из Sodium `mc26.2-0.9.1-fabric`. Четыре

@@ -234,12 +234,18 @@ using the existing prepared terrain albedo. Source rho is never applied again.
 L3/L4 direct, directional sun, clustered local light and local/material GGX
 remain byte-for-byte on their existing paths.
 
-For valid confidence, G5 replaces only the declared approximate ambient or
-indirect term. It is not added on top of that term or the vanilla lightmap. For
-`confidence == 0`, the shader takes the untouched existing fallback branch; a
-zero-weight arithmetic rewrite is not sufficient evidence for an exact
-fallback. Values must remain finite and non-negative within the G4 FP16
-tolerance.
+For valid confidence, G5 retains the declared non-GI ambient fallback and adds
+the explicit one-bounce correction reconstructed from G4. The correction is
+not an arbitrary gain and is not added to the vanilla lightmap: it is exactly
+the finite, non-negative transported irradiance with receiver `rho/pi` applied
+once. G4 confidence is known-path support, not a second radiometric weight, so
+positive confidence only admits the transported value and never scales it
+again. This composition exposes colored bounce even when every transported
+channel is below the safety fallback, while known occlusion or partial
+coverage can never darken the GI-off image. For `confidence == 0`, the shader
+takes the untouched existing fallback branch; a zero-weight arithmetic rewrite
+is not sufficient evidence for an exact fallback. Values must remain finite
+and non-negative within the G4 FP16 tolerance.
 
 Mechanical tests must prove at least:
 
@@ -248,6 +254,8 @@ Mechanical tests must prove at least:
 - all six axis normals reconstruct the declared L1 lobe and unsupported normals
   fail closed;
 - out-of-coverage and confidence zero preserve the exact existing fallback;
+- positive confidence with zero irradiance also preserves the fallback, and
+  partial known-path confidence does not attenuate irradiance a second time;
 - receiver rho appears once and source rho does not appear in G5;
 - control, candidate and field share one generated shader/resource ABI;
 - an exact Sodium 0.9.1 encoder test covers `code=0..15`, proves the two
@@ -269,18 +277,22 @@ Mechanical tests must prove at least:
 
 ## Resource gate
 
-The fixed diffuse-GI cap remains `25,165,824` bytes (24 MiB). Accepted G2+G3+G4
-accounting is `22,637,928` bytes, leaving `2,527,896` bytes for all G5 native and
-Java persistent/in-flight accounting. The G5 census includes a conservative
+The fixed diffuse-GI cap remains `25,165,824` bytes (24 MiB). Current G3 B16
+successor G2+G3+G4 accounting is `22,917,480` bytes, leaving `2,248,344` bytes
+for all G5 native and Java persistent/in-flight accounting. The G5 census includes a conservative
 `65,536`-byte opaque lifetime charge for its sampler, Swift registry/context,
 Java owner/read capability and allocator metadata, plus the native
 `allocatedSize` of all four immutable 64-byte params buffers. It is not a claim
 that opaque object overhead is free or exactly queryable.
 
+The explicit user decision and any retained G5 B8 receipt keep the historical
+`22,637,928`-byte G4 base unchanged. New runtime receipts use the current B16
+base; the contract validates those two identities separately.
+
 G5 must report its actual params/lifetime allocation and prove
 
 ```text
-22,637,928 + G5_accounted_bytes <= 25,165,824
+22,917,480 + G5_accounted_bytes <= 25,165,824
 ```
 
 Texture reuse is counted once. Reporting the four G4 textures again as G5

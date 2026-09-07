@@ -44,6 +44,11 @@ public final class GiLiveRuntime {
             int schedulerInFlight,
             boolean schedulerAlgebraExact,
             long measurementStartAccountedBytes,
+            long terrainBindings,
+            long terrainZeroBindings,
+            long terrainFieldBindings,
+            long measurementStartTerrainZeroBindings,
+            long measurementStartTerrainFieldBindings,
             boolean admissionReceiptEmitted,
             long admissionDeviceGeneration,
             long admissionSubmitIndex,
@@ -55,6 +60,7 @@ public final class GiLiveRuntime {
             boolean latestTerrainFrameCompatible,
             int latestTerrainReadyMask,
             boolean latestTerrainExactMaskNonzero,
+            int latestTerrainVisibleMask,
             long latestTerrainFieldGeneration,
             long latestTerrainSourceTick
     ) {
@@ -107,6 +113,11 @@ public final class GiLiveRuntime {
     private static volatile int finalSchedulerInFlight;
     private static volatile boolean finalSchedulerAlgebraExact;
     private static volatile long measurementStartAccountedBytes = -1L;
+    private static volatile long terrainBindings;
+    private static volatile long terrainZeroBindings;
+    private static volatile long terrainFieldBindings;
+    private static volatile long measurementStartTerrainZeroBindings = -1L;
+    private static volatile long measurementStartTerrainFieldBindings = -1L;
     private static volatile boolean admissionReceiptEmitted;
     private static volatile long admissionDeviceGeneration = -1L;
     private static volatile long admissionSubmitIndex = -1L;
@@ -118,6 +129,7 @@ public final class GiLiveRuntime {
     private static volatile boolean latestTerrainFrameCompatible;
     private static volatile int latestTerrainReadyMask;
     private static volatile boolean latestTerrainExactMaskNonzero;
+    private static volatile int latestTerrainVisibleMask;
     private static volatile long latestTerrainFieldGeneration;
     private static volatile long latestTerrainSourceTick = -1L;
 
@@ -126,6 +138,11 @@ public final class GiLiveRuntime {
 
     public static boolean isRequested() {
         return REQUESTED;
+    }
+
+    /** True only for the explicit benchmark process; production code cannot request probes. */
+    public static boolean isBenchmarkActive() {
+        return BENCHMARK_ACTIVE;
     }
 
     /** Runtime work may continue while admission is waiting/ready, but never after fail-close. */
@@ -195,6 +212,11 @@ public final class GiLiveRuntime {
         finalSchedulerInFlight = 0;
         finalSchedulerAlgebraExact = false;
         measurementStartAccountedBytes = -1L;
+        terrainBindings = 0L;
+        terrainZeroBindings = 0L;
+        terrainFieldBindings = 0L;
+        measurementStartTerrainZeroBindings = -1L;
+        measurementStartTerrainFieldBindings = -1L;
         admissionReceiptEmitted = false;
         admissionDeviceGeneration = -1L;
         admissionSubmitIndex = -1L;
@@ -206,6 +228,7 @@ public final class GiLiveRuntime {
         latestTerrainFrameCompatible = false;
         latestTerrainReadyMask = 0;
         latestTerrainExactMaskNonzero = false;
+        latestTerrainVisibleMask = 0;
         latestTerrainFieldGeneration = 0L;
         latestTerrainSourceTick = -1L;
     }
@@ -295,11 +318,14 @@ public final class GiLiveRuntime {
                 finalSchedulerQueued, finalSchedulerCompleted, finalSchedulerDiscarded,
                 finalSchedulerPending, finalSchedulerInFlight, finalSchedulerAlgebraExact,
                 measurementStartAccountedBytes,
+                terrainBindings, terrainZeroBindings, terrainFieldBindings,
+                measurementStartTerrainZeroBindings, measurementStartTerrainFieldBindings,
                 admissionReceiptEmitted, admissionDeviceGeneration, admissionSubmitIndex,
                 latestTerrainBindingObserved, latestTerrainDeviceGeneration,
                 latestTerrainSubmitIndex, latestTerrainBindStatus,
                 latestTerrainCarrierSafe, latestTerrainFrameCompatible,
                 latestTerrainReadyMask, latestTerrainExactMaskNonzero,
+                latestTerrainVisibleMask,
                 latestTerrainFieldGeneration, latestTerrainSourceTick
         );
     }
@@ -337,17 +363,26 @@ public final class GiLiveRuntime {
             final boolean carrierSafe,
             final boolean frameCompatible,
             final int readyMask,
+            final int visibleMask,
             final long fieldGeneration,
             final long sourceTick
     ) {
         if (!REQUESTED) return;
         if (sourceDeviceGeneration != deviceGeneration || submitIndex < 0L
                 || (readyMask & ~GiLiveLayout.READY_MASK_ALL) != 0
+                || (visibleMask & ~GiLiveLayout.READY_MASK_ALL) != 0
+                || (bindStatus == GiLiveLayout.STATUS_OK) != (visibleMask != 0)
                 || fieldGeneration < 0L || sourceTick < 0L) {
             reportInvalid("G6 terrain binding receipt is invalid or belongs to a stale device");
             return;
         }
         latestTerrainBindingObserved = true;
+        terrainBindings = Math.incrementExact(terrainBindings);
+        if (bindStatus == GiLiveLayout.STATUS_OK) {
+            terrainFieldBindings = Math.incrementExact(terrainFieldBindings);
+        } else {
+            terrainZeroBindings = Math.incrementExact(terrainZeroBindings);
+        }
         latestTerrainDeviceGeneration = sourceDeviceGeneration;
         latestTerrainSubmitIndex = submitIndex;
         latestTerrainBindStatus = bindStatus;
@@ -355,6 +390,7 @@ public final class GiLiveRuntime {
         latestTerrainFrameCompatible = frameCompatible;
         latestTerrainReadyMask = readyMask;
         latestTerrainExactMaskNonzero = bindStatus == GiLiveLayout.STATUS_OK;
+        latestTerrainVisibleMask = visibleMask;
         latestTerrainFieldGeneration = fieldGeneration;
         latestTerrainSourceTick = sourceTick;
     }
@@ -377,9 +413,35 @@ public final class GiLiveRuntime {
                 && snapshot.latestTerrainCarrierSafe()
                 && snapshot.latestTerrainFrameCompatible()
                 && snapshot.latestTerrainReadyMask() == snapshot.readyMask()
-                && snapshot.latestTerrainExactMaskNonzero()
+                && snapshot.latestTerrainVisibleMask() == GiLiveLayout.READY_MASK_ALL
                 && snapshot.latestTerrainFieldGeneration() == snapshot.fieldGeneration()
                 && snapshot.latestTerrainSourceTick() == snapshot.sourceTick();
+    }
+
+    /**
+     * Bind-time continuity proof for a compatible successor update.  The global ready/generation
+     * tuple may already describe the field being rebuilt; this predicate deliberately consumes
+     * only the receiver mask actually written into the terrain params packet.
+     */
+    public static boolean latestTerrainAllCascadeBindingIsUsable(
+            final FinalSnapshot snapshot,
+            final long currentDeviceGeneration
+    ) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        return currentDeviceGeneration > 0L
+                && snapshot.deviceGeneration() == currentDeviceGeneration
+                && snapshot.admissionReceiptEmitted()
+                && snapshot.admissionDeviceGeneration() == currentDeviceGeneration
+                && snapshot.admissionSubmitIndex() >= 0L
+                && snapshot.latestTerrainBindingObserved()
+                && snapshot.latestTerrainDeviceGeneration() == currentDeviceGeneration
+                && snapshot.latestTerrainSubmitIndex() >= snapshot.admissionSubmitIndex()
+                && snapshot.latestTerrainBindStatus() == GiLiveLayout.STATUS_OK
+                && snapshot.latestTerrainCarrierSafe()
+                && snapshot.latestTerrainFrameCompatible()
+                && snapshot.latestTerrainVisibleMask() == GiLiveLayout.READY_MASK_ALL
+                && snapshot.staleRejects() == 0L
+                && snapshot.rejectedCount() == 0L;
     }
 
     /** Opens the G6 admission-receipt window independently of diagnostic G4. */
@@ -396,6 +458,8 @@ public final class GiLiveRuntime {
         if (REQUESTED) {
             benchmarkMeasurementStarted = true;
             measurementStartAccountedBytes = finalAccountedBytes;
+            measurementStartTerrainZeroBindings = terrainZeroBindings;
+            measurementStartTerrainFieldBindings = terrainFieldBindings;
         }
     }
 

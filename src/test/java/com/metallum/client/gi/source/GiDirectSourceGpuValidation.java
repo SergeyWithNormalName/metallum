@@ -37,6 +37,8 @@ public final class GiDirectSourceGpuValidation {
             require(!MetalNativeBridge.isNullHandle(layer), "Metal layer creation failed");
             queue = MTLCommandQueue.create(device, layer);
             validateField(device, queue);
+            validateRoundedSourceEndpointExclusion(device, queue);
+            validateBatchCapacity(device, queue);
             validateMetadataOnlyRelabel(device, queue);
             validateMetadataOnlyRelabelBusyRetry(device, queue);
             validateWrongThread(device, queue);
@@ -47,6 +49,39 @@ public final class GiDirectSourceGpuValidation {
             if (!MetalNativeBridge.isNullHandle(layer)) MetalNativeBridge.metallum_release_object(layer);
             MetalNativeBridge.metallum_release_device_caches(device);
             MetalNativeBridge.metallum_release_object(device);
+        }
+    }
+
+    /**
+     * Component-wise rounded DDA steps can reach a diagonal source cell before
+     * {@code step == ceil(distance)}. The source CONTENT cell is the endpoint, while a distinct
+     * intermediate CONTENT cell must remain a conservative blocker.
+     */
+    private static void validateRoundedSourceEndpointExclusion(
+            final MemorySegment device,
+            final MTLCommandQueue queue
+    ) {
+        try (Arena arena = Arena.ofShared();
+             GiDirectSourceGpuResources resources = GiDirectSourceGpuResources.create(
+                     device, queue.nativeHandle(), 707L,
+                     MetalNativeBridge::metallum_gi_direct_source_release_context_v1)) {
+            require(resources != null, "G3 rounded-endpoint context creation failed");
+
+            Packet open = diagonalStaticPacket(arena, 707L, 1L, false);
+            GiDirectSourceGpuResources.Capture openCapture = encodeAndCapture(
+                    resources, queue, open, 0, 2);
+            int receiver = captureCell(2, 2);
+            require(half(openCapture.directRgbaFloat16()[receiver]) > 0.25F
+                            && openCapture.directRgbaFloat16()[receiver + 1] == 0
+                            && openCapture.directRgbaFloat16()[receiver + 2] == 0
+                            && half(openCapture.directRgbaFloat16()[receiver + 3]) > 0.9F,
+                    "rounded diagonal endpoint self-occluded its static source");
+
+            Packet blocked = diagonalStaticPacket(arena, 707L, 2L, true);
+            GiDirectSourceGpuResources.Capture blockedCapture = encodeAndCapture(
+                    resources, queue, blocked, 0, 2);
+            require(isZeroCell(blockedCapture.directRgbaFloat16(), receiver),
+                    "intermediate CONTENT stopped occluding the diagonal static source");
         }
     }
 
@@ -62,9 +97,11 @@ public final class GiDirectSourceGpuValidation {
             GiDirectSourceGpuResources.Stats initial = resources.stats();
             require(!initial.ready() && !initial.buildInFlight()
                             && initial.worldGeneration() == 101L
-                            && initial.persistentBytes() > 0L
-                            && initial.stagingBytes() > 0L
-                            && initial.accountedBytes() < 2L * 1024L * 1024L
+                            && initial.persistentBytes() == 884_736L
+                            && initial.stagingBytes() == 419_808L
+                            && initial.readbackBytes() == 9_216L
+                            && initial.accountedBytes() == 1_313_760L
+                            && GiDirectSourceGpuResources.JAVA_PERSISTENT_PACKET_BYTES == 140_104L
                             && initial.fullVolumeRebuilds() == 0L,
                     "G3 initial lifecycle/budget differs");
 
@@ -126,6 +163,48 @@ public final class GiDirectSourceGpuValidation {
                             && completed.staleRejects() == 1L
                             && completed.fullVolumeRebuilds() == 1L,
                     "G3 bounded work counters differ");
+        }
+    }
+
+    private static void validateBatchCapacity(
+            final MemorySegment device,
+            final MTLCommandQueue queue
+    ) {
+        try (Arena arena = Arena.ofShared();
+             GiDirectSourceGpuResources resources = GiDirectSourceGpuResources.create(
+                     device, queue.nativeHandle(), 606L,
+                     MetalNativeBridge::metallum_gi_direct_source_release_context_v1)) {
+            require(resources != null, "G3 batch-capacity context creation failed");
+            Packet sixteen = packet(arena, 606L, 1L, 16, false, false, false);
+            MTLCommandBuffer accepted = queue.makeCommandBuffer("G3 batch-16 validation");
+            try {
+                require(resources.encode(accepted.handle(), MemorySegment.NULL, sixteen.batch())
+                                == GiDirectSourceGpuResources.STATUS_OK,
+                        "G3 native packet cap rejected sixteen bricks");
+                accepted.commit();
+                require(resources.awaitReady(10_000L), "G3 sixteen-brick packet did not complete");
+            } finally {
+                accepted.close();
+            }
+            try {
+                packet(arena, 606L, 2L, 17, false, false, false);
+                throw new AssertionError("G3 Java packet cap admitted seventeen bricks");
+            } catch (IllegalArgumentException expected) {
+                // PreparedBatch fail-closes before any native call.
+            }
+            Packet malformedSeventeen = packet(arena, 606L, 2L, 16, false, false, false);
+            malformedSeventeen.header().set(LE_INT, 144L, 17);
+            MTLCommandBuffer rejected = queue.makeCommandBuffer("G3 batch-17 native validation");
+            try {
+                require(MetalNativeBridge.metallum_gi_direct_source_encode_dirty_v1(
+                                resources.transportContextHandle(), rejected.handle(), MemorySegment.NULL,
+                                malformedSeventeen.header(), malformedSeventeen.bricks(),
+                                malformedSeventeen.cells(), malformedSeventeen.sources())
+                                == GiDirectSourceGpuResources.STATUS_INVALID,
+                        "G3 native packet cap admitted seventeen bricks");
+            } finally {
+                rejected.close();
+            }
         }
     }
 
@@ -390,11 +469,69 @@ public final class GiDirectSourceGpuValidation {
             cells.set(LE_SHORT, target + 6L, Float.floatToFloat16(1.0F));
         }
         if (redStatic) {
-            putFloat4(sources, 0L, 9.0F, 3.0F, 9.0F, 8.0F);
+            // C0 is one block per cell, so this source belongs to the tested (4,1,4) cell.
+            putFloat4(sources, 0L, 4.5F, 1.5F, 4.5F, 8.0F);
             putFloat4(sources, 16L, 1.0F, 0.0F, 0.0F, 1.0F);
         }
         GiDirectSourceGpuResources.PreparedBatch batch = new GiDirectSourceGpuResources.PreparedBatch(
                 header, bricks, cells, sources, brickCount, sourceCount);
+        return new Packet(header, bricks, cells, sources, batch);
+    }
+
+    private static Packet diagonalStaticPacket(
+            final Arena arena,
+            final long world,
+            final long content,
+            final boolean blocked
+    ) {
+        MemorySegment header = arena.allocate(GiDirectSourceGpuResources.HEADER_BYTES, Long.BYTES);
+        MemorySegment bricks = arena.allocate(GiDirectSourceGpuResources.BRICK_BYTES, Long.BYTES);
+        MemorySegment cells = arena.allocate(
+                512L * GiDirectSourceGpuResources.CELL_BYTES, Long.BYTES);
+        MemorySegment sources = arena.allocate(GiDirectSourceGpuResources.SOURCE_BYTES, Long.BYTES);
+        header.fill((byte) 0);
+        bricks.fill((byte) 0);
+        cells.fill((byte) 0);
+        sources.fill((byte) 0);
+
+        header.set(LE_INT, 0L, GiDirectSourceGpuResources.ABI_VERSION);
+        header.set(LE_INT, 4L, GiDirectSourceGpuResources.HEADER_BYTES);
+        header.set(LE_LONG, 8L, world);
+        header.set(LE_LONG, 16L, 1L);
+        header.set(LE_LONG, 24L, 1L);
+        header.set(LE_LONG, 32L, content);
+        header.set(LE_LONG, 40L, 1L);
+        header.set(LE_LONG, 48L, 1L);
+        header.set(LE_INT, 144L, 1);
+        header.set(LE_INT, 148L, 1);
+
+        bricks.set(LE_INT, 0L, 0);
+        bricks.set(LE_INT, 4L, 0);
+        bricks.set(LE_INT, 8L, 0);
+        bricks.set(LE_INT, 12L, 0);
+        bricks.set(LE_INT, 16L, 0);
+        bricks.set(LE_INT, 20L, 1);
+        bricks.set(LE_LONG, 24L, content);
+
+        for (int z = 0; z < 8; z++) {
+            for (int y = 0; y < 8; y++) {
+                for (int x = 0; x < 8; x++) {
+                    boolean contentCell = x == 2 && y == 2 && z == 2
+                            || x == 4 && y == 4 && z == 4
+                            || blocked && x == 3 && y == 3 && z == 3;
+                    long cellOffset = ((z * 8L + y) * 8L + x)
+                            * GiDirectSourceGpuResources.CELL_BYTES;
+                    cells.set(ValueLayout.JAVA_BYTE, cellOffset + 8L,
+                            (byte) (contentCell ? 2 : 1));
+                }
+            }
+        }
+        putFloat4(sources, 0L, 4.5F, 4.5F, 4.5F, 8.0F);
+        putFloat4(sources, 16L, 1.0F, 0.0F, 0.0F, 1.0F);
+
+        GiDirectSourceGpuResources.PreparedBatch batch =
+                new GiDirectSourceGpuResources.PreparedBatch(
+                        header, bricks, cells, sources, 1, 1);
         return new Packet(header, bricks, cells, sources, batch);
     }
 

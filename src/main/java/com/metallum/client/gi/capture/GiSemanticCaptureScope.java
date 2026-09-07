@@ -25,7 +25,6 @@ import java.util.List;
 
 /** One reusable worker-thread scope around the exact Sodium full-mesh execute call. */
 public final class GiSemanticCaptureScope implements AutoCloseable {
-    private static final int MAX_AXIS_OBSERVATIONS = 65_536;
     public record Result(
             GiSemanticSectionTask task,
             GiSemanticSectionSeed seed,
@@ -90,7 +89,7 @@ public final class GiSemanticCaptureScope implements AutoCloseable {
         if (!state.active || state.failed || observation == null) {
             return;
         }
-        if (state.observations.size() >= MAX_AXIS_OBSERVATIONS) {
+        if (state.observations.size() >= GiSemanticSectionBuilder.MAX_OBSERVATIONS) {
             state.observations.clear();
             state.failed = true;
             return;

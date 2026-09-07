@@ -3,7 +3,10 @@ package com.metallum.client.gi.field;
 /** Thread-safe accounting gate for immutable worker-produced G1 field candidates. */
 public final class GiFieldCandidateBudget {
     public static final int DEFAULT_MAX_CANDIDATES = 64;
-    public static final long DEFAULT_MAX_BYTES = 4L * 1024L * 1024L;
+    // A block-scale C0 snapshot is 112,536 bytes. Keep the original 64-candidate concurrency
+    // ceiling viable during Sodium's initial section-build burst; a byte cap below this product
+    // would silently reject authoritative sections and leave permanent UNKNOWN holes in GI.
+    public static final long DEFAULT_MAX_BYTES = 8L * 1024L * 1024L;
 
     public record Snapshot(int activeCandidates, long activeBytes, int peakCandidates, long peakBytes,
                            long accepted, long rejected) {

@@ -43,9 +43,9 @@ public final class GiSemanticGpuEncoderTests {
                 "G2 encoder lost generation/origin provenance");
 
         int unknown = cpu.cellIndexForWorld(0, 0, 0, 0);
-        int fallback = cpu.cellIndexForWorld(0, 2, 0, 0);
-        int empty = cpu.cellIndexForWorld(0, 4, 0, 0);
-        int content = cpu.cellIndexForWorld(0, 6, 0, 0);
+        int fallback = cpu.cellIndexForWorld(0, 1, 0, 0);
+        int empty = cpu.cellIndexForWorld(0, 2, 0, 0);
+        int content = cpu.cellIndexForWorld(0, 3, 0, 0);
         require(unknown >= 0 && fallback >= 0 && empty >= 0 && content >= 0,
                 "G2 encoder fixture cells are outside the near cascade");
 

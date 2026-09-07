@@ -73,6 +73,30 @@ public record GiLiveEpoch(
                 && this.environmentEpoch == other.environmentEpoch;
     }
 
+    /**
+     * Latest same-grid G2/static input may inherit pending brick ownership. Dynamic,
+     * environment, origin and structural transitions remain full scheduler rotations.
+     */
+    boolean isSameGridInputSuccessorOf(final GiLiveEpoch previous) {
+        Objects.requireNonNull(previous, "previous");
+        return this.version > previous.version
+                && this.dimensionId.equals(previous.dimensionId)
+                && this.worldGeneration == previous.worldGeneration
+                && this.resourceEpoch == previous.resourceEpoch
+                && this.materialEpoch == previous.materialEpoch
+                && this.clipmapGeneration == previous.clipmapGeneration
+                && this.paletteGeneration == previous.paletteGeneration
+                && this.dynamicSourceEpoch == previous.dynamicSourceEpoch
+                && this.environmentEpoch == previous.environmentEpoch
+                && this.cascade0Origin.equals(previous.cascade0Origin)
+                && this.cascade1Origin.equals(previous.cascade1Origin)
+                && this.cascade2Origin.equals(previous.cascade2Origin)
+                && this.contentGeneration >= previous.contentGeneration
+                && this.staticSourceEpoch >= previous.staticSourceEpoch
+                && (this.contentGeneration > previous.contentGeneration
+                || this.staticSourceEpoch > previous.staticSourceEpoch);
+    }
+
     /** Version is the sole ordering authority; component epochs are immutable identity fields. */
     public void requireStrictlyNewerThan(final GiLiveEpoch previous) {
         Objects.requireNonNull(previous, "previous");
@@ -82,12 +106,12 @@ public record GiLiveEpoch(
     }
 
     private static void requireAligned(final Origin origin, final int cascade) {
-        int cellSize = GiFieldLayout.cellSizeBlocks(cascade);
-        if (Math.floorMod(origin.x, cellSize) != 0
-                || Math.floorMod(origin.y, cellSize) != 0
-                || Math.floorMod(origin.z, cellSize) != 0) {
+        int originSnap = GiFieldLayout.originSnapBlocks(cascade);
+        if (Math.floorMod(origin.x, originSnap) != 0
+                || Math.floorMod(origin.y, originSnap) != 0
+                || Math.floorMod(origin.z, originSnap) != 0) {
             throw new IllegalArgumentException(
-                    "G6 cascade origin is not aligned to its world-grid cell size"
+                    "G6 cascade origin is not aligned to its world-grid origin quantum"
             );
         }
     }

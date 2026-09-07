@@ -7,12 +7,19 @@ import java.util.Objects;
 
 /**
  * Fixed-storage G6 dirty scheduler. Its drain allowance advances with source ticks, never with
- * the number of render/presentation calls made during one tick.
+ * the number of render/presentation calls made during one tick. Near work receives one full
+ * cascade worth of SLA priority; sustained work then grants one alternating outer-cascade batch
+ * before near resumes.
  */
 public final class GiLiveDirtyScheduler {
     public static final int DEFAULT_CAPACITY = GiDirectSourceLayout.TOTAL_BRICKS;
     public static final int DEFAULT_MAX_DRAIN_PER_TICK =
-            GiDirectSourceLayout.MAX_DRAIN_PER_FRAME;
+            GiLiveLayout.MAX_BRICKS_PER_SUBMIT;
+    /** One full near-cascade worth of work before an outer-cascade fairness grant. */
+    static final int MAX_CONSECUTIVE_NEAR_BATCHES = Math.ceilDiv(
+            GiDirectSourceLayout.BRICKS_PER_CASCADE,
+            GiLiveLayout.MAX_BRICKS_PER_SUBMIT
+    );
 
     public enum OfferResult { ENQUEUED, COALESCED, CAPACITY, STALE_EPOCH }
 
@@ -57,6 +64,8 @@ public final class GiLiveDirtyScheduler {
     private long discardedTotal;
     private long capacityRejectedTotal;
     private long staleRejectedTotal;
+    private int consecutiveNearBatches;
+    private int lastOuterCascade = GiDirectSourceLayout.CASCADE_COUNT - 1;
 
     public GiLiveDirtyScheduler() {
         this(DEFAULT_CAPACITY, DEFAULT_MAX_DRAIN_PER_TICK);
@@ -89,8 +98,26 @@ public final class GiLiveDirtyScheduler {
         this.pendingCount = 0;
         this.inFlightCount = 0;
         this.ownedCount = 0;
+        this.consecutiveNearBatches = 0;
+        this.lastOuterCascade = GiDirectSourceLayout.CASCADE_COUNT - 1;
         this.activeEpoch = next;
         return true;
+    }
+
+    /** Preserves queued age/classification across a latest same-grid content/static successor. */
+    public void rebaseLiveInputEpoch(final GiLiveEpoch next) {
+        Objects.requireNonNull(next, "next");
+        if (this.activeEpoch == null
+                || !next.isSameGridInputSuccessorOf(this.activeEpoch)) {
+            throw new IllegalArgumentException(
+                    "G6 live-input rebase is not a strict same-grid successor; previous="
+                            + this.activeEpoch + ", next=" + next
+            );
+        }
+        if (this.inFlightCount != 0) {
+            throw new IllegalStateException("G6 live-input rebase retained in-flight ownership");
+        }
+        this.activeEpoch = next;
     }
 
     public OfferResult enqueue(
@@ -164,9 +191,22 @@ public final class GiLiveDirtyScheduler {
         int remainingBudget = this.maxDrainPerTick - this.drainedThisTick;
         int limit = Math.min(remainingBudget, destinationBrickIds.length);
         int count = 0;
+        int selectedCascade = -1;
         while (count < limit) {
-            int selected = selectNext();
+            int selected = selectNext(selectedCascade);
             if (selected < 0) break;
+            if (selectedCascade < 0) {
+                selectedCascade = GiDirectSourceLayout.cascadeForBrickId(selected);
+                if (selectedCascade == 0) {
+                    this.consecutiveNearBatches = Math.min(
+                            MAX_CONSECUTIVE_NEAR_BATCHES,
+                            this.consecutiveNearBatches + 1
+                    );
+                } else {
+                    this.consecutiveNearBatches = 0;
+                    this.lastOuterCascade = selectedCascade;
+                }
+            }
             this.queued[selected] = false;
             this.inFlight[selected] = true;
             this.pendingCount--;
@@ -243,21 +283,60 @@ public final class GiLiveDirtyScheduler {
     public long queuedTotal() { return this.queuedTotal; }
     public long completedTotal() { return this.completedTotal; }
     public long discardedTotal() { return this.discardedTotal; }
+    GiLiveEpoch activeEpoch() { return this.activeEpoch; }
     public boolean algebraIsExact() {
         return this.queuedTotal == this.completedTotal + this.discardedTotal + this.ownedCount;
     }
 
-    private int selectNext() {
+    private int selectNext(final int requiredCascade) {
+        int selectedRequiredCascade = requiredCascade;
+        if (selectedRequiredCascade < 0) {
+            selectedRequiredCascade = selectBatchCascade();
+        }
         int selected = -1;
         for (int brickId = 0; brickId < this.queued.length; brickId++) {
             if (!this.queued[brickId]) continue;
-            if (selected < 0 || this.enqueueTick[brickId] < this.enqueueTick[selected]
+            int cascade = GiDirectSourceLayout.cascadeForBrickId(brickId);
+            if (selectedRequiredCascade >= 0 && cascade != selectedRequiredCascade) continue;
+            int selectedCascade = selected < 0 ? Integer.MAX_VALUE
+                    : GiDirectSourceLayout.cascadeForBrickId(selected);
+            if (selected < 0 || cascade < selectedCascade
+                    || cascade == selectedCascade
+                    && (this.enqueueTick[brickId] < this.enqueueTick[selected]
                     || (this.enqueueTick[brickId] == this.enqueueTick[selected]
-                    && brickId < selected)) {
+                    && brickId < selected))) {
                 selected = brickId;
             }
         }
         return selected;
+    }
+
+    private int selectBatchCascade() {
+        boolean near = hasQueuedCascade(0);
+        boolean outer = hasQueuedCascade(1) || hasQueuedCascade(2);
+        if (near && (!outer
+                || this.consecutiveNearBatches < MAX_CONSECUTIVE_NEAR_BATCHES)) {
+            return 0;
+        }
+        if (outer) {
+            for (int offset = 1; offset < GiDirectSourceLayout.CASCADE_COUNT; offset++) {
+                int cascade = 1 + Math.floorMod(
+                        this.lastOuterCascade - 1 + offset,
+                        GiDirectSourceLayout.CASCADE_COUNT - 1
+                );
+                if (hasQueuedCascade(cascade)) return cascade;
+            }
+        }
+        return near ? 0 : -1;
+    }
+
+    private boolean hasQueuedCascade(final int cascade) {
+        int first = cascade * GiDirectSourceLayout.BRICKS_PER_CASCADE;
+        int end = first + GiDirectSourceLayout.BRICKS_PER_CASCADE;
+        for (int brickId = first; brickId < end; brickId++) {
+            if (this.queued[brickId]) return true;
+        }
+        return false;
     }
 
     private void advanceSourceTick(final long sourceTick) {

@@ -9,14 +9,14 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HexFormat;
 
-/** Immutable material/emission truth reduced to the 2/4/8-block G1 cell grids. */
+/** Immutable material/emission truth reduced to the 1/4/8-block G1 cell grids. */
 public final class GiSemanticSectionSnapshot {
     public static final int CHANNELS_RGB = 3;
     public static final int CHANNELS_EMISSION = 4;
     public static final int FACE_COUNT = 6;
-    public static final int[] CASCADE_CELL_EDGES = {8, 4, 2};
-    public static final int[] CASCADE_CELL_OFFSETS = {0, 512, 576};
-    public static final int CELL_COUNT = 584;
+    public static final int[] CASCADE_CELL_EDGES = {16, 4, 2};
+    public static final int[] CASCADE_CELL_OFFSETS = {0, 4096, 4160};
+    public static final int CELL_COUNT = 4168;
     public static final long PAYLOAD_BYTES = (long) CELL_COUNT * (
             CHANNELS_RGB * Short.BYTES
                     + CHANNELS_EMISSION * Short.BYTES
@@ -52,6 +52,46 @@ public final class GiSemanticSectionSnapshot {
             final int observedQuads,
             final int fallbackCells
     ) {
+        this(albedoRgb, emissionRgbIntensity, occupancy, mediumMasks, validity, provenance,
+                faceWeights, knownCoverage, dominantMaterialIds, observedQuads, fallbackCells,
+                true);
+    }
+
+    /** Builder-only ownership transfer; every supplied array must be fresh and unaliased. */
+    static GiSemanticSectionSnapshot takeOwnership(
+            final short[] albedoRgb,
+            final short[] emissionRgbIntensity,
+            final byte[] occupancy,
+            final byte[] mediumMasks,
+            final byte[] validity,
+            final byte[] provenance,
+            final byte[] faceWeights,
+            final byte[] knownCoverage,
+            final short[] dominantMaterialIds,
+            final int observedQuads,
+            final int fallbackCells
+    ) {
+        return new GiSemanticSectionSnapshot(
+                albedoRgb, emissionRgbIntensity, occupancy, mediumMasks, validity, provenance,
+                faceWeights, knownCoverage, dominantMaterialIds, observedQuads, fallbackCells,
+                false
+        );
+    }
+
+    private GiSemanticSectionSnapshot(
+            final short[] albedoRgb,
+            final short[] emissionRgbIntensity,
+            final byte[] occupancy,
+            final byte[] mediumMasks,
+            final byte[] validity,
+            final byte[] provenance,
+            final byte[] faceWeights,
+            final byte[] knownCoverage,
+            final short[] dominantMaterialIds,
+            final int observedQuads,
+            final int fallbackCells,
+            final boolean copyArrays
+    ) {
         if (albedoRgb == null || albedoRgb.length != CELL_COUNT * CHANNELS_RGB
                 || emissionRgbIntensity == null || emissionRgbIntensity.length != CELL_COUNT * CHANNELS_EMISSION
                 || occupancy == null || occupancy.length != CELL_COUNT
@@ -70,15 +110,17 @@ public final class GiSemanticSectionSnapshot {
                 throw new IllegalArgumentException("G2 section contains unknown medium bits");
             }
         }
-        this.albedoRgb = albedoRgb.clone();
-        this.emissionRgbIntensity = emissionRgbIntensity.clone();
-        this.occupancy = occupancy.clone();
-        this.mediumMasks = mediumMasks.clone();
-        this.validity = validity.clone();
-        this.provenance = provenance.clone();
-        this.faceWeights = faceWeights.clone();
-        this.knownCoverage = knownCoverage.clone();
-        this.dominantMaterialIds = dominantMaterialIds.clone();
+        this.albedoRgb = copyArrays ? albedoRgb.clone() : albedoRgb;
+        this.emissionRgbIntensity = copyArrays
+                ? emissionRgbIntensity.clone() : emissionRgbIntensity;
+        this.occupancy = copyArrays ? occupancy.clone() : occupancy;
+        this.mediumMasks = copyArrays ? mediumMasks.clone() : mediumMasks;
+        this.validity = copyArrays ? validity.clone() : validity;
+        this.provenance = copyArrays ? provenance.clone() : provenance;
+        this.faceWeights = copyArrays ? faceWeights.clone() : faceWeights;
+        this.knownCoverage = copyArrays ? knownCoverage.clone() : knownCoverage;
+        this.dominantMaterialIds = copyArrays
+                ? dominantMaterialIds.clone() : dominantMaterialIds;
         this.observedQuads = observedQuads;
         this.fallbackCells = fallbackCells;
         this.digest = computeDigest();

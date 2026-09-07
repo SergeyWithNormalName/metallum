@@ -26,6 +26,12 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
     public static final int STATS_BYTES = 168;
     public static final int CAPTURE_DIRECT_BYTES = 8_192;
     public static final int CAPTURE_GEOMETRY_BYTES = 1_024;
+    /** Benchmark-only, asynchronous C0 texel probe. It is native-disabled unless explicitly armed. */
+    public static final int DEBUG_PROBE_ABI_VERSION = 1;
+    public static final int DEBUG_PROBE_LAYOUT_BYTES = 64;
+    public static final int DEBUG_PROBE_REQUEST_BYTES = 120;
+    public static final int DEBUG_PROBE_RESULT_BYTES = 512;
+    public static final int DEBUG_PROBE_MAX_SAMPLES = 7;
     public static final long JAVA_PERSISTENT_PACKET_BYTES = HEADER_BYTES
             + (long) GiDirectSourceLayout.MAX_DRAIN_PER_FRAME * BRICK_BYTES
             + (long) GiDirectSourceLayout.MAX_DRAIN_PER_FRAME
@@ -42,6 +48,12 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
     public static final int STATUS_WRONG_THREAD = -5;
     public static final int STATUS_REJECTED = -6;
 
+    /** Raw G3 geometry values emitted by {@code MetallumGiField.metal}; never treat UNKNOWN as air. */
+    public static final int GEOMETRY_UNKNOWN = 0;
+    public static final int GEOMETRY_EMPTY = 1;
+    public static final int GEOMETRY_CONTENT = 2;
+    public static final int GEOMETRY_FALLBACK = 3;
+
     private static final int RGBA16_FLOAT = 115;
     private static final int R8_UINT = 13;
     private static final ValueLayout.OfInt LE_INT = ValueLayout.JAVA_INT
@@ -50,6 +62,7 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
             .withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat LE_FLOAT = ValueLayout.JAVA_FLOAT
             .withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final ValueLayout.OfByte BYTE = ValueLayout.JAVA_BYTE;
 
     public record PreparedBatch(
             MemorySegment header,
@@ -117,6 +130,38 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
         }
     }
 
+    public record DebugProbeSample(
+            int worldX,
+            int worldY,
+            int worldZ,
+            int localX,
+            int localY,
+            int localZ,
+            float directRed,
+            float directGreen,
+            float directBlue,
+            float directAlpha,
+            int geometryState,
+            int flags
+    ) { }
+
+    public record DebugProbeCapture(
+            long worldGeneration,
+            long clipmapGeneration,
+            long paletteGeneration,
+            long contentGeneration,
+            long staticSourceEpoch,
+            long environmentEpoch,
+            int[] nearOrigin,
+            int sampleValidMask,
+            DebugProbeSample[] samples
+    ) {
+        public DebugProbeCapture {
+            nearOrigin = nearOrigin.clone();
+            samples = samples.clone();
+        }
+    }
+
     private final Thread ownerThread;
     private final Consumer<MemorySegment> deferredRelease;
     private final Arena arena;
@@ -125,6 +170,9 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
     private final MemorySegment cells;
     private final MemorySegment sources;
     private final MemorySegment stats;
+    private final MemorySegment debugProbeRequest;
+    private final MemorySegment debugProbeResult;
+    private int debugProbeLastStatus = STATUS_INVALID;
     private MemorySegment context;
 
     private GiDirectSourceGpuResources(
@@ -150,6 +198,8 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                 Long.BYTES
         );
         this.stats = arena.allocate(STATS_BYTES, Long.BYTES);
+        this.debugProbeRequest = arena.allocate(DEBUG_PROBE_REQUEST_BYTES, Long.BYTES);
+        this.debugProbeResult = arena.allocate(DEBUG_PROBE_RESULT_BYTES, Long.BYTES);
     }
 
     public static void validateNativeAbi() {
@@ -162,7 +212,7 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                 GiDirectSourceLayout.CELLS_PER_AXIS, GiDirectSourceLayout.BRICK_EDGE_CELLS,
                 GiDirectSourceLayout.MAX_DRAIN_PER_FRAME,
                 GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK,
-                3, 2, 4, 8, RGBA16_FLOAT, R8_UINT,
+                3, 1, 4, 8, RGBA16_FLOAT, R8_UINT,
                 STATUS_STALE, STATUS_BUSY, STATUS_CAPTURE_CONSUMED, STATUS_WRONG_THREAD,
                 STATUS_REJECTED, CAPTURE_DIRECT_BYTES, CAPTURE_GEOMETRY_BYTES
         };
@@ -189,6 +239,43 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
         }
     }
 
+    private static void validateNativeDebugProbeAbi() {
+        if (MetalNativeBridge.metallum_gi_direct_debug_probe_abi_version_v1()
+                != DEBUG_PROBE_ABI_VERSION) {
+            throw new IllegalStateException("Native G3 debug probe ABI version mismatch");
+        }
+        int[] expected = {
+                DEBUG_PROBE_ABI_VERSION, DEBUG_PROBE_LAYOUT_BYTES,
+                DEBUG_PROBE_REQUEST_BYTES, DEBUG_PROBE_RESULT_BYTES,
+                DEBUG_PROBE_MAX_SAMPLES, STATUS_OK, STATUS_INVALID, STATUS_BUSY,
+                STATUS_STALE, STATUS_WRONG_THREAD, STATUS_REJECTED,
+                DEBUG_PROBE_MAX_SAMPLES * 2 * 256
+        };
+        try (Arena probe = Arena.ofConfined()) {
+            MemorySegment layout = probe.allocate(DEBUG_PROBE_LAYOUT_BYTES, Long.BYTES);
+            layout.fill((byte) 0x55);
+            int status = MetalNativeBridge.metallum_gi_direct_debug_probe_layout_v1(
+                    layout, layout.byteSize());
+            if (status != STATUS_OK) {
+                throw new IllegalStateException("Native G3 debug probe layout query failed: " + status);
+            }
+            for (int index = 0; index < expected.length; index++) {
+                int actual = layout.get(LE_INT, (long) index * Integer.BYTES);
+                if (actual != expected[index]) {
+                    throw new IllegalStateException("Native G3 debug probe layout mismatch at word "
+                            + index + ": expected " + expected[index] + ", got " + actual);
+                }
+            }
+            for (int index = expected.length; index < DEBUG_PROBE_LAYOUT_BYTES / Integer.BYTES;
+                    index++) {
+                if (layout.get(LE_INT, (long) index * Integer.BYTES) != 0) {
+                    throw new IllegalStateException(
+                            "Native G3 debug probe reserved layout word is non-zero: " + index);
+                }
+            }
+        }
+    }
+
     public static @Nullable GiDirectSourceGpuResources create(
             final MemorySegment device,
             final MemorySegment commandQueue,
@@ -201,6 +288,7 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
             return null;
         }
         validateNativeAbi();
+        validateNativeDebugProbeAbi();
         MemorySegment context = MetalNativeBridge.metallum_gi_direct_source_create_context_v1(
                 device, commandQueue, worldGeneration);
         if (MetalNativeBridge.isNullHandle(context)) {
@@ -256,6 +344,8 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
         }
         if (!field.world().dimensionId().equals(epoch.staticLightWorld().dimensionId())
                 || field.world().worldGeneration() != epoch.g2WorldGeneration()
+                || field.world().resourceEpoch() != epoch.g2ResourceEpoch()
+                || field.world().materialEpoch() != epoch.g2MaterialEpoch()
                 || field.clipmapGeneration() != epoch.g2ClipmapGeneration()
                 || field.paletteGeneration() != epoch.g2PaletteGeneration()
                 || field.contentGeneration() != epoch.g2ContentGeneration()
@@ -695,6 +785,106 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                     CAPTURE_GEOMETRY_BYTES);
             return new Capture(directArray, geometryArray);
         }
+    }
+
+    /**
+     * Starts a benchmark-only C0 point capture.  The request is written into a preallocated
+     * packet and native returns immediately after committing its blit command buffer.
+     */
+    public int beginDebugProbe(
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        assertUsable();
+        Objects.requireNonNull(worldXs, "worldXs");
+        Objects.requireNonNull(worldYs, "worldYs");
+        Objects.requireNonNull(worldZs, "worldZs");
+        int count = worldXs.length;
+        if (count <= 0 || count > DEBUG_PROBE_MAX_SAMPLES
+                || worldYs.length != count || worldZs.length != count) {
+            throw new IllegalArgumentException("G3 debug probe sample arrays are invalid");
+        }
+        this.debugProbeRequest.fill((byte) 0);
+        this.debugProbeRequest.set(LE_INT, 0L, DEBUG_PROBE_ABI_VERSION);
+        this.debugProbeRequest.set(LE_INT, 4L, count);
+        for (int index = 0; index < count; index++) {
+            long offset = 8L + (long) index * 16L;
+            this.debugProbeRequest.set(LE_INT, offset, worldXs[index]);
+            this.debugProbeRequest.set(LE_INT, offset + 4L, worldYs[index]);
+            this.debugProbeRequest.set(LE_INT, offset + 8L, worldZs[index]);
+        }
+        this.debugProbeLastStatus = MetalNativeBridge.metallum_gi_direct_begin_debug_probe_v1(
+                this.context, this.debugProbeRequest
+        );
+        return this.debugProbeLastStatus;
+    }
+
+    /**
+     * Non-blocking benchmark poll. {@code null} means the native blit is still pending or its
+     * snapshot became stale; callers inspect {@link #debugProbeLastStatus()} for a bounded retry.
+     */
+    public @Nullable DebugProbeCapture pollDebugProbe() {
+        assertUsable();
+        this.debugProbeResult.fill((byte) 0);
+        int status = MetalNativeBridge.metallum_gi_direct_poll_debug_probe_v1(
+                this.context, this.debugProbeResult
+        );
+        this.debugProbeLastStatus = status;
+        if (status != STATUS_OK) {
+            return null;
+        }
+        if (this.debugProbeResult.get(LE_INT, 0L) != DEBUG_PROBE_ABI_VERSION) {
+            throw new IllegalStateException("Native G3 debug probe returned the wrong ABI version");
+        }
+        int count = this.debugProbeResult.get(LE_INT, 4L);
+        if (count <= 0 || count > DEBUG_PROBE_MAX_SAMPLES) {
+            throw new IllegalStateException("Native G3 debug probe returned an invalid sample count");
+        }
+        DebugProbeSample[] samples = new DebugProbeSample[count];
+        for (int index = 0; index < count; index++) {
+            long offset = 128L + (long) index * 48L;
+            samples[index] = new DebugProbeSample(
+                    this.debugProbeResult.get(LE_INT, offset),
+                    this.debugProbeResult.get(LE_INT, offset + 4L),
+                    this.debugProbeResult.get(LE_INT, offset + 8L),
+                    this.debugProbeResult.get(LE_INT, offset + 12L),
+                    this.debugProbeResult.get(LE_INT, offset + 16L),
+                    this.debugProbeResult.get(LE_INT, offset + 20L),
+                    this.debugProbeResult.get(LE_FLOAT, offset + 24L),
+                    this.debugProbeResult.get(LE_FLOAT, offset + 28L),
+                    this.debugProbeResult.get(LE_FLOAT, offset + 32L),
+                    this.debugProbeResult.get(LE_FLOAT, offset + 36L),
+                    Byte.toUnsignedInt(this.debugProbeResult.get(BYTE, offset + 40L)),
+                    this.debugProbeResult.get(LE_INT, offset + 44L)
+            );
+        }
+        return new DebugProbeCapture(
+                this.debugProbeResult.get(LE_LONG, 8L),
+                this.debugProbeResult.get(LE_LONG, 16L),
+                this.debugProbeResult.get(LE_LONG, 24L),
+                this.debugProbeResult.get(LE_LONG, 32L),
+                this.debugProbeResult.get(LE_LONG, 40L),
+                this.debugProbeResult.get(LE_LONG, 48L),
+                new int[] {
+                        this.debugProbeResult.get(LE_INT, 56L),
+                        this.debugProbeResult.get(LE_INT, 60L),
+                        this.debugProbeResult.get(LE_INT, 64L)
+                },
+                this.debugProbeResult.get(LE_INT, 68L),
+                samples
+        );
+    }
+
+    public int debugProbeLastStatus() {
+        assertUsable();
+        return this.debugProbeLastStatus;
+    }
+
+    /** Coordinator-side identity rejection after the native snapshot completed. */
+    void markDebugProbeStale() {
+        assertUsable();
+        this.debugProbeLastStatus = STATUS_STALE;
     }
 
     @Override

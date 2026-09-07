@@ -65,7 +65,7 @@ public final class GiFieldGpuResources implements AutoCloseable {
                 GiFieldLayout.CASCADE_COUNT,
                 GiFieldLayout.CELLS_PER_AXIS,
                 GiFieldLayout.MIP_LEVEL_COUNT,
-                2,
+                GiFieldLayout.cellSizeBlocks(0),
                 4,
                 8,
                 GiFieldLayout.FIELD_BYTES_PER_CELL,
