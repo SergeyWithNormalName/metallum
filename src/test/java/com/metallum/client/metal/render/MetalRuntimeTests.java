@@ -82,6 +82,7 @@ public final class MetalRuntimeTests {
         testLocalShadowResidentAtlasContracts();
         testJavaWorkloadTelemetryGateAndReset();
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
+        testTransientUploadBoundsFailClosed();
         testGpuTimingStageAbi();
         testFrameInterpolationTicketCommitBoundary();
         testResourceBindingPacketReuseAndValidation();
@@ -1569,6 +1570,18 @@ public final class MetalRuntimeTests {
         require(snapshot.gpuTransientRequestedBytes() == 24L
                         && snapshot.gpuTransientReservedBytes() == 64L,
                 "mapped reservation was not retained as transient allocator pressure");
+    }
+
+    private static void testTransientUploadBoundsFailClosed() {
+        require(MetalTransientMemory.checkedUploadCopyLength(64L, 16L, 48L) == 48L,
+                "exact transient upload range was rejected");
+        require(MetalTransientMemory.checkedUploadCopyLength(64L, 64L, 0L) == 0L,
+                "empty transient upload at the slice end was rejected");
+        expectIllegalState(() -> MetalTransientMemory.checkedUploadCopyLength(64L, 17L, 48L));
+        expectIllegalState(() -> MetalTransientMemory.checkedUploadCopyLength(64L, 65L, 0L));
+        expectIllegalState(() -> MetalTransientMemory.checkedUploadCopyLength(-1L, 0L, 0L));
+        expectIllegalState(() -> MetalTransientMemory.checkedUploadCopyLength(64L, -1L, 1L));
+        expectIllegalState(() -> MetalTransientMemory.checkedUploadCopyLength(64L, 0L, -1L));
     }
 
     private static void testPendingUiSeedConsumeOnceLifecycle() {
