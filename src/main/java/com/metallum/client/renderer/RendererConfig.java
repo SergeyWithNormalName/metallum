@@ -67,6 +67,8 @@ public record RendererConfig(
         }
     }
 
+    private static volatile RendererConfig activeConfig;
+
     public static RendererConfig defaults() {
         return new RendererConfig(
                 false, LightingPreset.BALANCED, false, false,
@@ -75,8 +77,26 @@ public record RendererConfig(
     }
 
     public static RendererConfig load() {
-        Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
-        return load(path);
+        RendererConfig cached = activeConfig;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            Path configDirectory = FabricLoader.getInstance().getConfigDir();
+            if (configDirectory != null) {
+                RendererConfig loaded = load(configDirectory.resolve(FILE_NAME));
+                activeConfig = loaded;
+                return loaded;
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+        }
+        RendererConfig def = defaults();
+        activeConfig = def;
+        return def;
+    }
+
+    public static void resetForTesting() {
+        activeConfig = null;
     }
 
     /**
@@ -292,8 +312,14 @@ public record RendererConfig(
     }
 
     public void save() {
-        Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
-        this.save(path);
+        activeConfig = this;
+        try {
+            Path configDirectory = FabricLoader.getInstance().getConfigDir();
+            if (configDirectory != null) {
+                this.save(configDirectory.resolve(FILE_NAME));
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+        }
     }
 
     boolean save(final Path path) {

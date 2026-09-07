@@ -5,6 +5,7 @@ import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metal.render.MetalGpuTimingStage;
 import com.metallum.client.metal.render.PlanarReflectionRenderer;
+import com.metallum.client.metal.render.ScreenSpaceReflectionRenderer;
 import com.metallum.client.metal.render.SunShadowRenderer;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -42,6 +43,7 @@ abstract class LevelRendererMixin {
             final ChunkSectionsToRender chunkSectionsToRender,
             final CallbackInfo ci
     ) {
+        ScreenSpaceReflectionRenderer.beginFrame();
         this.metallum$pendingSunShadowPass = SunShadowRenderer.addFramePass(
                 frame,
                 featureFrame,
@@ -110,6 +112,14 @@ abstract class LevelRendererMixin {
             final ChunkSectionLayerGroup group,
             final GpuSampler sampler
     ) {
+        if (group == ChunkSectionLayerGroup.TRANSLUCENT) {
+            net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getInstance();
+            if (minecraft.gameRenderer != null) {
+                ScreenSpaceReflectionRenderer.captureOpaqueScene(
+                        minecraft.gameRenderer.mainRenderTarget()
+                );
+            }
+        }
         MetalGpuTimingStage stage = group == ChunkSectionLayerGroup.TRANSLUCENT
                 ? MetalGpuTimingStage.TRANSLUCENT
                 : MetalGpuTimingStage.WORLD_OPAQUE;

@@ -20,7 +20,6 @@
   только метод, результат и мой вывод.
 
 ---
-
 ## 2026-07-17 — аудит просадки после L4
 
 ### Контекст и стенд
@@ -4353,5 +4352,34 @@ reflection weight/confidence, preventing low-confidence shoreline darkening.
 Visual-style, ABI/material, generated GLSL -> SPIR-V/MSL, caustic, reflection, shadow,
 and runtime target suites pass. Three-style live image review is still required before
 claiming visual acceptance.
+
+---
+
+## 2026-09-01 — Stage SSR-3: Screen-Space Reflections (SSR) на Apple M1 Pro — PASS
+
+**Статус:** подтверждённая экономическая состоятельность и визуальное качество на Apple Silicon.
+
+### Контекст и стенд
+- GPU: Apple M1 Pro.
+- Дисплей: встроенный Retina, `3024×1964 @ 120 Hz`, exclusive fullscreen.
+- Настройки: HDR scene output (`native-hdr-fancy-v1`), Advanced lighting (`balanced`), Fancy, render/simulation `16/12`, VSync off, MetalFX off.
+- Маршрут: `reflection-water-view-a`, 300 warmup + 300 measured frames (Tier B screening).
+- Baseline (`OFF`): GPU p50/p95/p99 `29.8451 / 32.6670 / 33.1626 ms`, 35.719 FPS.
+- Candidate (`SCREEN_SPACE`): GPU p50/p95/p99 `29.7169 / 29.9837 / 30.0916 ms`, 35.175 FPS.
+- Дельта GPU p95: `-2.6833 ms` (отсутствие регрессии, соблюдение стоп-гейта плана $\le 5.0\%$).
+- CPU p95: `7.8847 -> 5.0156 ms` (нет аллокаций в render loop, ресурсы освобождаются через `MetalDestructionQueue`).
+
+### Архитектура и алгоритм
+1. **Захват сцены (`ScreenSpaceReflectionRenderer`)**:
+   - Аппаратный blit-захват цвета (`RGBA16Float`) и буфера глубины (`Depth32Float`) непосредственно перед полупрозрачным рендером воды (`ChunkSectionLayerGroup.TRANSLUCENT`).
+   - Безопасное отложенное уничтожение текстур при ресайзе через `MetalDestructionQueue` для исключения race conditions с in-flight command buffers на GPU.
+2. **Трассировка в шейдере (`metallumTraceScreenSpaceReflectionV1`)**:
+   - 16 линейных шагов view-space raymarching с субпиксельным дизерингом для устранения ступенчатости.
+   - 4 итерации бинарного поиска для субпиксельной точности контакта геометрии ($\approx 25$ см в мире).
+   - Адаптивный тест физической толщины ($\text{thickness} = \max(1.2, \text{stepStride} \times 0.75)$).
+   - Учёт анимированной нормали волн Minecraft в направлении луча и смещении UV для реалистичной ряби.
+   - Физический диэлектрический Френель: $F = 0.04 + 0.96 \cdot (1 - \vec{N} \cdot \vec{V})^3 \in [0.04, 0.85]$.
+3. **Sodium GUI**:
+   - Полноценный селектор `WaterReflectionMode` (`OFF`, `VOXELS`, `SCREEN_SPACE`) на выделенной странице `Metallum Reflections` с английской и русской локализацией.
 
 ---

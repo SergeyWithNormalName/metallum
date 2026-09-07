@@ -208,6 +208,8 @@ fragment float4 metallum_actual_hdr_extract_fs(
   uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
   float3 bloomSum = float3(0.0);
   float averageY = 0.0;
+  float3 peakBloom = float3(0.0);
+  float peakLum = 0.0;
 
   for (uint yIndex = 0u; yIndex < 4u; ++yIndex) {
     for (uint xIndex = 0u; xIndex < 4u; ++xIndex) {
@@ -222,8 +224,14 @@ fragment float4 metallum_actual_hdr_extract_fs(
       // only from actual over-reference radiance, without semantic markers or
       // an inferred replacement for clipped SDR highlights.
       float3 overReference = max(radiance - 1.0, 0.0);
-      float bloomGate = smoothstep(0.0, 0.25, metallum_hdr_luminance(overReference));
-      bloomSum += overReference * bloomGate;
+      float overLum = metallum_hdr_luminance(overReference);
+      float bloomGate = smoothstep(0.0, 0.25, overLum);
+      float3 candidateBloom = overReference * bloomGate;
+      bloomSum += candidateBloom;
+      if (overLum > peakLum) {
+        peakLum = overLum;
+        peakBloom = candidateBloom;
+      }
     }
   }
   averageY *= 1.0 / 16.0;
@@ -234,7 +242,14 @@ fragment float4 metallum_actual_hdr_extract_fs(
     atomic_fetch_add_explicit(&histogram[bin], 1u, memory_order_relaxed);
   }
 
-  return float4(bloomSum * (1.0 / 16.0), averageY);
+  // Preserve isolated point-source energy: when a bright light occupies only
+  // 1-2 texels in a 4x4 cell, a pure 1/16 arithmetic average dilutes its bloom
+  // to near zero before blurring. For broad emitters, pointIsolation approaches 0.
+  float3 avgBloom = bloomSum * (1.0 / 16.0);
+  float pointIsolation = clamp(1.0 - (metallum_hdr_luminance(avgBloom) / max(peakLum, 1e-4)), 0.0, 1.0);
+  float3 pointPreservedBloom = mix(avgBloom, peakBloom * 0.5, pointIsolation * 0.65);
+
+  return float4(pointPreservedBloom, averageY);
 }
 
 kernel void metallum_hdr_histogram_build(
@@ -456,13 +471,16 @@ kernel void metallum_actual_hdr_exposure_reduce(
 
   uint rank50 = max(uint(ceil(float(total) * 0.50)), 1u);
   uint rank90 = max(uint(ceil(float(total) * 0.90)), 1u);
+  uint rank98 = max(uint(ceil(float(total) * 0.98)), 1u);
   uint rank99 = max(uint(ceil(float(total) * 0.99)), 1u);
   uint cumulative = 0u;
   uint bin50 = 63u;
   uint bin90 = 63u;
+  uint bin98 = 63u;
   uint bin99 = 63u;
   bool found50 = false;
   bool found90 = false;
+  bool found98 = false;
   bool found99 = false;
   for (uint bin = 0u; bin < 64u; ++bin) {
     cumulative += bins[bin];
@@ -474,6 +492,10 @@ kernel void metallum_actual_hdr_exposure_reduce(
       bin90 = bin;
       found90 = true;
     }
+    if (!found98 && cumulative >= rank98) {
+      bin98 = bin;
+      found98 = true;
+    }
     if (!found99 && cumulative >= rank99) {
       bin99 = bin;
       found99 = true;
@@ -482,28 +504,45 @@ kernel void metallum_actual_hdr_exposure_reduce(
 
   float p50Log2 = -12.0 + (float(bin50) + 0.5) * 0.25;
   float p90Log2 = -12.0 + (float(bin90) + 0.5) * 0.25;
+  float p98Log2 = -12.0 + (float(bin98) + 0.5) * 0.25;
   float p99Log2 = -12.0 + (float(bin99) + 0.5) * 0.25;
+  float adaptationPeak = exp2(p98Log2);
   float measuredPeak = exp2(p99Log2);
 
-  // Exposure never invents range and never boosts a dim scene. It only
-  // attenuates when measured scene radiance would exceed the live EDR budget.
+  // The p98 control statistic is deliberately more robust than p99 to a small
+  // torch/lava highlight crossing one histogram cell while the camera moves.
+  // p99 remains the reported scene peak; the display shoulder independently
+  // bounds sparse values that p98 excludes from global exposure.
   float targetExposure = min(
     1.0,
-    max(0.25, (safeHeadroom * 0.92) / max(measuredPeak, 1.0))
+    max(0.25, (safeHeadroom * 0.92) / max(adaptationPeak, 1.0))
   );
   bool reset = uniforms.forceReset != 0u
     || previous.valid == 0u
-    || uniforms.deltaTime > 1.0
-    || abs(p50Log2 - previous.medianLog2) > 2.0;
+    || !isfinite(previous.exposure)
+    || !isfinite(previous.currentHeadroom);
   float exposure = targetExposure;
   if (!reset) {
-    // Reduce exposure quickly, recover slowly, and cap immediately after a
-    // headroom drop so no over-range frame remains in flight.
-    float timeConstant = targetExposure < previous.exposure ? 0.12 : 0.75;
-    float blend = 1.0 - exp(-max(uniforms.deltaTime, 0.0) / timeConstant);
-    exposure = mix(previous.exposure, targetExposure, clamp(blend, 0.0, 1.0));
+    // Exposure is perceptual, so adapt in EV. A bounded time step prevents a
+    // scheduler stall or pause from becoming a one-frame full-scene snap.
+    float previousExposure = clamp(previous.exposure, 0.25, 1.0);
+    float previousEv = log2(previousExposure);
+    float targetEv = log2(targetExposure);
+    float timeConstant = targetEv < previousEv ? 0.35 : 1.0;
+    float deltaTime = clamp(uniforms.deltaTime, 0.0, 1.0 / 15.0);
+    float blend = 1.0 - exp(-deltaTime / timeConstant);
+    exposure = exp2(mix(previousEv, targetEv, clamp(blend, 0.0, 1.0)));
+
+    // The output shoulder already enforces the current numeric headroom. Only
+    // a meaningful hardware-headroom loss gets an immediate quality cap; a
+    // small EDR readout wobble must not pulse the entire world.
+    float headroomDeadband = max(0.05, 0.02 * max(previous.currentHeadroom, 1.0));
+    bool meaningfulHeadroomDrop =
+      safeHeadroom < previous.currentHeadroom - headroomDeadband;
+    if (meaningfulHeadroomDrop) {
+      exposure = min(exposure, targetExposure);
+    }
   }
-  exposure = min(exposure, targetExposure);
 
   ActualHdrExposureState next;
   next.exposure = clamp(exposure, 0.25, 1.0);

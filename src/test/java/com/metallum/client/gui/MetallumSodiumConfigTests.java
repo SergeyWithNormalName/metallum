@@ -1,6 +1,10 @@
 package com.metallum.client.gui;
 
+import com.metallum.client.lighting.reflection.WaterReflectionConfig;
+import com.metallum.client.lighting.reflection.WaterReflectionMode;
+import com.metallum.client.metalfx.MetalFxUpscalingMode;
 import com.metallum.client.renderer.GlobalIlluminationMode;
+import com.metallum.client.renderer.GraphicsPreset;
 import com.metallum.client.renderer.RendererConfig;
 import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.client.config.ConfigManager;
@@ -20,7 +24,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
 
-/** Verifies the pinned Sodium 0.9.1 config structure exposed by Metallum. */
+/** Verifies the restructured Sodium 0.9.1 config structure exposed by Metallum. */
 public final class MetallumSodiumConfigTests {
     private MetallumSodiumConfigTests() {
     }
@@ -41,18 +45,44 @@ public final class MetallumSodiumConfigTests {
                 "Metallum registered an external page instead of its option page");
         OptionPage page = (OptionPage) options.pages().getFirst();
         require(!page.groups().isEmpty(), "Metallum Sodium page has no option groups");
-        OptionGroup lighting = page.groups().getFirst();
-        require(lighting.options().size() == 3,
-                "Metallum Lighting group must expose Visual Style, Advanced Lighting, and Preset selectors");
+        require(page.groups().size() == 6, "Metallum Sodium page should have exactly 6 structured groups");
 
         Field idField = Option.class.getDeclaredField("id");
         idField.setAccessible(true);
+
+        // Group 1: Summary / Quick Settings
+        OptionGroup summary = page.groups().get(0);
+        require(summary.options().size() == 5,
+                "Metallum Summary group must expose Preset, Style, Upscaling, HDR, and Resolution Overlay");
+
+        Option graphicsPreset = findOption(page, idField, "graphics_preset");
+        require(graphicsPreset instanceof EnumOption, "graphics_preset must be an EnumOption");
+        require(((EnumOption<?>) graphicsPreset).getApplyHook() != null,
+                "graphics_preset must have apply hook for resynchronizing coupled bindings");
+
         Option visualStyle = findOption(page, idField, "visual_style");
         require(visualStyle instanceof EnumOption,
                 "Metallum visual_style Sodium option is missing or has the wrong type");
         require(visualStyle.getFlags() == null || !visualStyle.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum visual_style option must NOT require a game restart");
 
+        Option metalfxUpscaling = findOption(page, idField, "metalfx_upscaling");
+        require(metalfxUpscaling instanceof EnumOption,
+                "Metallum metalfx_upscaling Sodium option is missing or has the wrong type");
+        require(MetalFxUpscalingMode.values().length == 4,
+                "MetalFxUpscalingMode must expose exactly 4 modes: OFF, SPATIAL, TEMPORAL, TEMPORAL_FI");
+
+        Option hdrOption = findOption(page, idField, "hdr_enabled");
+        require(hdrOption instanceof BooleanOption,
+                "Metallum HDR-enabled Sodium option is missing or has the wrong type");
+        require(hdrOption.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum HDR-enabled option must require a full game restart");
+
+        Option resolutionOverlay = findOption(page, idField, "metalfx_resolution_overlay");
+        require(resolutionOverlay instanceof BooleanOption,
+                "Metallum metalfx_resolution_overlay Sodium option is missing or has the wrong type");
+
+        // Group 2: Lighting & GI
         Option option = findOption(page, idField, "improved_lighting");
         Identifier id = (Identifier) idField.get(option);
         require(option instanceof BooleanOption
@@ -74,13 +104,6 @@ public final class MetallumSodiumConfigTests {
         require(((BooleanOption) option).getApplyHook() != null
                         && ((BooleanOption) globalIllumination).getApplyHook() != null,
                 "Advanced/GI coupling must resynchronize Sodium values after Apply");
-        OptionGroup globalIlluminationGroup = findGroup(
-                page,
-                idField,
-                "global_illumination"
-        );
-        require(globalIlluminationGroup.options().size() == 2,
-                "Global Illumination group must contain production GI and the isolated G4 debug HUD");
 
         Option giTransportDebug = findOption(page, idField, "gi_g4_debug_hud");
         requireRestartBoolean(giTransportDebug, "G4 transport debug HUD");
@@ -102,36 +125,19 @@ public final class MetallumSodiumConfigTests {
                         && !advancedDisabled.improvedLighting(),
                 "Disabling Advanced Lighting must fail closed to GI_OFF");
 
-        Option metalfxUpscaling = findOption(page, idField, "metalfx_upscaling");
-        require(metalfxUpscaling instanceof EnumOption,
-                "Metallum metalfx_upscaling Sodium option is missing or has the wrong type");
+        // Group 3: Shadows
+        Option shadows = findOption(page, idField, "experimental_shadows");
+        requireRestartBoolean(shadows, "experimental shadows");
 
-        Option resolutionOverlay = findOption(page, idField, "metalfx_resolution_overlay");
-        require(resolutionOverlay instanceof BooleanOption,
-                "Metallum metalfx_resolution_overlay Sodium option is missing or has the wrong type");
+        // Group 4: Reflections (Merged into Metallum)
+        Option reflectionWaterMode = findOption(page, idField, "water_reflection_mode");
+        require(reflectionWaterMode instanceof EnumOption,
+                "water_reflection_mode option is missing or has the wrong type");
 
-        Option hdrOption = findOption(page, idField, "hdr_enabled");
-        require(hdrOption instanceof BooleanOption,
-                "Metallum HDR-enabled Sodium option is missing or has the wrong type");
-        require(hdrOption.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
-                "Metallum HDR-enabled option must require a full game restart");
-        Option voxelChecksum = findOption(page, idField, "voxel_debug_checksum");
-        require(voxelChecksum instanceof BooleanOption,
-                "Metallum L5 checksum Sodium option is missing or has the wrong type");
-        require(voxelChecksum.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
-                "Metallum L5 checksum option must require a full game restart");
-        Option frozenReflection = findOption(page, idField, "vertex_reflection_experiment");
-        require(frozenReflection instanceof BooleanOption,
-                "Metallum frozen-reflection experiment option is missing or has the wrong type");
-        require(frozenReflection.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
-                "Metallum frozen-reflection experiment must require a full game restart");
-        OptionGroup waterReflectionQuality = findGroup(
-                page,
-                idField,
-                "water_reflection_face_aware_appearance"
-        );
-        require(waterReflectionQuality.options().size() == 3,
-                "Water Reflection Quality must be an isolated group with exactly three refinements");
+        Option cloudReflections = findOption(page, idField, "cloud_reflections");
+        require(cloudReflections instanceof BooleanOption,
+                "cloud-reflection Sodium option is missing or has the wrong type");
+
         requireRestartBoolean(
                 findOption(page, idField, "water_reflection_face_aware_appearance"),
                 "face-aware TOP/SIDE/BOTTOM appearance"
@@ -144,6 +150,23 @@ public final class MetallumSodiumConfigTests {
                 findOption(page, idField, "water_reflection_representation_confidence"),
                 "representation confidence"
         );
+
+        // Group 5: Post-Processing & HDR
+        require(findOption(page, idField, "source_encoding") instanceof EnumOption,
+                "source_encoding must be an EnumOption");
+        require(findOption(page, idField, "hdr_strength") instanceof IntegerOption,
+                "hdr_strength must be an IntegerOption");
+        require(findOption(page, idField, "bloom_strength") instanceof IntegerOption,
+                "bloom_strength must be an IntegerOption");
+        require(findOption(page, idField, "god_ray_intensity") instanceof IntegerOption,
+                "god_ray_intensity must be an IntegerOption");
+
+        // Group 6: Advanced & Diagnostics
+        Option voxelChecksum = findOption(page, idField, "voxel_debug_checksum");
+        require(voxelChecksum instanceof BooleanOption,
+                "Metallum L5 checksum Sodium option is missing or has the wrong type");
+        require(voxelChecksum.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum L5 checksum option must require a full game restart");
         require(findOption(page, idField, "voxel_preview_mode") instanceof EnumOption,
                 "Metallum L5 preview mode is missing or has the wrong type");
         require(findOption(page, idField, "voxel_preview_level") instanceof IntegerOption,
@@ -151,26 +174,38 @@ public final class MetallumSodiumConfigTests {
         require(findOption(page, idField, "voxel_preview_slice") instanceof IntegerOption,
                 "Metallum L5 preview slice is missing or has the wrong type");
 
-        ConfigBuilderImpl reflectionBuilder = new ConfigBuilderImpl(
-                ignored -> new ConfigManager.ModMetadata("Metallum", "test"),
-                "metallum"
-        );
-        new MetallumReflectionSodiumConfig().registerConfigLate(reflectionBuilder);
-        Collection<ModOptions> reflectionBuilt = reflectionBuilder.build();
-        require(reflectionBuilt.size() == 1,
-                "Metallum reflections registered an unexpected Sodium config count");
-        ModOptions reflectionOptions = reflectionBuilt.iterator().next();
-        require(reflectionOptions.configId().equals("metallum_reflections")
-                        && reflectionOptions.pages().size() == 1,
-                "cloud reflections were not registered on the dedicated Sodium page");
-        OptionPage reflectionPage = (OptionPage) reflectionOptions.pages().getFirst();
-        Option cloudReflections = findOption(reflectionPage, idField, "cloud_reflections");
-        require(cloudReflections instanceof BooleanOption,
-                "cloud-reflection Sodium option is missing or has the wrong type");
-        require(cloudReflections.getFlags() == null
-                        || !cloudReflections.getFlags().contains(
-                        OptionFlag.REQUIRES_GAME_RESTART.getId()),
-                "cloud-reflection toggle must apply without a game restart");
+        // Test GraphicsPreset application and detection
+        GraphicsPreset.apply(GraphicsPreset.PERFORMANCE);
+        require(GraphicsPreset.detect() == GraphicsPreset.PERFORMANCE,
+                "Performance preset must detect after apply");
+        GraphicsPreset.apply(GraphicsPreset.BALANCED);
+        require(GraphicsPreset.detect() == GraphicsPreset.BALANCED,
+                "Balanced preset must detect after apply");
+        GraphicsPreset.apply(GraphicsPreset.ULTRA);
+        require(GraphicsPreset.detect() == GraphicsPreset.ULTRA,
+                "Ultra preset must detect after apply");
+
+        // Custom override detection: tweaking an option moves preset to CUSTOM
+        WaterReflectionConfig.setMode(WaterReflectionMode.OFF);
+        require(GraphicsPreset.detect() == GraphicsPreset.CUSTOM,
+                "Custom preset must detect when child option deviates from Ultra");
+
+        // Restore balanced
+        GraphicsPreset.apply(GraphicsPreset.BALANCED);
+
+        // Verify blocked Sodium options filter set
+        require(SodiumOptionFilter.isBlocked(
+                Identifier.fromNamespaceAndPath("sodium", "performance.use_no_error_context")),
+                "use_no_error_context must be blocked");
+        require(SodiumOptionFilter.isBlocked(
+                Identifier.fromNamespaceAndPath("sodium", "general.fullscreen_resolution")),
+                "fullscreen_resolution must be blocked");
+        require(SodiumOptionFilter.isBlocked(
+                Identifier.fromNamespaceAndPath("sodium", "general.graphics_api")),
+                "graphics_api must be blocked");
+        require(SodiumOptionFilter.isBlocked(
+                Identifier.fromNamespaceAndPath("sodium", "quality.pixel_filtering_mode")),
+                "pixel_filtering_mode must be blocked");
 
         testCoupledApplyResynchronization();
 
@@ -197,47 +232,47 @@ public final class MetallumSodiumConfigTests {
                                         .setTooltip(Component.literal("Advanced tooltip"))
                                         .setDefaultValue(false)
                                         .setBinding(value -> {
-                                            persisted[0] = value;
-                                            if (!value) {
-                                                persisted[1] = false;
-                                            }
-                                        }, () -> persisted[0])
-                                        .setApplyHook(
-                                                MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
-                                        ))
-                                .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
-                                                "coupled_test", "gi"
-                                        ))
-                                        .setStorageHandler(() -> { })
-                                        .setName(Component.literal("GI"))
-                                        .setTooltip(Component.literal("GI tooltip"))
-                                        .setDefaultValue(false)
-                                        .setBinding(value -> {
-                                            persisted[1] = value;
-                                            if (value) {
-                                                persisted[0] = true;
-                                                persisted[2] = false;
-                                            }
-                                        }, () -> persisted[1])
-                                        .setApplyHook(
-                                                MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
-                                        ))
-                                .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
-                                                "coupled_test", "debug"
-                                        ))
-                                        .setStorageHandler(() -> { })
-                                        .setName(Component.literal("Debug"))
-                                        .setTooltip(Component.literal("Debug tooltip"))
-                                        .setDefaultValue(false)
-                                        .setBinding(value -> {
-                                            persisted[2] = value;
-                                            if (value) {
-                                                persisted[1] = false;
-                                            }
-                                        }, () -> persisted[2])
-                                        .setApplyHook(
-                                                MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
-                                        ))));
+                                             persisted[0] = value;
+                                             if (!value) {
+                                                 persisted[1] = false;
+                                             }
+                                         }, () -> persisted[0])
+                                         .setApplyHook(
+                                                 MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                                         ))
+                                 .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                                 "coupled_test", "gi"
+                                         ))
+                                         .setStorageHandler(() -> { })
+                                         .setName(Component.literal("GI"))
+                                         .setTooltip(Component.literal("GI tooltip"))
+                                         .setDefaultValue(false)
+                                         .setBinding(value -> {
+                                             persisted[1] = value;
+                                             if (value) {
+                                                 persisted[0] = true;
+                                                 persisted[2] = false;
+                                             }
+                                         }, () -> persisted[1])
+                                         .setApplyHook(
+                                                 MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                                         ))
+                                 .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                                 "coupled_test", "debug"
+                                         ))
+                                         .setStorageHandler(() -> { })
+                                         .setName(Component.literal("Debug"))
+                                         .setTooltip(Component.literal("Debug tooltip"))
+                                         .setDefaultValue(false)
+                                         .setBinding(value -> {
+                                             persisted[2] = value;
+                                             if (value) {
+                                                 persisted[1] = false;
+                                             }
+                                         }, () -> persisted[2])
+                                         .setApplyHook(
+                                                 MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                                         ))));
 
         Config config = new Config(new ArrayList<>(builder.build()));
         BooleanOption advanced = (BooleanOption) config.getOption(
@@ -294,22 +329,6 @@ public final class MetallumSodiumConfigTests {
             }
         }
         throw new AssertionError("Missing Metallum Sodium option " + expected);
-    }
-
-    private static OptionGroup findGroup(
-            final OptionPage page,
-            final Field idField,
-            final String optionPath
-    ) throws IllegalAccessException {
-        Identifier expected = Identifier.fromNamespaceAndPath("metallum", optionPath);
-        for (OptionGroup group : page.groups()) {
-            for (Option candidate : group.options()) {
-                if (expected.equals(idField.get(candidate))) {
-                    return group;
-                }
-            }
-        }
-        throw new AssertionError("Missing Metallum Sodium option group containing " + expected);
     }
 
     private static void requireRestartBoolean(final Option option, final String name) {

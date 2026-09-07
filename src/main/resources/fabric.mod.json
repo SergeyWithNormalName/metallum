@@ -17,8 +17,7 @@
   "environment": "client",
   "entrypoints": {
     "sodium:config_api_user": [
-      "com.metallum.client.gui.MetallumSodiumConfig",
-      "com.metallum.client.gui.MetallumReflectionSodiumConfig"
+      "com.metallum.client.gui.MetallumSodiumConfig"
     ]
   },
   "mixins": [

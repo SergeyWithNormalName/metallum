@@ -173,6 +173,10 @@ public final class PlanarReflectionConfig {
     }
 
     private static Path path() {
-        return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        try {
+            return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        } catch (RuntimeException uninitialized) {
+            return Path.of("config").resolve(FILE_NAME);
+        }
     }
 }

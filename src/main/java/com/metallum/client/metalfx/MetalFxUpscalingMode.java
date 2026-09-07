@@ -6,7 +6,8 @@ import java.util.Locale;
 public enum MetalFxUpscalingMode {
     OFF("metallum.options.metalfx_upscaling.off"),
     SPATIAL("metallum.options.metalfx_upscaling.spatial"),
-    TEMPORAL("metallum.options.metalfx_upscaling.temporal");
+    TEMPORAL("metallum.options.metalfx_upscaling.temporal"),
+    TEMPORAL_FI("metallum.options.metalfx_upscaling.temporal_fi");
 
     private final String translationKey;
 
@@ -20,6 +21,10 @@ public enum MetalFxUpscalingMode {
 
     public boolean isEnabled() {
         return this != OFF;
+    }
+
+    public boolean isFrameInterpolationEnabled() {
+        return this == TEMPORAL_FI;
     }
 
     public static MetalFxUpscalingMode parse(final String value) {

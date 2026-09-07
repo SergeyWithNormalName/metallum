@@ -258,6 +258,7 @@ public final class PlanarReflectionRenderer {
             // hazard when Advanced terrain pipelines are bound for that pass.
             resources.bind(encoder, isRendering() || !activePassRendered);
         }
+        ScreenSpaceReflectionRenderer.bind(encoder);
     }
 
     private static void render(

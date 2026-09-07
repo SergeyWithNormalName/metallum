@@ -596,7 +596,7 @@ final class MetalCrossShaderCompiler {
         // The GLSL ablation removes receiver work, not the original external sampler
         // declarations.  They must still be stripped from the intermediary module so
         // the generated Metal diagnostic variant has no external L4/cloud texture/sampler bindings.
-        int expectedRemoved = AdvancedDirectLightingShaderPatcher.externalShadowSamplerCount();
+        int expectedRemoved = AdvancedDirectLightingShaderPatcher.totalExternalSamplerCount();
         if (removed != expectedRemoved) {
             throw new IllegalStateException(
                     "Advanced fragment must expose exactly " + expectedRemoved

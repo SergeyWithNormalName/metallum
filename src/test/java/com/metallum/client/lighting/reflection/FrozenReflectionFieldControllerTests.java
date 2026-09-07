@@ -18,6 +18,8 @@ public final class FrozenReflectionFieldControllerTests {
             testKnownEmptyIsPublishedValidity();
             testSupersededOutputDoesNotInvalidateTheLatestTask();
             testStaleOrUnavailableSectionInvalidatesTheField();
+            WaterReflectionConfigTests.main(args);
+            com.metallum.client.metal.render.ScreenSpaceReflectionRendererTests.main(args);
             System.out.println("FrozenReflectionFieldControllerTests passed successfully.");
         } finally {
             VertexReflectionExperiment.setOverride(null);

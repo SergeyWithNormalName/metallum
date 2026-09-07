@@ -59,6 +59,9 @@ public final class MetalFxUpscaling {
 
     public static MetalFxUpscalingMode requestedMode() {
         if (MetalFxTemporalScaling.isRequested()) {
+            if (com.metallum.client.renderer.RendererConfig.load().frameInterpolation()) {
+                return MetalFxUpscalingMode.TEMPORAL_FI;
+            }
             return MetalFxUpscalingMode.TEMPORAL;
         }
         if (MetalFxSpatialScaling.isRequested()) {
@@ -74,17 +77,33 @@ public final class MetalFxUpscaling {
                 MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
                 MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.OFF);
                 MetallumDrsController.setEnabled(false);
+                setFrameInterpolation(false);
             }
             case SPATIAL -> {
                 MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.OFF);
                 MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.SPATIAL);
                 MetallumDrsController.setEnabled(true);
+                setFrameInterpolation(false);
             }
             case TEMPORAL -> {
                 MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
                 MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.TEMPORAL);
                 MetallumDrsController.setEnabled(true);
+                setFrameInterpolation(false);
             }
+            case TEMPORAL_FI -> {
+                MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
+                MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.TEMPORAL);
+                MetallumDrsController.setEnabled(true);
+                setFrameInterpolation(true);
+            }
+        }
+    }
+
+    private static void setFrameInterpolation(final boolean enabled) {
+        com.metallum.client.renderer.RendererConfig current = com.metallum.client.renderer.RendererConfig.load();
+        if (current.frameInterpolation() != enabled) {
+            current.withFrameInterpolation(enabled).save();
         }
     }
 

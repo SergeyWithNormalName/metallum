@@ -73,12 +73,15 @@ public final class AdvancedDirectLightingShaderPatcher {
     public static final String SHADOW_SAMPLER_2 = "metallumSunShadow2";
     public static final String CLOUD_SAMPLER = "metallumCloudShadow";
     public static final String PLANAR_REFLECTION_SAMPLER = "metallumPlanarReflection";
+    public static final String REFLECTION_DEPTH_SAMPLER = "metallumReflectionDepth";
+    public static final int REFLECTION_DEPTH_SLOT = 9;
     private static final Set<String> EXTERNAL_SHADOW_SAMPLERS = Set.of(
             SHADOW_SAMPLER_0,
             SHADOW_SAMPLER_1,
             SHADOW_SAMPLER_2,
             CLOUD_SAMPLER,
-            PLANAR_REFLECTION_SAMPLER
+            PLANAR_REFLECTION_SAMPLER,
+            REFLECTION_DEPTH_SAMPLER
     );
 
     private static final String MARKER = "METALLUM_ADVANCED_DIRECT_LIGHTING_V1";
@@ -259,6 +262,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
             layout(binding = 12) uniform sampler2D metallumCloudShadow;
             layout(binding = 11) uniform sampler2D metallumPlanarReflection;
+            layout(binding = 9) uniform sampler2D metallumReflectionDepth;
 
             layout(std430, binding = 27) readonly buffer MetallumLightingParamsV1 {
                 mat4 viewRotation;
@@ -1135,6 +1139,78 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return albedo * diffuse * 0.31830988618;
             }
             """).append("""
+            vec4 metallumTraceScreenSpaceReflectionV1(
+                    vec3 viewPosition,
+                    vec3 viewDirection,
+                    vec3 flatNormal,
+                    vec3 waveNormal,
+                    float maxDistance) {
+                if (textureSize(metallumReflectionDepth, 0).x <= 1) {
+                    return vec4(0.0);
+                }
+                vec3 reflectionNormal = metallumSafeNormalV1(mix(flatNormal, waveNormal, 0.20));
+                vec3 rayDirection = reflect(-viewDirection, reflectionNormal);
+                float p22 = metallumLighting.projection[2][2];
+                float p32 = metallumLighting.projection[3][2];
+                const int STEP_COUNT = 24;
+                float stepStride = maxDistance / float(STEP_COUNT);
+                float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                vec3 prevRayPos = viewPosition + rayDirection * max(0.15, abs(viewPosition.z) * 0.015);
+                vec3 currentRayPos = prevRayPos + rayDirection * (stepStride * (0.3 + 0.7 * dither));
+                for (int i = 0; i < STEP_COUNT; i++) {
+                    if (currentRayPos.z >= -0.1) {
+                        break;
+                    }
+                    vec4 clipPos = metallumLighting.projection * vec4(currentRayPos, 1.0);
+                    if (clipPos.w <= 0.05) {
+                        break;
+                    }
+                    vec2 sampleUv = clipPos.xy / clipPos.w * 0.5 + 0.5;
+                    if (sampleUv.x < 0.001 || sampleUv.x > 0.999 || sampleUv.y < 0.001 || sampleUv.y > 0.999) {
+                        break;
+                    }
+                    float rawDepth = texture(metallumReflectionDepth, sampleUv).r;
+                    if (rawDepth > 1.0e-5) {
+                        float sceneDistance = abs(p32 / (rawDepth + p22));
+                        float rayDistance = abs(currentRayPos.z);
+                        float depthDiff = rayDistance - sceneDistance;
+                        float thickness = max(1.2, stepStride * 0.65);
+                        if (depthDiff >= 0.0 && depthDiff <= thickness) {
+                            vec3 minPos = prevRayPos;
+                            vec3 maxPos = currentRayPos;
+                            vec2 hitUv = sampleUv;
+                            for (int b = 0; b < 4; b++) {
+                                vec3 midPos = mix(minPos, maxPos, 0.5);
+                                if (midPos.z >= -0.1) break;
+                                vec4 midClip = metallumLighting.projection * vec4(midPos, 1.0);
+                                if (midClip.w <= 0.05) break;
+                                vec2 midUv = midClip.xy / midClip.w * 0.5 + 0.5;
+                                float midRaw = texture(metallumReflectionDepth, midUv).r;
+                                if (midRaw > 1.0e-5) {
+                                    float midScene = abs(p32 / (midRaw + p22));
+                                    float midRay = abs(midPos.z);
+                                    if (midRay >= midScene) {
+                                        maxPos = midPos;
+                                        hitUv = midUv;
+                                    } else {
+                                        minPos = midPos;
+                                    }
+                                }
+                            }
+                            float edgeDist = min(min(hitUv.x, hitUv.y), min(1.0 - hitUv.x, 1.0 - hitUv.y));
+                            float edgeFade = smoothstep(0.0, 0.06, edgeDist);
+                            float distFade = 1.0 - smoothstep(maxDistance * 0.70, maxDistance, length(currentRayPos - viewPosition));
+                            float confidence = edgeFade * distFade;
+                            vec4 sceneColor = texture(metallumPlanarReflection, clamp(hitUv, vec2(0.001), vec2(0.999)));
+                            return vec4(sceneColor.rgb, confidence);
+                        }
+                    }
+                    prevRayPos = currentRayPos;
+                    currentRayPos += rayDirection * stepStride;
+                }
+                return vec4(0.0);
+            }
+
             vec3 metallumEvaluateMaterialEnvironmentV1(
                     vec3 viewPosition,
                     vec3 normal,
@@ -1174,22 +1250,36 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float edgeDistance = min(
                             min(reflectionUv.x, reflectionUv.y),
                             min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
-                    vec4 planarSample = texture(metallumPlanarReflection,
-                            clamp(reflectionUv, vec2(0.001), vec2(0.999)));
-                    float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance)
-                            * (1.0 - waterStyle.preservesPreReflectionAppearance);
-                    if (planarWeight > 0.0) {
-                        reflectedEnvironment = mix(reflectedEnvironment, planarSample.rgb, planarWeight);
-                        // The physically based dielectric F0 of water is only ~2%.  That is
-                        // imperceptible against Minecraft's opaque, tinted water at the intended
-                        // shoreline angles even though the planar target is valid.  Keep the
-                        // response view-dependent, but give the local capture a bounded artistic
-                        // Fresnel so a reflected shoreline remains legible without becoming a
-                        // mirror when looking straight down.
-                        float planarFresnel = clamp(
-                                0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
-                        environmentFresnel = mix(
-                                environmentFresnel, vec3(planarFresnel), planarWeight);
+                    float ssrWeight = 0.0;
+                    bool ssrActive = textureSize(metallumReflectionDepth, 0).x > 1;
+                    if (ssrActive) {
+                        vec4 ssrSample = metallumTraceScreenSpaceReflectionV1(
+                                viewPosition, viewDirection, flatWaterNormal, normal, 96.0);
+                        float ssrFresnel = clamp(
+                                0.04 + 0.96 * pow(1.0 - nDotV, 3.0), 0.04, 0.85);
+                        if (ssrSample.a > 0.0) {
+                            reflectedEnvironment = mix(reflectedEnvironment, ssrSample.rgb, ssrSample.a);
+                            environmentFresnel = mix(environmentFresnel, vec3(ssrFresnel), ssrSample.a);
+                            ssrWeight = ssrSample.a;
+                        }
+                    } else {
+                        vec4 planarSample = texture(metallumPlanarReflection,
+                                clamp(reflectionUv, vec2(0.001), vec2(0.999)));
+                        float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance)
+                                * (1.0 - waterStyle.preservesPreReflectionAppearance);
+                        if (planarWeight > 0.0) {
+                            reflectedEnvironment = mix(reflectedEnvironment, planarSample.rgb, planarWeight);
+                            // The physically based dielectric F0 of water is only ~2%.  That is
+                            // imperceptible against Minecraft's opaque, tinted water at the intended
+                            // shoreline angles even though the planar target is valid.  Keep the
+                            // response view-dependent, but give the local capture a bounded artistic
+                            // Fresnel so a reflected shoreline remains legible without becoming a
+                            // mirror when looking straight down.
+                            float planarFresnel = clamp(
+                                    0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
+                            environmentFresnel = mix(
+                                    environmentFresnel, vec3(planarFresnel), planarWeight);
+                        }
                     }
                     // The terrain light coordinate already records vanilla skylight after
                     // block occlusion. Do not leave an analytic-sky floor in a cave or under
@@ -1198,6 +1288,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
                     float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;
                     environmentVisibility = waterOpenSky * waterCelestialReflection;
+                    environmentVisibility = mix(environmentVisibility, 1.0, ssrWeight);
                 }
                 float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
                         ? mix(1.0, 0.92,
@@ -2722,10 +2813,99 @@ public final class AdvancedDirectLightingShaderPatcher {
             layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
             layout(binding = 12) uniform sampler2D metallumCloudShadow;
             layout(binding = 11) uniform sampler2D metallumPlanarReflection;
+            layout(binding = 9) uniform sampler2D metallumReflectionDepth;
             """;
         source = replaceExactlyOnce(source, samplers, "");
         if (source == null) {
             throw new IllegalStateException("Failed to strip external shadow samplers from AMBIENT_ONLY helper");
+        }
+
+        String fullSsrTrace = """
+            vec4 metallumTraceScreenSpaceReflectionV1(
+                    vec3 viewPosition,
+                    vec3 viewDirection,
+                    vec3 flatNormal,
+                    vec3 waveNormal,
+                    float maxDistance) {
+                if (textureSize(metallumReflectionDepth, 0).x <= 1) {
+                    return vec4(0.0);
+                }
+                vec3 reflectionNormal = metallumSafeNormalV1(mix(flatNormal, waveNormal, 0.20));
+                vec3 rayDirection = reflect(-viewDirection, reflectionNormal);
+                float p22 = metallumLighting.projection[2][2];
+                float p32 = metallumLighting.projection[3][2];
+                const int STEP_COUNT = 24;
+                float stepStride = maxDistance / float(STEP_COUNT);
+                float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                vec3 prevRayPos = viewPosition + rayDirection * max(0.15, abs(viewPosition.z) * 0.015);
+                vec3 currentRayPos = prevRayPos + rayDirection * (stepStride * (0.3 + 0.7 * dither));
+                for (int i = 0; i < STEP_COUNT; i++) {
+                    if (currentRayPos.z >= -0.1) {
+                        break;
+                    }
+                    vec4 clipPos = metallumLighting.projection * vec4(currentRayPos, 1.0);
+                    if (clipPos.w <= 0.05) {
+                        break;
+                    }
+                    vec2 sampleUv = clipPos.xy / clipPos.w * 0.5 + 0.5;
+                    if (sampleUv.x < 0.001 || sampleUv.x > 0.999 || sampleUv.y < 0.001 || sampleUv.y > 0.999) {
+                        break;
+                    }
+                    float rawDepth = texture(metallumReflectionDepth, sampleUv).r;
+                    if (rawDepth > 1.0e-5) {
+                        float sceneDistance = abs(p32 / (rawDepth + p22));
+                        float rayDistance = abs(currentRayPos.z);
+                        float depthDiff = rayDistance - sceneDistance;
+                        float thickness = max(1.2, stepStride * 0.65);
+                        if (depthDiff >= 0.0 && depthDiff <= thickness) {
+                            vec3 minPos = prevRayPos;
+                            vec3 maxPos = currentRayPos;
+                            vec2 hitUv = sampleUv;
+                            for (int b = 0; b < 4; b++) {
+                                vec3 midPos = mix(minPos, maxPos, 0.5);
+                                if (midPos.z >= -0.1) break;
+                                vec4 midClip = metallumLighting.projection * vec4(midPos, 1.0);
+                                if (midClip.w <= 0.05) break;
+                                vec2 midUv = midClip.xy / midClip.w * 0.5 + 0.5;
+                                float midRaw = texture(metallumReflectionDepth, midUv).r;
+                                if (midRaw > 1.0e-5) {
+                                    float midScene = abs(p32 / (midRaw + p22));
+                                    float midRay = abs(midPos.z);
+                                    if (midRay >= midScene) {
+                                        maxPos = midPos;
+                                        hitUv = midUv;
+                                    } else {
+                                        minPos = midPos;
+                                    }
+                                }
+                            }
+                            float edgeDist = min(min(hitUv.x, hitUv.y), min(1.0 - hitUv.x, 1.0 - hitUv.y));
+                            float edgeFade = smoothstep(0.0, 0.06, edgeDist);
+                            float distFade = 1.0 - smoothstep(maxDistance * 0.70, maxDistance, length(currentRayPos - viewPosition));
+                            float confidence = edgeFade * distFade;
+                            vec4 sceneColor = texture(metallumPlanarReflection, clamp(hitUv, vec2(0.001), vec2(0.999)));
+                            return vec4(sceneColor.rgb, confidence);
+                        }
+                    }
+                    prevRayPos = currentRayPos;
+                    currentRayPos += rayDirection * stepStride;
+                }
+                return vec4(0.0);
+            }
+""";
+        String ambientSsrTrace = """
+            vec4 metallumTraceScreenSpaceReflectionV1(
+                    vec3 viewPosition,
+                    vec3 viewDirection,
+                    vec3 flatNormal,
+                    vec3 waveNormal,
+                    float maxDistance) {
+                return vec4(0.0);
+            }
+""";
+        source = replaceExactlyOnce(source, fullSsrTrace, ambientSsrTrace);
+        if (source == null) {
+            throw new IllegalStateException("Failed to specialize metallumTraceScreenSpaceReflectionV1 for AMBIENT_ONLY helper");
         }
 
         // 2. Specialize environment lookup and remove water square celestial masks
@@ -3184,22 +3364,36 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float edgeDistance = min(
                             min(reflectionUv.x, reflectionUv.y),
                             min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
-                    vec4 planarSample = texture(metallumPlanarReflection,
-                            clamp(reflectionUv, vec2(0.001), vec2(0.999)));
-                    float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance)
-                            * (1.0 - waterStyle.preservesPreReflectionAppearance);
-                    if (planarWeight > 0.0) {
-                        reflectedEnvironment = mix(reflectedEnvironment, planarSample.rgb, planarWeight);
-                        // The physically based dielectric F0 of water is only ~2%.  That is
-                        // imperceptible against Minecraft's opaque, tinted water at the intended
-                        // shoreline angles even though the planar target is valid.  Keep the
-                        // response view-dependent, but give the local capture a bounded artistic
-                        // Fresnel so a reflected shoreline remains legible without becoming a
-                        // mirror when looking straight down.
-                        float planarFresnel = clamp(
-                                0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
-                        environmentFresnel = mix(
-                                environmentFresnel, vec3(planarFresnel), planarWeight);
+                    float ssrWeight = 0.0;
+                    bool ssrActive = textureSize(metallumReflectionDepth, 0).x > 1;
+                    if (ssrActive) {
+                        vec4 ssrSample = metallumTraceScreenSpaceReflectionV1(
+                                viewPosition, viewDirection, flatWaterNormal, normal, 96.0);
+                        float ssrFresnel = clamp(
+                                0.04 + 0.96 * pow(1.0 - nDotV, 3.0), 0.04, 0.85);
+                        if (ssrSample.a > 0.0) {
+                            reflectedEnvironment = mix(reflectedEnvironment, ssrSample.rgb, ssrSample.a);
+                            environmentFresnel = mix(environmentFresnel, vec3(ssrFresnel), ssrSample.a);
+                            ssrWeight = ssrSample.a;
+                        }
+                    } else {
+                        vec4 planarSample = texture(metallumPlanarReflection,
+                                clamp(reflectionUv, vec2(0.001), vec2(0.999)));
+                        float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance)
+                                * (1.0 - waterStyle.preservesPreReflectionAppearance);
+                        if (planarWeight > 0.0) {
+                            reflectedEnvironment = mix(reflectedEnvironment, planarSample.rgb, planarWeight);
+                            // The physically based dielectric F0 of water is only ~2%.  That is
+                            // imperceptible against Minecraft's opaque, tinted water at the intended
+                            // shoreline angles even though the planar target is valid.  Keep the
+                            // response view-dependent, but give the local capture a bounded artistic
+                            // Fresnel so a reflected shoreline remains legible without becoming a
+                            // mirror when looking straight down.
+                            float planarFresnel = clamp(
+                                    0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
+                            environmentFresnel = mix(
+                                    environmentFresnel, vec3(planarFresnel), planarWeight);
+                        }
                     }
                     // The terrain light coordinate already records vanilla skylight after
                     // block occlusion. Do not leave an analytic-sky floor in a cave or under
@@ -3208,6 +3402,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
                     float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;
                     environmentVisibility = waterOpenSky * waterCelestialReflection;
+                    environmentVisibility = mix(environmentVisibility, 1.0, ssrWeight);
                 }
                 float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
                         ? mix(1.0, 0.92,
@@ -4309,6 +4504,10 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     /** Number of external L4/cloud samplers that Advanced receiver variants must strip. */
     public static int externalShadowSamplerCount() {
+        return 5;
+    }
+
+    public static int totalExternalSamplerCount() {
         return EXTERNAL_SHADOW_SAMPLERS.size();
     }
 
@@ -4327,6 +4526,9 @@ public final class AdvancedDirectLightingShaderPatcher {
         }
         if (PLANAR_REFLECTION_SAMPLER.equals(name)) {
             return PlanarReflectionBindingAbi.TEXTURE_SLOT;
+        }
+        if (REFLECTION_DEPTH_SAMPLER.equals(name)) {
+            return REFLECTION_DEPTH_SLOT;
         }
         throw new IllegalArgumentException("Not an L4 shadow, cloud, or planar reflection sampler: " + name);
     }

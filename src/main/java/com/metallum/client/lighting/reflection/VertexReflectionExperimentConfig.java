@@ -22,16 +22,7 @@ public final class VertexReflectionExperimentConfig {
     }
 
     public static boolean isEnabled() {
-        Boolean current = enabled;
-        if (current != null) {
-            return current;
-        }
-        synchronized (VertexReflectionExperimentConfig.class) {
-            if (enabled == null) {
-                enabled = load(path());
-            }
-            return enabled;
-        }
+        return WaterReflectionConfig.getPersistedMode() == WaterReflectionMode.VOXELS;
     }
 
     public static void setEnabled(final boolean value) {
@@ -69,6 +60,10 @@ public final class VertexReflectionExperimentConfig {
     }
 
     private static Path path() {
-        return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        try {
+            return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        } catch (RuntimeException uninitialized) {
+            return Path.of("config").resolve(FILE_NAME);
+        }
     }
 }

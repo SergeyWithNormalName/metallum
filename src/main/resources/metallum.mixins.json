@@ -115,6 +115,8 @@
     "sodium.SodiumPreferredGraphicsApiMixin",
     "sodium.SodiumEnumOptionMixin",
     "sodium.SodiumOptionAccessor",
+    "sodium.SodiumOptionBuilderAccessor",
+    "sodium.SodiumOptionFilterMixin",
     "sodium.SodiumStatefulOptionMixin",
     "sodium.SodiumWorldRendererShadowMixin",
     "sodium.TerrainRenderPassShadowMixin",
