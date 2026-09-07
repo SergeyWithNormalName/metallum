@@ -9,6 +9,7 @@ import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.metal.render.TransientMemoryRangeTests;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStateAbi;
@@ -58,6 +59,7 @@ public final class RendererArchitectureTests {
         testFrameStateNumericContracts();
         testFrameStateLightingContractAndAbi();
         testFrameStateImmutability();
+        TransientMemoryRangeTests.run();
         System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5/L3-L6 tests passed");
     }
 
