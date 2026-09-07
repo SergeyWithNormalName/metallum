@@ -15,6 +15,7 @@ DEFAULT_SETTINGS_SPEC="benchmark/settings/native-hdr-fancy-v1.json"
 FI_SETTINGS_SPEC="benchmark/settings/fi-hdr-temporal-ultra-performance-v1.json"
 GI_LIVE_ROUTE_SPEC="benchmark/routes/hdrtest-torch-toggle-v1.json"
 GI_LIVE_SETTINGS_SPEC="benchmark/settings/native-hdr-fancy-gi-live-v1.json"
+GI_VISUAL_PROBE_ROUTE_SPEC="benchmark/routes/hdrtest-gi-visual-probe-v1.json"
 ARTIFACT_CLASSES="build/classes/java/main"
 ARTIFACT_RESOURCES="build/resources/main"
 ARTIFACT_NATIVE="build/generated/metallum/natives/macos/libmetallum.dylib"
@@ -39,10 +40,16 @@ LABEL="baseline"
 PREFLIGHT_ONLY=0
 CAPTURE_REFERENCE=0
 FI_VALIDATION=0
+TEMPORARY_SETTINGS=0
 SETTINGS_SPEC_EXPLICIT=0
 ROUTE_SPEC_EXPLICIT=0
 METALFX_MODE_EXPLICIT=0
 GI_LIVE=0
+GI_VISUAL_PROBE=0
+GI_VISUAL_PROBE_ARM=""
+# The G6 atlas probe is benchmark-only evidence. The launcher owns the gate so
+# an inherited shell setting can never enable a GPU readback in a normal run.
+GI_G6_DEBUG_PROBE=0
 VERTEX_REFLECTION_EXPERIMENT=0
 WATER_REFLECTION_QUALITY=refined
 GI_G5_RECEIVER_ARM=control
@@ -106,6 +113,10 @@ Options:
   --gi-live          validate production G6 live GI using the persistent
                      globalIllumination=dynamic renderer setting; defaults to
                      the tracked torch-toggle route and GI-live settings profile
+  --gi-visual-probe ARM
+                     create the tracked disposable red-reflector visual rig and
+                     capture four scheduled motion frames; ARM is on or off.
+                     This is non-attested visual evidence, not G6 acceptance.
   --fi-validation    run the opt-in HDR Temporal Ultra Performance + Frame Interpolation
                      validation profile; temporarily applies and then restores
                      options, HDR, renderer, MetalFX, and Temporal settings
@@ -232,6 +243,12 @@ while [ "$#" -gt 0 ]; do
             GI_LIVE=1
             shift
             ;;
+        --gi-visual-probe)
+            need_value "$@"
+            GI_VISUAL_PROBE=1
+            GI_VISUAL_PROBE_ARM=$2
+            shift 2
+            ;;
         --fi-validation)
             FI_VALIDATION=1
             shift
@@ -255,6 +272,27 @@ if [ "$GI_LIVE" -eq 1 ]; then
     fi
     if [ "$SETTINGS_SPEC_EXPLICIT" -eq 0 ]; then
         SETTINGS_SPEC_ARGUMENT=$GI_LIVE_SETTINGS_SPEC
+    fi
+fi
+
+if [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+    [ "$GI_LIVE" -eq 0 ] || die "--gi-visual-probe cannot be combined with --gi-live"
+    [ "$FI_VALIDATION" -eq 0 ] || die "--gi-visual-probe cannot be combined with --fi-validation"
+    [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 0 ] \
+        || die "--gi-visual-probe cannot be combined with --vertex-reflection-experiment"
+    case "$GI_VISUAL_PROBE_ARM" in on|off) ;; *) die "--gi-visual-probe ARM must be on or off" ;; esac
+    if [ "$ROUTE_SPEC_EXPLICIT" -eq 0 ]; then
+        ROUTE_SPEC_ARGUMENT=$GI_VISUAL_PROBE_ROUTE_SPEC
+    fi
+    if [ "$SETTINGS_SPEC_EXPLICIT" -eq 0 ] && [ "$GI_VISUAL_PROBE_ARM" = "on" ]; then
+        SETTINGS_SPEC_ARGUMENT=$GI_LIVE_SETTINGS_SPEC
+    fi
+    CAPTURE_REFERENCE=1
+    if [ "$MEASURE_FRAMES_EXPLICIT" -eq 0 ]; then
+        MEASURE_FRAMES=900
+    fi
+    if [ "$GI_VISUAL_PROBE_ARM" = "on" ]; then
+        GI_G6_DEBUG_PROBE=1
     fi
 fi
 
@@ -325,9 +363,9 @@ command -v pgrep >/dev/null 2>&1 || die "pgrep is required for process isolation
 command -v mktemp >/dev/null 2>&1 || die "mktemp is required for isolated benchmark worlds"
 command -v mkfifo >/dev/null 2>&1 || die "mkfifo is required for benchmark transcripts"
 command -v uuidgen >/dev/null 2>&1 || die "uuidgen is required for isolated benchmark worlds"
-if [ "$FI_VALIDATION" -eq 1 ]; then
+if [ "$FI_VALIDATION" -eq 1 ] || [ "$GI_VISUAL_PROBE" -eq 1 ]; then
     command -v cmp >/dev/null 2>&1 \
-        || die "cmp is required to verify FI runtime-settings restoration"
+        || die "cmp is required to verify temporary runtime-settings restoration"
 fi
 [ -x "$ROOT/gradlew" ] || die "Gradle wrapper is missing or not executable"
 [ -f "$ANALYZER" ] || die "report analyzer is missing: $ANALYZER"
@@ -369,7 +407,7 @@ restore_fi_runtime_settings() {
     local retain_backup=${1:-0}
     local restore_status=0
 
-    [ "${FI_VALIDATION:-0}" -eq 1 ] || return 0
+    [ "${TEMPORARY_SETTINGS:-0}" -eq 1 ] || return 0
     if [ -z "${FI_SETTINGS_BACKUP_DIR:-}" ] \
         || [ ! -d "$FI_SETTINGS_BACKUP_DIR" ]; then
         echo "ERROR: FI runtime-settings backup is unavailable; restoration cannot be proven" >&2
@@ -520,6 +558,20 @@ G6_MATRIX_NETHER_POSITION_X=0
 G6_MATRIX_NETHER_POSITION_Y=0
 G6_MATRIX_NETHER_POSITION_Z=0
 G6_MATRIX_NETHER_RETURN_FRAME=0
+GI_VISUAL_PROBE_RIG_ID=""
+GI_VISUAL_PROBE_TORCH_POSITION_X=0
+GI_VISUAL_PROBE_TORCH_POSITION_Y=0
+GI_VISUAL_PROBE_TORCH_POSITION_Z=0
+GI_VISUAL_PROBE_ORBIT_START_FRAME=0
+GI_VISUAL_PROBE_ORBIT_END_FRAME=0
+GI_VISUAL_PROBE_ORBIT_TRANSLATION_RADIUS_BLOCKS=0
+GI_VISUAL_PROBE_ORBIT_YAW_AMPLITUDE_DEGREES=0
+GI_VISUAL_PROBE_ORBIT_PITCH_AMPLITUDE_DEGREES=0
+GI_VISUAL_PROBE_ORBIT_PERIOD_FRAMES=0
+GI_VISUAL_PROBE_CAPTURE_FRAME_0=0
+GI_VISUAL_PROBE_CAPTURE_FRAME_1=0
+GI_VISUAL_PROBE_CAPTURE_FRAME_2=0
+GI_VISUAL_PROBE_CAPTURE_FRAME_3=0
 case "$route_field_count" in
     19)
         IFS=$'\t' read -r \
@@ -572,6 +624,31 @@ case "$route_field_count" in
             L6_PROBE_RADIUS L6_PROBE_VERTICAL_AMPLITUDE L6_PROBE_PERIOD_FRAMES \
             <<< "$route_values"
         ;;
+    37)
+        IFS=$'\t' read -r \
+            ROUTE_ID ROUTE_SHA256 FIXTURE_ID FIXTURE_SHA256 \
+            PLAYER_NAME PLAYER_UUID DIMENSION \
+            POSITION_X POSITION_Y POSITION_Z YAW PITCH \
+            CLOCK_TICKS CLEAR_WEATHER_TICKS SIMULATION_FROZEN \
+            ROUTE_STABLE_FRAMES ROUTE_TIMEOUT_FRAMES \
+            POSITION_EPSILON ANGLE_EPSILON \
+            ROUTE_KIND GI_VISUAL_PROBE_RIG_ID \
+            GI_VISUAL_PROBE_TORCH_POSITION_X GI_VISUAL_PROBE_TORCH_POSITION_Y \
+            GI_VISUAL_PROBE_TORCH_POSITION_Z \
+            TORCH_APPLY_AFTER_MEASURED_FRAMES TORCH_OBSERVATION_FRAMES \
+            TORCH_REMOVE_AFTER_MEASURED_FRAMES GI_VISUAL_PROBE_ORBIT_START_FRAME \
+            GI_VISUAL_PROBE_ORBIT_END_FRAME GI_VISUAL_PROBE_ORBIT_TRANSLATION_RADIUS_BLOCKS \
+            GI_VISUAL_PROBE_ORBIT_YAW_AMPLITUDE_DEGREES \
+            GI_VISUAL_PROBE_ORBIT_PITCH_AMPLITUDE_DEGREES GI_VISUAL_PROBE_ORBIT_PERIOD_FRAMES \
+            GI_VISUAL_PROBE_CAPTURE_FRAME_0 GI_VISUAL_PROBE_CAPTURE_FRAME_1 \
+            GI_VISUAL_PROBE_CAPTURE_FRAME_2 GI_VISUAL_PROBE_CAPTURE_FRAME_3 \
+            <<< "$route_values"
+        TORCH_POSITION_X=$GI_VISUAL_PROBE_TORCH_POSITION_X
+        TORCH_POSITION_Y=$GI_VISUAL_PROBE_TORCH_POSITION_Y
+        TORCH_POSITION_Z=$GI_VISUAL_PROBE_TORCH_POSITION_Z
+        TORCH_INITIAL_BLOCK="minecraft:air"
+        TORCH_SUPPORT_BLOCK="minecraft:grass_block"
+        ;;
     72)
         IFS=$'\t' read -r \
             ROUTE_ID ROUTE_SHA256 FIXTURE_ID FIXTURE_SHA256 \
@@ -608,7 +685,7 @@ case "$route_field_count" in
             <<< "$route_values"
         ;;
     *)
-        die "route helper returned $route_field_count fields instead of 19, 27, 28, 32, or 72"
+        die "route helper returned $route_field_count fields instead of 19, 27, 28, 32, 37, or 72"
         ;;
 esac
 
@@ -678,6 +755,29 @@ case "$ROUTE_KIND" in
             && [ $((L6_PROBE_PERIOD_FRAMES % 60)) -eq 0 ] \
             || die "L6 probe period must be a positive 60-frame multiple"
         ;;
+    GI_VISUAL_PROBE)
+        [ "$route_field_count" -eq 37 ] \
+            || die "GI visual probe must use the schema-6 37-field contract"
+        require_value "$GI_VISUAL_PROBE_RIG_ID" "red-reflector-occluded-v1" "GI visual probe rig"
+        require_value "$GI_VISUAL_PROBE_TORCH_POSITION_X" "80" "GI visual probe torch x"
+        require_value "$GI_VISUAL_PROBE_TORCH_POSITION_Y" "75" "GI visual probe torch y"
+        require_value "$GI_VISUAL_PROBE_TORCH_POSITION_Z" "-112" "GI visual probe torch z"
+        require_value "$TORCH_APPLY_AFTER_MEASURED_FRAMES" "300" "GI visual probe torch apply"
+        require_value "$TORCH_OBSERVATION_FRAMES" "450" "GI visual probe torch observation"
+        require_value "$TORCH_REMOVE_AFTER_MEASURED_FRAMES" "690" "GI visual probe torch removal"
+        require_value "$GI_VISUAL_PROBE_ORBIT_START_FRAME" "540" "GI visual probe orbit start"
+        require_value "$GI_VISUAL_PROBE_ORBIT_END_FRAME" "690" "GI visual probe orbit end"
+        require_value "$GI_VISUAL_PROBE_ORBIT_TRANSLATION_RADIUS_BLOCKS" "0.75" "GI visual probe translation radius"
+        require_value "$GI_VISUAL_PROBE_ORBIT_YAW_AMPLITUDE_DEGREES" "12.0" "GI visual probe yaw amplitude"
+        require_value "$GI_VISUAL_PROBE_ORBIT_PITCH_AMPLITUDE_DEGREES" "3.0" "GI visual probe pitch amplitude"
+        require_value "$GI_VISUAL_PROBE_ORBIT_PERIOD_FRAMES" "120" "GI visual probe orbit period"
+        require_value "$GI_VISUAL_PROBE_CAPTURE_FRAME_0" "570" "GI visual probe capture frame 0"
+        require_value "$GI_VISUAL_PROBE_CAPTURE_FRAME_1" "600" "GI visual probe capture frame 1"
+        require_value "$GI_VISUAL_PROBE_CAPTURE_FRAME_2" "630" "GI visual probe capture frame 2"
+        require_value "$GI_VISUAL_PROBE_CAPTURE_FRAME_3" "660" "GI visual probe capture frame 3"
+        [ "$MEASURE_FRAMES" -gt 750 ] \
+            || die "GI visual probe measurement must extend past its 750-frame torch epoch"
+        ;;
     GI_G6_MATRIX)
         [ "$route_field_count" -eq 72 ] \
             || die "G6 matrix route must use the schema-5 72-field contract"
@@ -738,7 +838,8 @@ FABRIC_DEFAULT_PACKS="$RUN_DIR/data/fabric_default_resource_packs.json"
 [ -f "$FABRIC_DEFAULT_PACKS" ] || die "missing Fabric default resource-pack config"
 [ -d "$RUN_DIR/saves" ] || die "missing Minecraft saves directory: run/saves"
 
-if [ "$FI_VALIDATION" -eq 1 ]; then
+if [ "$FI_VALIDATION" -eq 1 ] || [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+    TEMPORARY_SETTINGS=1
     [ -f "$TEMPORAL_CONFIG" ] || die "missing MetalFX temporal config"
     FI_SETTINGS_BACKUP_DIR=$(mktemp -d \
         "${TMPDIR:-/tmp}/metallum-fi-settings.XXXXXX") \
@@ -753,7 +854,7 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
         || ! cp "$TEMPORAL_CONFIG" \
             "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx-temporal.properties"; then
         discard_fi_settings_backup || true
-        die "failed to back up FI runtime settings"
+        die "failed to back up temporary runtime settings"
     fi
 
     # Install restoration before the first mutation so preflight failures and
@@ -765,7 +866,7 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
     python3 "$FIXTURE_HELPER" apply-runtime-settings \
         "$SETTINGS_SPEC" "$OPTIONS_FILE" "$HDR_CONFIG" \
         "$METALFX_CONFIG" "$RENDERER_CONFIG" "$TEMPORAL_CONFIG" \
-        || die "failed to apply the FI validation runtime settings"
+        || die "failed to apply temporary benchmark runtime settings"
 fi
 
 settings_values=$(python3 "$FIXTURE_HELPER" settings-values \
@@ -921,7 +1022,7 @@ else
     require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
 fi
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
-if [ "$GI_LIVE" -eq 1 ]; then
+if [ "$GI_LIVE" -eq 1 ] || { [ "$GI_VISUAL_PROBE" -eq 1 ] && [ "$GI_VISUAL_PROBE_ARM" = "on" ]; }; then
     require_value "$RENDERER_GI_MODE" "dynamic" "G6 renderer globalIllumination"
 else
     require_value "$RENDERER_GI_MODE" "off" "renderer globalIllumination"
@@ -979,7 +1080,39 @@ elif [ -n "${METALLUM_GI_G5_RECEIVER_ARM:-}" ]; then
     die "METALLUM_GI_G5_RECEIVER_ARM requires METALLUM_GI_G5_RECEIVER=1"
 fi
 RUNTIME_GI_MODE="$RENDERER_GI_MODE"
-if [ "$GI_LIVE" -eq 1 ]; then
+if [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+    [ "$GI_G2_CAPTURE_ENV" -eq 0 ] \
+        && [ "$GI_G3_INJECT_ENV" -eq 0 ] \
+        && [ "$GI_G4_TRANSPORT_ENV" -eq 0 ] \
+        && [ "$GI_G5_RECEIVER_ENV" -eq 0 ] \
+        || die "GI visual probe rejects explicit G2/G3/G4/G5 diagnostic flags"
+    require_value "$ROUTE_ID" "hdrtest-gi-visual-probe-v1" "GI visual probe route"
+    require_value "$ROUTE_SHA256" "dfd3c447d95ac9334a56e1bbb156f53ffa2fc5142280e8fe9be06076e910b2e1" "GI visual probe route digest"
+    require_value "$ROUTE_KIND" "GI_VISUAL_PROBE" "GI visual probe workload"
+    require_value "$MEASURE_FRAMES" "900" "GI visual probe measurement frames"
+    require_value "$WIDTH" "3024" "GI visual probe render width"
+    require_value "$HEIGHT" "1964" "GI visual probe render height"
+    require_value "$REFRESH_HZ" "120" "GI visual probe refresh rate"
+    require_value "$GRAPHICS_PRESET" "fancy" "GI visual probe graphics preset"
+    require_value "$HDR_MODE" "scene" "GI visual probe HDR output mode"
+    require_value "$WARMUP_FRAMES" "1800" "GI visual probe warmup frames"
+    require_value "$TIMING_DETAIL" "0" "GI visual probe timing detail"
+    require_value "$METAL_VALIDATION" "0" "GI visual probe Metal Validation mode"
+    require_value "$METALFX_MODE" "OFF" "GI visual probe MetalFX mode"
+    if [ "$GI_VISUAL_PROBE_ARM" = "on" ]; then
+        RUNTIME_GI_MODE=g6_live
+        require_value "$SETTINGS_ID" "native-hdr-fancy-gi-live-v1" "GI visual probe ON settings"
+        require_value "$SETTINGS_SPEC_SHA256" \
+            "8bf845b207048cc442620b2ef0e8bc05e6ca6721bc27018ab6121eba8ebd1817" \
+            "GI visual probe ON settings specification digest"
+    else
+        RUNTIME_GI_MODE=off
+        require_value "$SETTINGS_ID" "native-hdr-fancy-v1" "GI visual probe OFF settings"
+        require_value "$SETTINGS_SPEC_SHA256" \
+            "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+            "GI visual probe OFF settings specification digest"
+    fi
+elif [ "$GI_LIVE" -eq 1 ]; then
     [ "$GI_G2_CAPTURE_ENV" -eq 0 ] \
         && [ "$GI_G3_INJECT_ENV" -eq 0 ] \
         && [ "$GI_G4_TRANSPORT_ENV" -eq 0 ] \
@@ -1173,7 +1306,7 @@ TRANSCRIPT_TEE_PID=$!
 exec > "$TRANSCRIPT_PIPE" 2>&1
 rm -f "$TRANSCRIPT_PIPE"
 TRANSCRIPT_ACTIVE=1
-if [ "$FI_VALIDATION" -eq 0 ]; then
+if [ "$FI_VALIDATION" -eq 0 ] && [ "$GI_VISUAL_PROBE" -eq 0 ]; then
     trap 'transcript_only_cleanup $?' EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
@@ -1188,7 +1321,9 @@ else
     echo "  pacing: VSync off, maxFps=$MAX_FPS"
 fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
-if [ "$RUNTIME_GI_MODE" = "g6_live" ]; then
+if [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+    echo "GI_VISUAL_PROBE_REQUEST arm=$GI_VISUAL_PROBE_ARM runtime=$RUNTIME_GI_MODE clone_only=true non_attested=true route=$ROUTE_ID status=REQUESTED"
+elif [ "$RUNTIME_GI_MODE" = "g6_live" ]; then
     echo "GI_G6_REQUEST mode=g6_live persistent=true dynamic=true receiver=true diagnostic_flags=false route=$ROUTE_ID status=REQUESTED"
 elif [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
     echo "GI_G5_RECEIVER_REQUEST mode=g5_vertex_receiver arm=$GI_G5_RECEIVER_ARM receiver=$GI_G5_RECEIVER_ACTIVE field=$GI_G5_FIELD_KIND g2_resources=true g3_resources=true shared_g4_resources=true explicit_g4_request=false vertex_stage=true fragment_receiver=false diagnostic_only=true release=false status=REQUESTED"
@@ -1283,7 +1418,7 @@ cleanup() {
     # Restore before any slow digest validation. Keep the recovery copy until
     # every client process is gone, then restore+verify once more before it is
     # discarded so a late options.txt write cannot win the teardown race.
-    if [ "${FI_VALIDATION:-0}" -eq 1 ]; then
+    if [ "${TEMPORARY_SETTINGS:-0}" -eq 1 ]; then
         restore_fi_runtime_settings 1 || cleanup_status=2
         for _attempt in $(seq 1 100); do
             active_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
@@ -1320,13 +1455,13 @@ cleanup() {
     # Vanilla resets this ignored launch preference on orderly fullscreen exit.
     # Restore the exact launcher snapshot before validating benchmark quality
     # settings; all other tracked runtime contracts remain independently checked.
-    if [ "${FI_VALIDATION:-0}" -eq 0 ] \
+    if [ "${TEMPORARY_SETTINGS:-0}" -eq 0 ] \
         && [ -n "${OPTIONS_FILE_BACKUP:-}" ] \
         && [ -f "$OPTIONS_FILE_BACKUP" ]; then
         cp "$OPTIONS_FILE_BACKUP" "$OPTIONS_FILE" || cleanup_status=2
     fi
 
-    if [ "${FI_VALIDATION:-0}" -eq 0 ]; then
+    if [ "${TEMPORARY_SETTINGS:-0}" -eq 0 ]; then
         settings_after=$(python3 "$FIXTURE_HELPER" settings-values \
             "$SETTINGS_SPEC" "$OPTIONS_FILE" "$HDR_CONFIG" "$METALFX_CONFIG" \
             "$SODIUM_OPTIONS" "$SODIUM_MIXINS" "$RESOURCEPACKS_DIR" \
@@ -1397,7 +1532,7 @@ cleanup() {
         fi
     fi
 
-    if [ "${FI_VALIDATION:-0}" -eq 1 ]; then
+    if [ "${TEMPORARY_SETTINGS:-0}" -eq 1 ]; then
         active_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
         if [ -n "$active_processes" ]; then
             fi_process_quiescent=0
@@ -1650,6 +1785,21 @@ METALLUM_BENCHMARK_G6_MATRIX_NETHER_POSITION_X="$G6_MATRIX_NETHER_POSITION_X" \
 METALLUM_BENCHMARK_G6_MATRIX_NETHER_POSITION_Y="$G6_MATRIX_NETHER_POSITION_Y" \
 METALLUM_BENCHMARK_G6_MATRIX_NETHER_POSITION_Z="$G6_MATRIX_NETHER_POSITION_Z" \
 METALLUM_BENCHMARK_G6_MATRIX_NETHER_RETURN_FRAME="$G6_MATRIX_NETHER_RETURN_FRAME" \
+METALLUM_BENCHMARK_VISUAL_PROBE_RIG_ID="$GI_VISUAL_PROBE_RIG_ID" \
+METALLUM_BENCHMARK_VISUAL_PROBE_TORCH_POSITION_X="$GI_VISUAL_PROBE_TORCH_POSITION_X" \
+METALLUM_BENCHMARK_VISUAL_PROBE_TORCH_POSITION_Y="$GI_VISUAL_PROBE_TORCH_POSITION_Y" \
+METALLUM_BENCHMARK_VISUAL_PROBE_TORCH_POSITION_Z="$GI_VISUAL_PROBE_TORCH_POSITION_Z" \
+METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_START_FRAME="$GI_VISUAL_PROBE_ORBIT_START_FRAME" \
+METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_END_FRAME="$GI_VISUAL_PROBE_ORBIT_END_FRAME" \
+METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_TRANSLATION_RADIUS_BLOCKS="$GI_VISUAL_PROBE_ORBIT_TRANSLATION_RADIUS_BLOCKS" \
+METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_YAW_AMPLITUDE_DEGREES="$GI_VISUAL_PROBE_ORBIT_YAW_AMPLITUDE_DEGREES" \
+METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_PITCH_AMPLITUDE_DEGREES="$GI_VISUAL_PROBE_ORBIT_PITCH_AMPLITUDE_DEGREES" \
+METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_PERIOD_FRAMES="$GI_VISUAL_PROBE_ORBIT_PERIOD_FRAMES" \
+METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_0="$GI_VISUAL_PROBE_CAPTURE_FRAME_0" \
+METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_1="$GI_VISUAL_PROBE_CAPTURE_FRAME_1" \
+METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_2="$GI_VISUAL_PROBE_CAPTURE_FRAME_2" \
+METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_3="$GI_VISUAL_PROBE_CAPTURE_FRAME_3" \
+METALLUM_GI_G6_DEBUG_PROBE="$GI_G6_DEBUG_PROBE" \
 METALLUM_GPU_TIMING="$GPU_TIMING_ENV" \
 METALLUM_GPU_TIMING_DETAIL="$TIMING_DETAIL" \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
@@ -1678,7 +1828,10 @@ if grep -Fq "METALLUM_BENCHMARK EVENT=FAIL" "$MINECRAFT_LOG"; then
 fi
 screenshot_request_count=$(grep -Fc "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED" \
     "$MINECRAFT_LOG" || true)
-if [ "$CAPTURE_REFERENCE" -eq 0 ]; then
+if [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+    [ "$screenshot_request_count" -eq 0 ] \
+        || die "GI visual probe must use only its four dedicated screenshot markers"
+elif [ "$CAPTURE_REFERENCE" -eq 0 ]; then
     [ "$screenshot_request_count" -eq 0 ] || die "benchmark unexpectedly requested a screenshot"
 else
     [ "$screenshot_request_count" -eq 1 ] \
@@ -1749,7 +1902,105 @@ measure_end_line=$(grep -nF "$measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
     && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
     || die "deterministic route markers are out of order"
 
-if [ "$RUNTIME_GI_MODE" = "g6_live" ]; then
+if [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+    probe_rig="METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_RIG_APPLIED route=$ROUTE_ID rig=$GI_VISUAL_PROBE_RIG_ID clone_only=true direct_path=OCCLUDED bounce_path=OPEN status=PASS"
+    probe_rig_count=$(grep -Fc "$probe_rig" "$MINECRAFT_LOG" || true)
+    [ "$probe_rig_count" -eq 1 ] \
+        || die "expected exactly one applied GI visual probe rig marker (found $probe_rig_count)"
+    probe_rig_line=$(grep -nF "$probe_rig" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$probe_rig_line" -lt "$route_apply_line" ] \
+        || die "GI visual probe rig must be applied before route readiness"
+    probe_ready=$(grep -E \
+        "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_READY route=$ROUTE_ID rig=$GI_VISUAL_PROBE_RIG_ID measured_frame=[0-9]+ field_generation=[1-9][0-9]* source_tick=[0-9]+ ready_mask=7 exact_bind=true all_cascades=true status=PASS$" \
+        "$MINECRAFT_LOG" || true)
+    probe_ready_count=$(printf '%s\n' "$probe_ready" | grep -Fc 'GI_VISUAL_PROBE_READY' || true)
+    probe_ready_line=0
+    if [ "$GI_VISUAL_PROBE_ARM" = "on" ]; then
+        [ "$probe_ready_count" -eq 1 ] \
+            || die "GI visual probe ON arm did not emit exactly one current all-cascade readiness marker"
+        probe_ready_line=$(grep -nF "$probe_ready" "$MINECRAFT_LOG" | cut -d: -f1)
+        probe_gpu_direct=$(grep -E \
+            "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_GPU_DIRECT route=$ROUTE_ID rig=$GI_VISUAL_PROBE_RIG_ID measured_frame=[0-9]+ requested_frame=[0-9]+ latency_frames=([0-9]|[1-5][0-9]|60) identity=.* red_direct=true red_dominates=true white=OCCLUDED baffle=SOLID empty=AIR .* status=PASS$" \
+            "$MINECRAFT_LOG" || true)
+        probe_gpu_direct_count=$(printf '%s\\n' "$probe_gpu_direct" \
+            | grep -Fc 'GI_VISUAL_PROBE_GPU_DIRECT' || true)
+        [ "$probe_gpu_direct_count" -eq 1 ] \
+            || die "GI visual probe ON arm did not emit exactly one passing G3 GPU direct probe"
+        probe_gpu_direct_line=$(grep -nF "$probe_gpu_direct" "$MINECRAFT_LOG" | cut -d: -f1)
+        [ "$probe_ready_line" -lt "$probe_gpu_direct_line" ] \
+            || die "GI visual probe G3 GPU direct probe preceded its current post-torch readiness receipt"
+        probe_gpu_field=$(grep -E \
+            "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_GPU_FIELD route=$ROUTE_ID rig=$GI_VISUAL_PROBE_RIG_ID measured_frame=[0-9]+ requested_frame=[0-9]+ latency_frames=([0-9]|[1-5][0-9]|60) identity=.* samples=7 c0_white_nonzero=true c0_red_nonzero=true red_dominates=true baffle=DIAGNOSTIC sampleable=true .* status=PASS$" \
+            "$MINECRAFT_LOG" || true)
+        probe_gpu_field_count=$(printf '%s\n' "$probe_gpu_field" \
+            | grep -Fc 'GI_VISUAL_PROBE_GPU_FIELD' || true)
+        [ "$probe_gpu_field_count" -eq 1 ] \
+            || die "GI visual probe ON arm did not emit exactly one passing G6 GPU field probe"
+        probe_gpu_field_line=$(grep -nF "$probe_gpu_field" "$MINECRAFT_LOG" | cut -d: -f1)
+        [ "$probe_gpu_direct_line" -lt "$probe_gpu_field_line" ] \
+            || die "GI visual probe G6 GPU field probe preceded its G3 direct evidence"
+        probe_motion_begin=$(grep -E \
+            "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_MOTION_BEGIN route=$ROUTE_ID rig=$GI_VISUAL_PROBE_RIG_ID next_measured_frame=540 bindings=[1-9][0-9]* zero_bindings=[0-9]+ field_bindings=[1-9][0-9]* status=PASS$" \
+            "$MINECRAFT_LOG" || true)
+        [ "$(printf '%s\n' "$probe_motion_begin" | grep -Fc 'GI_VISUAL_PROBE_MOTION_BEGIN' || true)" -eq 1 ] \
+            || die "GI visual probe ON arm did not emit one motion baseline"
+        probe_motion_complete=$(grep -E \
+            "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_MOTION_COMPLETE route=$ROUTE_ID rig=$GI_VISUAL_PROBE_RIG_ID measured_frame=690 bindings_before=[0-9]+ bindings_now=[1-9][0-9]* zero_before=[0-9]+ zero_now=[0-9]+ field_before=[0-9]+ field_now=[1-9][0-9]* zero_delta=0 field_delta=[1-9][0-9]* status=PASS$" \
+            "$MINECRAFT_LOG" || true)
+        [ "$(printf '%s\n' "$probe_motion_complete" | grep -Fc 'GI_VISUAL_PROBE_MOTION_COMPLETE' || true)" -eq 1 ] \
+            || die "GI visual probe ON arm did not prove a zero-free field-bound motion interval"
+    else
+        [ "$probe_ready_count" -eq 0 ] \
+            || die "GI visual probe OFF arm must not emit a G6 readiness marker"
+        [ "$(grep -Fc 'METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_GPU_FIELD ' "$MINECRAFT_LOG" || true)" -eq 0 ] \
+            || die "GI visual probe OFF arm unexpectedly emitted a G6 GPU field probe"
+        [ "$(grep -Fc 'METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_GPU_DIRECT ' "$MINECRAFT_LOG" || true)" -eq 0 ] \
+            || die "GI visual probe OFF arm unexpectedly emitted a G3 GPU direct probe"
+        [ "$(grep -Ec 'GI_VISUAL_PROBE_MOTION_(BEGIN|COMPLETE)' "$MINECRAFT_LOG" || true)" -eq 0 ] \
+            || die "GI visual probe OFF arm unexpectedly emitted a G6 motion receipt"
+    fi
+    probe_camera_poses=""
+    for probe_index in 1 2 3 4; do
+        probe_frame_var="GI_VISUAL_PROBE_CAPTURE_FRAME_$((probe_index - 1))"
+        probe_frame=${!probe_frame_var}
+        if [ "$GI_VISUAL_PROBE_ARM" = "on" ]; then
+            probe_receipt='receipt=G6_(CURRENT|RETAINED) field_generation=[1-9][0-9]* source_tick=[0-9]+ ready_mask=[0-7] zero_before=[0-9]+ zero_now=[0-9]+ field_before=[0-9]+ field_now=[1-9][0-9]*'
+        else
+            probe_receipt='receipt=GI_DISABLED field_generation=0 source_tick=-1 ready_mask=0 zero_before=0 zero_now=0 field_before=0 field_now=0'
+        fi
+        probe_screenshot=$(grep -E \
+            "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_SCREENSHOT index=$probe_index phase=TORCH_ON measured_frame=$probe_frame ready_frame=[0-9]+ capture_after_ready_frames=[0-9]+ rig=$GI_VISUAL_PROBE_RIG_ID direct_path=OCCLUDED bounce_path=OPEN $probe_receipt camera_pose=-?[0-9.eE]+,-?[0-9.eE]+,-?[0-9.eE]+;-?[0-9.eE]+,-?[0-9.eE]+$" \
+            "$MINECRAFT_LOG" || true)
+        probe_screenshot_count=$(printf '%s\n' "$probe_screenshot" | grep -Fc 'GI_VISUAL_PROBE_SCREENSHOT' || true)
+        [ "$probe_screenshot_count" -eq 1 ] \
+            || die "expected exactly one GI visual probe screenshot $probe_index (found $probe_screenshot_count)"
+        probe_screenshot_line=$(grep -nF "$probe_screenshot" "$MINECRAFT_LOG" | cut -d: -f1)
+        [ "$measure_start_line" -lt "$probe_screenshot_line" ] \
+            && [ "$probe_screenshot_line" -lt "$measure_end_line" ] \
+            || die "GI visual probe screenshot $probe_index is outside measurement"
+        if [ "$GI_VISUAL_PROBE_ARM" = "on" ]; then
+            [ "$probe_ready_line" -lt "$probe_screenshot_line" ] \
+                || die "GI visual probe ON screenshot $probe_index preceded current G6 readiness"
+            [ "$probe_gpu_direct_line" -lt "$probe_screenshot_line" ] \
+                || die "GI visual probe ON screenshot $probe_index preceded its G3 GPU direct probe"
+            [ "$probe_gpu_field_line" -lt "$probe_screenshot_line" ] \
+                || die "GI visual probe ON screenshot $probe_index preceded its G6 GPU field probe"
+            probe_zero_before=$(printf '%s\n' "$probe_screenshot" | sed -E 's/.* zero_before=([0-9]+).*/\1/')
+            probe_zero_now=$(printf '%s\n' "$probe_screenshot" | sed -E 's/.* zero_now=([0-9]+).*/\1/')
+            probe_field_before=$(printf '%s\n' "$probe_screenshot" | sed -E 's/.* field_before=([0-9]+).*/\1/')
+            probe_field_now=$(printf '%s\n' "$probe_screenshot" | sed -E 's/.* field_now=([0-9]+).*/\1/')
+            [ "$probe_zero_before" -eq "$probe_zero_now" ] \
+                && [ "$probe_field_now" -gt "$probe_field_before" ] \
+                || die "GI visual probe screenshot $probe_index crossed a zero/stale terrain binding"
+        fi
+        probe_camera_pose=$(printf '%s\n' "$probe_screenshot" | sed -E 's/.* camera_pose=([^ ]+)$/\1/')
+        probe_camera_poses="${probe_camera_poses}${probe_camera_pose}\n"
+    done
+    [ "$(printf '%b' "$probe_camera_poses" | sort -u | grep -Ec '.' || true)" -eq 4 ] \
+        || die "GI visual probe did not capture four distinct rendered camera poses"
+fi
+
+if [ "$RUNTIME_GI_MODE" = "g6_live" ] && [ "$GI_VISUAL_PROBE" -eq 0 ]; then
     g6_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G6_ADMISSION "
     g6_admission_count=$(grep -Fc "$g6_admission_prefix" "$MINECRAFT_LOG" || true)
     [ "$g6_admission_count" -eq 1 ] \
@@ -1879,7 +2130,7 @@ elif [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
 "requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 "\
 "state=READY arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND "\
 "phase=WARMUP presented_frame=[0-9]+ resources=5 bindings=5 "\
-"allocated_bytes=[0-9]+ g4_accounted_bytes=22637928 "\
+"allocated_bytes=[0-9]+ g4_accounted_bytes=22917480 "\
 "combined_accounted_bytes=[0-9]+ cap_bytes=25165824 shared_texture_bytes=0 "\
 "carrier_skips=0 g5_carrier_writes=[1-9][0-9]* "\
 "drawn_g5_carrier_slices=[1-9][0-9]* status=PASS vertex_only=true "\
@@ -1893,7 +2144,7 @@ elif [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
         | sed -E 's/.* allocated_bytes=([0-9]+) .*/\1/')
     g5_combined_reported_bytes=$(printf '%s\n' "$g5_admission" \
         | sed -E 's/.* combined_accounted_bytes=([0-9]+) .*/\1/')
-    g5_combined_accounted_bytes=$((22637928 + g5_allocated_bytes))
+    g5_combined_accounted_bytes=$((22917480 + g5_allocated_bytes))
     [ "$g5_combined_reported_bytes" -eq "$g5_combined_accounted_bytes" ] \
         || die "G5 admission memory census does not equal G4 plus G5 allocation"
     [ "$g5_combined_accounted_bytes" -le 25165824 ] \
@@ -1933,7 +2184,9 @@ elif [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
 fi
 
 
-if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
+if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] \
+        || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ] \
+        || [ "$ROUTE_KIND" = "GI_VISUAL_PROBE" ]; then
     torch_end_frame=$((TORCH_APPLY_AFTER_MEASURED_FRAMES + TORCH_OBSERVATION_FRAMES))
     torch_position="$TORCH_POSITION_X,$TORCH_POSITION_Y,$TORCH_POSITION_Z"
     torch_begin="METALLUM_BENCHMARK EVENT=TORCH_EPOCH_BEGIN route=$ROUTE_ID position=$torch_position measured_frame=$TORCH_APPLY_AFTER_MEASURED_FRAMES observation_frames=$TORCH_OBSERVATION_FRAMES"
@@ -1953,7 +2206,8 @@ if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
     torch_begin_line=$(grep -nF "$torch_begin" "$MINECRAFT_LOG" | cut -d: -f1)
     torch_applied_line=$(grep -nF "$torch_applied" "$MINECRAFT_LOG" | cut -d: -f1)
     torch_end_line=$(grep -nF "$torch_end" "$MINECRAFT_LOG" | cut -d: -f1)
-    if [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
+    if [ "$ROUTE_KIND" = "TORCH_TOGGLE" ] \
+            || [ "$ROUTE_KIND" = "GI_VISUAL_PROBE" ]; then
         torch_removed="METALLUM_BENCHMARK EVENT=TORCH_EPOCH_REMOVED route=$ROUTE_ID position=$torch_position measured_frame="
         torch_removed_count=$(grep -F "$torch_removed" "$MINECRAFT_LOG" \
             | grep -Fc " requested_frame=$TORCH_REMOVE_AFTER_MEASURED_FRAMES" || true)
@@ -1962,15 +2216,16 @@ if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
         torch_removed_line=$(grep -nF "$torch_removed" "$MINECRAFT_LOG" \
             | grep -F " requested_frame=$TORCH_REMOVE_AFTER_MEASURED_FRAMES" \
             | cut -d: -f1)
-        if [ "$RUNTIME_GI_MODE" = "g6_live" ] && [ "$CAPTURE_REFERENCE" -eq 1 ]; then
+        if [ "$CAPTURE_REFERENCE" -eq 1 ] \
+                && [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
             g6_screenshot="METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index=1 mode=$METALFX_MODE phase=TORCH_ON measured_frame=400"
             g6_screenshot_count=$(grep -Fc "$g6_screenshot" "$MINECRAFT_LOG" || true)
             [ "$g6_screenshot_count" -eq 1 ] \
-                || die "G6 reference run expected exactly one torch-on screenshot marker (found $g6_screenshot_count)"
+                || die "torch reference run expected exactly one torch-on screenshot marker (found $g6_screenshot_count)"
             g6_screenshot_line=$(grep -nF "$g6_screenshot" "$MINECRAFT_LOG" | cut -d: -f1)
             [ "$torch_applied_line" -lt "$g6_screenshot_line" ] \
                 && [ "$g6_screenshot_line" -lt "$torch_removed_line" ] \
-                || die "G6 torch-on screenshot marker is outside the confirmed torch epoch"
+                || die "torch-on screenshot marker is outside the confirmed torch epoch"
         fi
         [ "$measure_start_line" -lt "$torch_begin_line" ] \
             && [ "$torch_begin_line" -lt "$torch_applied_line" ] \
@@ -2382,7 +2637,7 @@ esac
 complete="METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=$MEASURE_FRAMES framebuffer=${WIDTH}x${HEIGHT}"
 complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ "$complete_count" -eq 1 ] || die "expected exactly one matching COMPLETE marker (found $complete_count)"
-if [ "$RUNTIME_GI_MODE" = "g6_live" ]; then
+if [ "$RUNTIME_GI_MODE" = "g6_live" ] && [ "$GI_VISUAL_PROBE" -eq 0 ]; then
     complete_line=$(grep -nF "$complete" "$MINECRAFT_LOG" | cut -d: -f1)
     [ "$g6_final_line" -lt "$complete_line" ] \
         || die "G6 final census must precede COMPLETE"
@@ -2523,6 +2778,22 @@ remaining_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
 [ -z "$remaining_processes" ] || die "benchmark returned but a Minecraft/runClient process remains:\n$remaining_processes"
 
 if [ "$CAPTURE_REFERENCE" -eq 1 ]; then
+    if [ "$GI_VISUAL_PROBE" -eq 1 ]; then
+        captured_count=0
+        mkdir -p "$REFERENCE_OUTPUT_DIR/$stem"
+        for screenshot in "$RUN_DIR"/screenshots/*.png; do
+            [ -f "$screenshot" ] || continue
+            screenshot_mtime=$(stat -f %m "$screenshot")
+            if [ "$screenshot_mtime" -ge "$start_epoch" ]; then
+                captured_count=$((captured_count + 1))
+                cp "$screenshot" "$REFERENCE_OUTPUT_DIR/$stem/$(basename "$screenshot")"
+            fi
+        done
+        [ "$captured_count" -eq 4 ] \
+            || die "GI visual probe expected exactly four new PNGs (found $captured_count)"
+        echo "GI visual probe captures saved (non-attested): $REFERENCE_OUTPUT_DIR/$stem"
+        echo "  arm: $GI_VISUAL_PROBE_ARM; inspect ON/OFF pairs manually for warm red receiver bounce and motion stability"
+    else
     captured_screenshot=""
     captured_count=0
     for screenshot in "$RUN_DIR"/screenshots/*.png; do
@@ -2540,6 +2811,7 @@ if [ "$CAPTURE_REFERENCE" -eq 1 ]; then
     cp "$captured_screenshot" "$reference_screenshot"
     echo "Reference capture validated (not performance-attested): $reference_screenshot"
     echo "  sha256: $(shasum -a 256 "$reference_screenshot" | awk '{print $1}')"
+    fi
 else
     echo "Benchmark validated: COMPLETE present, no FAIL/screenshots, dropped timing events = 0"
 fi

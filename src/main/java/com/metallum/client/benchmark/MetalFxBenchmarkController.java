@@ -6,9 +6,20 @@ import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.metalfx.MetalFxUpscaling;
+import com.metallum.client.lighting.AdvancedLight;
+import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.gi.live.GiLiveLayout;
+import com.metallum.client.gi.live.GiLiveGpuResources;
 import com.metallum.client.gi.live.GiLiveRuntime;
 import com.metallum.client.gi.semantic.GiSemanticController;
+import com.metallum.client.gi.semantic.GiSemanticFieldSnapshot;
+import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
+import com.metallum.client.gi.semantic.GiSemanticValidity;
+import com.metallum.client.gi.source.GiDirectSourceLayout;
+import com.metallum.client.gi.source.GiDirectSourceGpuResources;
+import com.metallum.client.gi.source.GiStaticSourceSnapshot;
+import com.metallum.client.gi.source.GiStaticSourceState;
 import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
 import com.metallum.client.gi.receiver.GiReceiverRuntime;
@@ -36,6 +47,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -60,6 +72,7 @@ import org.lwjgl.glfw.GLFW;
 import org.lwjgl.glfw.GLFWVidMode;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -81,6 +94,30 @@ public final class MetalFxBenchmarkController {
     private static final int WINDOW_FOCUS_RETRY_INTERVAL_FRAMES = 30;
     private static final int G4_ADMISSION_TIMEOUT_FRAMES = 240;
     private static final int G6_TORCH_ON_SCREENSHOT_MEASURED_FRAME = 400;
+    private static final int VISUAL_PROBE_READY_TIMEOUT_FRAMES = 260;
+    /** The async diagnostic has one command buffer and must settle long before capture frame 570. */
+    private static final int VISUAL_PROBE_GPU_FIELD_TIMEOUT_FRAMES = 60;
+    /** A moving receiver may make one readback stale; retry only a bounded number of fresh epochs. */
+    private static final int VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS = 3;
+    private static final int VISUAL_PROBE_MIN_X = 72;
+    private static final int VISUAL_PROBE_MAX_X = 92;
+    private static final int VISUAL_PROBE_MIN_Y = 74;
+    private static final int VISUAL_PROBE_MAX_Y = 82;
+    private static final int VISUAL_PROBE_MIN_Z = -120;
+    private static final int VISUAL_PROBE_MAX_Z = -100;
+    /**
+     * Fixed G6 texels for {@code red-reflector-occluded-v1}.  They are deliberately owned by the
+     * controller and passed verbatim to the GPU resource; no inferred clipmap identity enters this
+     * benchmark request.
+     */
+    private static final int[] VISUAL_PROBE_GPU_FIELD_CASCADES = {0, 0, 0, 0, 0, 1, 2};
+    private static final int[] VISUAL_PROBE_GPU_FIELD_WORLD_XS = {82, 82, 82, 84, 81, 82, 82};
+    private static final int[] VISUAL_PROBE_GPU_FIELD_WORLD_YS = {76, 77, 78, 77, 76, 77, 77};
+    private static final int[] VISUAL_PROBE_GPU_FIELD_WORLD_ZS = {-110, -110, -110, -110, -111, -110, -110};
+    /** C0-only G3 probe: white receiver, red reflector, baffle, empty air and source cell. */
+    private static final int[] VISUAL_PROBE_GPU_DIRECT_WORLD_XS = {82, 84, 81, 83, 80, 82, 82};
+    private static final int[] VISUAL_PROBE_GPU_DIRECT_WORLD_YS = {77, 77, 76, 77, 75, 76, 78};
+    private static final int[] VISUAL_PROBE_GPU_DIRECT_WORLD_ZS = {-110, -110, -111, -110, -112, -110, -110};
     private static final int G4_SOURCE_RECEIPT_FRAMES = 300;
     private static final int ROUTE_SERVER_CHECK_INTERVAL_FRAMES = 30;
     private static final int G6_MATRIX_RECEIPT_ORBIT = 1;
@@ -99,6 +136,12 @@ public final class MetalFxBenchmarkController {
     private static final int G6_MATRIX_LATENCY_SCROLL = 3;
     private static final int G6_MATRIX_LATENCY_FULL_RESET = 4;
     private static final int G6_MATRIX_RECOVERY_TIMEOUT_FRAMES = 180;
+    /**
+     * A dimension return can finish while late chunk streaming still owns compatible C2 work.
+     * The next dimension action must never sample that transient state or accept near-only
+     * coverage, but it may serialize behind it for one bounded FULL_RESET-p99 window.
+     */
+    private static final int G6_MATRIX_PRE_ACTION_CLEAN_TIMEOUT_FRAMES = 64;
     /**
      * Harness-only all-cascade stabilization budget; the production FULL_RESET SLA is near-only.
      * Match the route's complete 260-frame gap so its final ten-frame poll can close before the
@@ -223,14 +266,15 @@ public final class MetalFxBenchmarkController {
         TORCH_EPOCH,
         TORCH_TOGGLE,
         L6_DYNAMIC_SHADOW,
-        GI_G6_MATRIX;
+        GI_G6_MATRIX,
+        GI_VISUAL_PROBE;
 
         private static WorkloadKind fromEnvironment() {
             try {
                 return valueOf(requiredEnv("METALLUM_BENCHMARK_ROUTE_KIND"));
             } catch (IllegalArgumentException exception) {
                 throw new IllegalArgumentException(
-                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, TORCH_TOGGLE, L6_DYNAMIC_SHADOW, or GI_G6_MATRIX",
+                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, TORCH_TOGGLE, L6_DYNAMIC_SHADOW, GI_G6_MATRIX, or GI_VISUAL_PROBE",
                         exception
                 );
             }
@@ -388,6 +432,250 @@ public final class MetalFxBenchmarkController {
         }
     }
 
+    /**
+     * A non-attested visual acceptance fixture. The runner creates a disposable CoW world, and
+     * this controller clears/builds the exact rig only in that clone before route readiness.
+     */
+    private record VisualProbeConfig(
+            String rigId,
+            TorchEpochConfig torchEpoch,
+            int orbitStartFrame,
+            int orbitEndFrame,
+            double orbitTranslationRadiusBlocks,
+            float orbitYawAmplitudeDegrees,
+            float orbitPitchAmplitudeDegrees,
+            int orbitPeriodFrames,
+            int[] captureFrames
+    ) {
+        private static VisualProbeConfig fromEnvironment() {
+            String rigId = requiredEnv("METALLUM_BENCHMARK_VISUAL_PROBE_RIG_ID");
+            int[] captures = {
+                    integer("METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_0"),
+                    integer("METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_1"),
+                    integer("METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_2"),
+                    integer("METALLUM_BENCHMARK_VISUAL_PROBE_CAPTURE_FRAME_3"),
+            };
+            VisualProbeConfig config = new VisualProbeConfig(
+                    rigId,
+                    new TorchEpochConfig(
+                            integer("METALLUM_BENCHMARK_VISUAL_PROBE_TORCH_POSITION_X"),
+                            integer("METALLUM_BENCHMARK_VISUAL_PROBE_TORCH_POSITION_Y"),
+                            integer("METALLUM_BENCHMARK_VISUAL_PROBE_TORCH_POSITION_Z"),
+                            positiveIntStrict(
+                                    "METALLUM_BENCHMARK_TORCH_APPLY_AFTER_MEASURED_FRAMES"),
+                            positiveIntStrict(
+                                    "METALLUM_BENCHMARK_TORCH_OBSERVATION_FRAMES"),
+                            positiveIntStrict(
+                                    "METALLUM_BENCHMARK_TORCH_REMOVE_AFTER_MEASURED_FRAMES")
+                    ),
+                    integer("METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_START_FRAME"),
+                    integer("METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_END_FRAME"),
+                    positiveFiniteDouble(
+                            "METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_TRANSLATION_RADIUS_BLOCKS"),
+                    positiveFiniteFloat("METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_YAW_AMPLITUDE_DEGREES"),
+                    positiveFiniteFloat("METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_PITCH_AMPLITUDE_DEGREES"),
+                    positiveIntStrict("METALLUM_BENCHMARK_VISUAL_PROBE_ORBIT_PERIOD_FRAMES"),
+                    captures
+            );
+            if (!visualProbeConfigExact(config)) {
+                throw new IllegalArgumentException("GI visual probe differs from the tracked occluded red-reflector rig");
+            }
+            return config;
+        }
+
+        private boolean capturesFrame(final int frame) {
+            for (int captureFrame : this.captureFrames) {
+                if (captureFrame == frame) return true;
+            }
+            return false;
+        }
+
+        private int captureIndex(final int frame) {
+            for (int index = 0; index < this.captureFrames.length; index++) {
+                if (this.captureFrames[index] == frame) return index + 1;
+            }
+            return -1;
+        }
+    }
+
+    static boolean visualProbeScheduleIsExact(
+            final int torchApplyFrame,
+            final int torchObservationFrames,
+            final int torchRemoveFrame,
+            final int orbitStartFrame,
+            final int orbitEndFrame,
+            final double translationRadiusBlocks,
+            final float yawAmplitudeDegrees,
+            final float pitchAmplitudeDegrees,
+            final int orbitPeriodFrames,
+            final int[] captureFrames
+    ) {
+        return torchApplyFrame == 300
+                && torchObservationFrames == 450
+                && torchRemoveFrame == 690
+                && orbitStartFrame == 540
+                && orbitEndFrame == 690
+                && Double.compare(translationRadiusBlocks, 0.75D) == 0
+                && Float.compare(yawAmplitudeDegrees, 12.0F) == 0
+                && Float.compare(pitchAmplitudeDegrees, 3.0F) == 0
+                && orbitPeriodFrames == 120
+                && Arrays.equals(captureFrames, new int[] {570, 600, 630, 660});
+    }
+
+    private static Block registeredBenchmarkBlock(final String path) {
+        Block block = BuiltInRegistries.BLOCK.getValue(Identifier.parse("minecraft:" + path));
+        if (block == Blocks.AIR) {
+            throw new IllegalStateException("missing tracked GI visual probe block: " + path);
+        }
+        return block;
+    }
+
+    private static Block visualProbeBlack() {
+        return registeredBenchmarkBlock("black_concrete");
+    }
+
+    private static Block visualProbeRed() {
+        return registeredBenchmarkBlock("red_concrete");
+    }
+
+    private static Block visualProbeWhite() {
+        return registeredBenchmarkBlock("white_concrete");
+    }
+
+    /**
+     * The white receiver is shadowed from the torch by the exact direct-field rounded DDA, while
+     * the red reflector remains visible to that source. Its exposed -X face then reaches the
+     * receiver's visible +X face through one known-empty, axis-aligned G4 transport cell. This
+     * is geometry evidence, not a claim that a captured image has been visually accepted.
+     */
+    static boolean visualProbeOneBouncePathIsSeparated() {
+        return !visualProbeDirectDdaPathClear(82, 77, -110, 80, 75, -112)
+                && visualProbeDirectDdaPathClear(84, 77, -110, 80, 75, -112)
+                && visualProbeTransportRayIsExact();
+    }
+
+    /** The red cell (84,77,-110) reaches the white cell (82,77,-110) on (+1,0,0), k=2. */
+    static boolean visualProbeTransportRayIsExact() {
+        int sourceX = 82;
+        int sourceY = 77;
+        int sourceZ = -110;
+        int receiverX = 84;
+        int receiverY = 77;
+        int receiverZ = -110;
+        int dx = receiverX - sourceX;
+        int dy = receiverY - sourceY;
+        int dz = receiverZ - sourceZ;
+        int steps = Math.max(Math.max(Math.abs(dx), Math.abs(dy)), Math.abs(dz));
+        if (steps != 2 || steps > 8 || dx / steps != 1 || dy != 0 || dz != 0) {
+            return false;
+        }
+        return visualProbeSupercoverPathClear(
+                sourceX, sourceY, sourceZ, receiverX, receiverY, receiverZ
+        ) && visualProbeLegacyDiagonalPathIsBlocked();
+    }
+
+    /** Regression guard: the old diagonal candidate touches the reflector through a corner. */
+    static boolean visualProbeLegacyDiagonalPathIsBlocked() {
+        return !visualProbeSupercoverPathClear(86, 77, -108, 82, 77, -104);
+    }
+
+    /** Mirrors {@code metallum_gi_direct_visible_to_source}: rounded points, source endpoint exempt. */
+    static boolean visualProbeDirectDdaPathClear(
+            final int startX, final int startY, final int startZ,
+            final int sourceX, final int sourceY, final int sourceZ
+    ) {
+        int deltaX = sourceX - startX;
+        int deltaY = sourceY - startY;
+        int deltaZ = sourceZ - startZ;
+        double distance = Math.sqrt(deltaX * (double) deltaX
+                + deltaY * (double) deltaY + deltaZ * (double) deltaZ);
+        if (!(distance > 1.0e-5D)) return true;
+        int steps = (int) Math.ceil(distance);
+        if (steps > 8) return false;
+        int previousX = startX;
+        int previousY = startY;
+        int previousZ = startZ;
+        for (int step = 1; step < steps; step++) {
+            int x = startX + (int) Math.round(deltaX / distance * step);
+            int y = startY + (int) Math.round(deltaY / distance * step);
+            int z = startZ + (int) Math.round(deltaZ / distance * step);
+            if (x == previousX && y == previousY && z == previousZ) continue;
+            previousX = x;
+            previousY = y;
+            previousZ = z;
+            if (visualProbeSolidCell(x, y, z)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Exact 2-D supercover for the rig's horizontal G4 rays. At a diagonal boundary it checks
+     * both tangent cells, matching the conservative voxel-transport rule rather than only the
+     * baffle plane. The receiver endpoint is deliberately excluded: it is the intended hit.
+     */
+    static boolean visualProbeSupercoverPathClear(
+            final int sourceX, final int sourceY, final int sourceZ,
+            final int targetX, final int targetY, final int targetZ
+    ) {
+        if (sourceY != targetY) return false;
+        int dx = targetX - sourceX;
+        int dz = targetZ - sourceZ;
+        int steps = Math.max(Math.abs(dx), Math.abs(dz));
+        if (steps <= 0 || steps > 8
+                || (Math.abs(dx) != 0 && Math.abs(dx) != steps)
+                || (Math.abs(dz) != 0 && Math.abs(dz) != steps)) return false;
+        int stepX = Integer.compare(dx, 0);
+        int stepZ = Integer.compare(dz, 0);
+        int x = sourceX;
+        int z = sourceZ;
+        for (int step = 1; step < steps; step++) {
+            int nextX = x + stepX;
+            int nextZ = z + stepZ;
+            if (stepX != 0 && stepZ != 0
+                    && (visualProbeSolidCell(nextX, sourceY, z)
+                    || visualProbeSolidCell(x, sourceY, nextZ))) {
+                return false;
+            }
+            if (visualProbeSolidCell(nextX, sourceY, nextZ)) return false;
+            x = nextX;
+            z = nextZ;
+        }
+        return true;
+    }
+
+    private static boolean visualProbeSolidCell(final int x, final int y, final int z) {
+        boolean enclosure = y == 74 || y == 82
+                || (y >= 75 && y <= 81
+                && (x == VISUAL_PROBE_MIN_X || x == VISUAL_PROBE_MAX_X
+                || z == VISUAL_PROBE_MIN_Z || z == VISUAL_PROBE_MAX_Z));
+        boolean baffle = x == 81 && y == 76 && z == -111;
+        boolean reflector = x == 84 && y >= 75 && y <= 80 && z >= -114 && z <= -106;
+        boolean receiver = x == 82 && y >= 75 && y <= 80 && z == -110;
+        return enclosure || baffle || reflector || receiver;
+    }
+
+    private static boolean visualProbeConfigExact(final VisualProbeConfig config) {
+        return config != null
+                && "red-reflector-occluded-v1".equals(config.rigId())
+                && config.torchEpoch().x() == 80
+                && config.torchEpoch().y() == 75
+                && config.torchEpoch().z() == -112
+                && config.torchEpoch().applyAfterMeasuredFrames() == 300
+                && visualProbeScheduleIsExact(
+                        config.torchEpoch().applyAfterMeasuredFrames(),
+                        config.torchEpoch().observationFrames(),
+                        config.torchEpoch().removeAfterMeasuredFrames(),
+                        config.orbitStartFrame(),
+                        config.orbitEndFrame(),
+                        config.orbitTranslationRadiusBlocks(),
+                        config.orbitYawAmplitudeDegrees(),
+                        config.orbitPitchAmplitudeDegrees(),
+                        config.orbitPeriodFrames(),
+                        config.captureFrames()
+                )
+                && visualProbeOneBouncePathIsSeparated();
+    }
+
     /** Benchmark-only motion fixture exercising the production held/entity extraction paths. */
     private record L6DynamicShadowConfig(
             double orbitRadius,
@@ -466,7 +754,8 @@ public final class MetalFxBenchmarkController {
             WorkloadKind workloadKind,
             TorchEpochConfig torchEpoch,
             L6DynamicShadowConfig l6DynamicShadow,
-            G6MatrixConfig g6Matrix
+            G6MatrixConfig g6Matrix,
+            VisualProbeConfig visualProbe
     ) {
         private static RouteConfig fromEnvironment() {
             String routeId = requiredMatching("METALLUM_BENCHMARK_ROUTE_ID", SAFE_ID);
@@ -521,6 +810,12 @@ public final class MetalFxBenchmarkController {
             G6MatrixConfig g6Matrix = workloadKind == WorkloadKind.GI_G6_MATRIX
                     ? G6MatrixConfig.fromEnvironment()
                     : null;
+            VisualProbeConfig visualProbe = workloadKind == WorkloadKind.GI_VISUAL_PROBE
+                    ? VisualProbeConfig.fromEnvironment()
+                    : null;
+            if (visualProbe != null) {
+                torchEpoch = visualProbe.torchEpoch();
+            }
             return new RouteConfig(
                     routeId,
                     routeSha256,
@@ -546,7 +841,8 @@ public final class MetalFxBenchmarkController {
                     workloadKind,
                     torchEpoch,
                     l6DynamicShadow,
-                    g6Matrix
+                    g6Matrix,
+                    visualProbe
             );
         }
     }
@@ -625,6 +921,23 @@ public final class MetalFxBenchmarkController {
     private volatile String torchEpochFailure;
     private int torchEpochAppliedMeasuredFrame = -1;
     private int torchEpochRemovedMeasuredFrame = -1;
+    private int visualProbeReadyMeasuredFrame = -1;
+    private int visualProbeGpuFieldProbeRequestedMeasuredFrame = -1;
+    private int visualProbeGpuFieldProbeDeadlineMeasuredFrame = -1;
+    private int visualProbeGpuFieldProbeAttempts;
+    private boolean visualProbeGpuFieldProbeCompleted;
+    private int visualProbeGpuDirectProbeRequestedMeasuredFrame = -1;
+    private int visualProbeGpuDirectProbeDeadlineMeasuredFrame = -1;
+    private int visualProbeGpuDirectProbeAttempts;
+    private boolean visualProbeGpuDirectProbeCompleted;
+    private long visualProbePreTorchFieldGeneration = -1L;
+    private long visualProbePreTorchSourceTick = -1L;
+    private long visualProbeMotionBaselineBindings = -1L;
+    private long visualProbeMotionBaselineZeroBindings = -1L;
+    private long visualProbeMotionBaselineFieldBindings = -1L;
+    private boolean visualProbeMotionCompleted;
+    private final AdvancedLight[] visualProbeStaticSourceScratch =
+            new AdvancedLight[GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK];
     private final AtomicBoolean survivalGuardTaskPending = new AtomicBoolean();
     private UUID guardedPlayerId;
     private volatile boolean survivalGuardApplied;
@@ -788,15 +1101,16 @@ public final class MetalFxBenchmarkController {
         }
         if (error == null && parsedRoute != null && parsedRoute.torchEpoch() != null) {
             TorchEpochConfig torchEpoch = parsedRoute.torchEpoch();
+            boolean visualProbe = parsedRoute.visualProbe() != null;
             if (parsed.size() != 1) {
                 error = "TORCH_EPOCH requires exactly one benchmark segment";
             } else if (Math.floorMod(torchEpoch.x(), 16) != 0
                     || Math.floorMod(torchEpoch.z(), 16) != 0) {
                 error = "TORCH_EPOCH must run on an x/z section boundary";
-            } else if (torchEpoch.applyAfterMeasuredFrames() != 300
-                    || torchEpoch.observationFrames() != 300) {
+            } else if (!visualProbe && (torchEpoch.applyAfterMeasuredFrames() != 300
+                    || torchEpoch.observationFrames() != 300)) {
                 error = "TORCH_EPOCH requires a 300-frame baseline and observation window";
-            } else if (torchEpoch.removesTorch()
+            } else if (!visualProbe && torchEpoch.removesTorch()
                     && torchEpoch.removeAfterMeasuredFrames() != 450) {
                 error = "TORCH_TOGGLE must remove the torch after exactly 450 measured frames";
             } else if (torchEpoch.removesTorch()
@@ -849,6 +1163,15 @@ public final class MetalFxBenchmarkController {
                 error = "GI_G6_MATRIX recovery gaps are below the exact 270/200/260/190/470-frame floors";
             } else if (!scrollWindows) {
                 error = "GI_G6_MATRIX scroll cadence/recovery is below the exact 40/60-frame floors";
+            }
+        }
+        if (error == null && parsedRoute != null && parsedRoute.visualProbe() != null) {
+            VisualProbeConfig probe = parsedRoute.visualProbe();
+            if (parsed.size() != 1
+                    || !visualProbeConfigExact(probe)
+                    || probe.orbitEndFrame() >= this.measureFrames
+                    || probe.torchEpoch().endMeasuredFrame() >= this.measureFrames) {
+                error = "GI visual probe requires its exact single-segment schedule before measurement end";
             }
         }
         this.sequence = List.copyOf(parsed);
@@ -907,6 +1230,9 @@ public final class MetalFxBenchmarkController {
         if (this.routeServerFailure != null) {
             fail(minecraft, this.routeServerFailure);
             return;
+        }
+        if (this.stage == Stage.RUNNING && this.segmentPhase == SegmentPhase.MEASURE) {
+            applyVisualProbePoseForRender(minecraft, this.measuredFrames + 1);
         }
         if (this.stage == Stage.RUNNING) {
             return;
@@ -1006,27 +1332,32 @@ public final class MetalFxBenchmarkController {
                 this.segmentFrame++;
                 this.measuredFrames++;
                 driveL6DynamicShadow(minecraft);
+                auditVisualProbeMotion(minecraft);
                 driveTorchEpoch(minecraft);
+                driveVisualProbeReadiness(minecraft);
+                driveVisualProbeGpuDirectProbe(minecraft);
+                driveVisualProbeGpuFieldProbe(minecraft);
                 driveG6Matrix(minecraft);
                 driveNetherLavaStress(minecraft);
                 if (this.stage != Stage.RUNNING) {
                     return;
                 }
                 if (this.captureScreenshots
-                        && GiLiveRuntime.isRequested()
+                        && this.route.torchEpoch() != null
+                        && this.route.visualProbe() == null
                         && this.measuredFrames == G6_TORCH_ON_SCREENSHOT_MEASURED_FRAME) {
                     if (!this.torchEpochAppliedLogged || this.torchEpochRemovalRequested) {
-                        fail(minecraft, "G6 torch-on screenshot frame is outside the confirmed torch epoch");
+                        fail(minecraft, "Torch-on reference frame is outside the confirmed torch epoch");
                         return;
                     }
                     TorchEpochConfig torch = this.route.torchEpoch();
                     if (torch == null || minecraft.level == null
                             || !minecraft.level.getBlockState(torch.position()).is(Blocks.TORCH)) {
-                        fail(minecraft, "G6 torch-on screenshot lacks the synchronized client torch state");
+                        fail(minecraft, "Torch-on reference lacks the synchronized client torch state");
                         return;
                     }
                     if (!minecraft.levelRenderer.hasRenderedAllSections()) {
-                        fail(minecraft, "G6 torch-on screenshot terrain rebuild is still pending");
+                        fail(minecraft, "Torch-on reference terrain rebuild is still pending");
                         return;
                     }
                     Screenshot.grab(minecraft, false);
@@ -1035,6 +1366,87 @@ public final class MetalFxBenchmarkController {
                             this.segmentIndex + 1,
                             this.sequence.get(this.segmentIndex),
                             this.measuredFrames
+                    );
+                }
+                VisualProbeConfig visualProbe = this.route.visualProbe();
+                if (this.captureScreenshots
+                        && visualProbe != null
+                        && visualProbe.capturesFrame(this.measuredFrames)
+                        && this.visualProbeReadyMeasuredFrame < 0) {
+                    fail(minecraft, "GI visual probe reached a scheduled capture before its current G6 readiness barrier");
+                    return;
+                }
+                if (this.captureScreenshots
+                        && visualProbe != null
+                        && GiLiveRuntime.isRequested()
+                        && visualProbe.capturesFrame(this.measuredFrames)
+                        && (!this.visualProbeGpuDirectProbeCompleted
+                        || !this.visualProbeGpuFieldProbeCompleted)) {
+                    fail(minecraft, "GI visual probe reached a scheduled capture before its G3/G6 GPU field probes completed");
+                    return;
+                }
+                if (this.captureScreenshots
+                        && visualProbe != null
+                        && this.visualProbeReadyMeasuredFrame >= 0
+                        && visualProbe.capturesFrame(this.measuredFrames)) {
+                    GiLiveRuntime.FinalSnapshot captureReceipt = null;
+                    String receiptKind = "GI_DISABLED";
+                    if (GiLiveRuntime.isRequested()) {
+                        captureReceipt = GiLiveRuntime.finalSnapshot();
+                        boolean currentReceipt = visualProbeCurrentPostTorchReceipt(
+                                captureReceipt,
+                                GiLiveRuntime.deviceGeneration(),
+                                this.visualProbePreTorchFieldGeneration,
+                                this.visualProbePreTorchSourceTick
+                        );
+                        if (!currentReceipt && !visualProbePostTorchContinuityReceipt(
+                                captureReceipt,
+                                GiLiveRuntime.deviceGeneration(),
+                                this.visualProbePreTorchFieldGeneration,
+                                this.visualProbePreTorchSourceTick
+                        )) {
+                            fail(minecraft, "GI visual probe capture lacks a current or retained post-torch all-cascade binding");
+                            return;
+                        }
+                        receiptKind = currentReceipt ? "G6_CURRENT" : "G6_RETAINED";
+                    }
+                    if (!this.torchEpochAppliedLogged || this.torchEpochRemovalRequested) {
+                        fail(minecraft, "GI visual probe capture is outside the confirmed torch epoch");
+                        return;
+                    }
+                    if (minecraft.level == null
+                            || !visualProbeRigMatches(minecraft.level, visualProbe)
+                            || !minecraft.level.getBlockState(visualProbe.torchEpoch().position()).is(Blocks.TORCH)) {
+                        fail(minecraft, "GI visual probe lacks its synchronized rig or torch state");
+                        return;
+                    }
+                    if (!minecraft.levelRenderer.hasRenderedAllSections()) {
+                        fail(minecraft, "GI visual probe terrain rebuild is still pending");
+                        return;
+                    }
+                    Screenshot.grab(minecraft, false);
+                    Metallum.LOGGER.info(
+                            "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_SCREENSHOT index={} "
+                                    + "phase=TORCH_ON measured_frame={} ready_frame={} "
+                                    + "capture_after_ready_frames={} rig={} "
+                                    + "direct_path=OCCLUDED bounce_path=OPEN receipt={} "
+                                    + "field_generation={} source_tick={} ready_mask={} "
+                                    + "zero_before={} zero_now={} field_before={} field_now={} "
+                                    + "camera_pose={},{},{};{},{}",
+                            visualProbe.captureIndex(this.measuredFrames),
+                            this.measuredFrames,
+                            this.visualProbeReadyMeasuredFrame,
+                            this.measuredFrames - this.visualProbeReadyMeasuredFrame,
+                            visualProbe.rigId(), receiptKind,
+                            captureReceipt == null ? 0L : captureReceipt.fieldGeneration(),
+                            captureReceipt == null ? -1L : captureReceipt.sourceTick(),
+                            captureReceipt == null ? 0 : captureReceipt.readyMask(),
+                            captureReceipt == null ? 0L : this.visualProbeMotionBaselineZeroBindings,
+                            captureReceipt == null ? 0L : captureReceipt.terrainZeroBindings(),
+                            captureReceipt == null ? 0L : this.visualProbeMotionBaselineFieldBindings,
+                            captureReceipt == null ? 0L : captureReceipt.terrainFieldBindings(),
+                            minecraft.player.getX(), minecraft.player.getY(), minecraft.player.getZ(),
+                            minecraft.player.getYRot(), minecraft.player.getXRot()
                     );
                 }
                 if (this.captureScreenshots
@@ -1049,6 +1461,14 @@ public final class MetalFxBenchmarkController {
                     );
                 }
                 if (this.measuredFrames >= this.measureFrames) {
+                    if (this.route.visualProbe() != null
+                            && GiLiveRuntime.isRequested()
+                            && (!this.visualProbeMotionCompleted
+                            || !this.visualProbeGpuDirectProbeCompleted
+                            || !this.visualProbeGpuFieldProbeCompleted)) {
+                        fail(minecraft, "GI visual probe did not complete its motion audit or G3/G6 GPU field probes");
+                        return;
+                    }
                     String g6MatrixFailure = completeG6Matrix();
                     if (g6MatrixFailure != null) {
                         fail(minecraft, g6MatrixFailure);
@@ -1113,10 +1533,860 @@ public final class MetalFxBenchmarkController {
         }
     }
 
+    /** Applies the pose before the frame is rendered; the post-present hook only audits it. */
+    private void applyVisualProbePoseForRender(
+            final Minecraft minecraft,
+            final int presentedFrame
+    ) {
+        VisualProbeConfig config = this.route.visualProbe();
+        if (config == null || minecraft.player == null) {
+            return;
+        }
+        if (presentedFrame >= config.orbitStartFrame()
+                && presentedFrame < config.orbitEndFrame()) {
+            double phase = (presentedFrame - config.orbitStartFrame())
+                    * (Math.PI * 2.0D / config.orbitPeriodFrames());
+            double x = this.route.x() + config.orbitTranslationRadiusBlocks()
+                    * (Math.cos(phase) - 1.0D);
+            double z = this.route.z() + config.orbitTranslationRadiusBlocks()
+                    * Math.sin(phase);
+            float yaw = this.route.yaw()
+                    + (float) (Math.sin(phase) * config.orbitYawAmplitudeDegrees());
+            float pitch = Mth.clamp(
+                    this.route.pitch()
+                            + (float) (Math.sin(phase * 0.5D) * config.orbitPitchAmplitudeDegrees()),
+                    -90.0F,
+                    90.0F
+            );
+            minecraft.player.setPos(x, this.route.y(), z);
+            minecraft.player.xOld = x;
+            minecraft.player.yOld = this.route.y();
+            minecraft.player.zOld = z;
+            minecraft.player.setDeltaMovement(0.0D, 0.0D, 0.0D);
+            minecraft.player.setYRot(yaw);
+            minecraft.player.setXRot(pitch);
+            minecraft.player.yRotO = yaw;
+            minecraft.player.xRotO = pitch;
+        }
+    }
+
+    /**
+     * Proves that ordinary client translation/rotation never published a zero terrain binding.
+     * This samples the real post-present binding counters, not merely the final current receipt.
+     */
+    private void auditVisualProbeMotion(final Minecraft minecraft) {
+        VisualProbeConfig config = this.route.visualProbe();
+        if (config == null || !GiLiveRuntime.isRequested()) {
+            return;
+        }
+        if (this.measuredFrames == config.orbitStartFrame() - 1) {
+            GiLiveRuntime.FinalSnapshot baseline = GiLiveRuntime.finalSnapshot();
+            if (!visualProbeCurrentAllCascadeReceipt(
+                    baseline, GiLiveRuntime.deviceGeneration())) {
+                fail(minecraft, "GI visual probe motion lacks a current all-cascade baseline");
+                return;
+            }
+            if (baseline.terrainBindings()
+                    != baseline.terrainZeroBindings() + baseline.terrainFieldBindings()) {
+                fail(minecraft, "GI visual probe terrain binding counters are inconsistent");
+                return;
+            }
+            this.visualProbeMotionBaselineBindings = baseline.terrainBindings();
+            this.visualProbeMotionBaselineZeroBindings = baseline.terrainZeroBindings();
+            this.visualProbeMotionBaselineFieldBindings = baseline.terrainFieldBindings();
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_MOTION_BEGIN route={} rig={} "
+                            + "next_measured_frame={} bindings={} zero_bindings={} "
+                            + "field_bindings={} status=PASS",
+                    this.route.routeId(), config.rigId(), config.orbitStartFrame(),
+                    baseline.terrainBindings(), baseline.terrainZeroBindings(),
+                    baseline.terrainFieldBindings()
+            );
+            return;
+        }
+        if (this.measuredFrames < config.orbitStartFrame()
+                || this.measuredFrames > config.orbitEndFrame()) {
+            return;
+        }
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        boolean countersConsistent = snapshot.terrainBindings()
+                == snapshot.terrainZeroBindings() + snapshot.terrainFieldBindings();
+        if (this.visualProbeMotionBaselineBindings < 0L
+                || !countersConsistent
+                || snapshot.terrainZeroBindings()
+                != this.visualProbeMotionBaselineZeroBindings
+                || snapshot.terrainFieldBindings()
+                <= this.visualProbeMotionBaselineFieldBindings
+                || GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY
+                || !GiLiveRuntime.latestTerrainAllCascadeBindingIsUsable(
+                snapshot, GiLiveRuntime.deviceGeneration())) {
+            fail(minecraft, "GI visual probe motion receipt failed: baseline_bindings="
+                    + this.visualProbeMotionBaselineBindings
+                    + " baseline_zero=" + this.visualProbeMotionBaselineZeroBindings
+                    + " baseline_field=" + this.visualProbeMotionBaselineFieldBindings
+                    + " counters_consistent=" + countersConsistent
+                    + " bindings=" + snapshot.terrainBindings()
+                    + " zero=" + snapshot.terrainZeroBindings()
+                    + " field_bindings=" + snapshot.terrainFieldBindings()
+                    + " visible_mask=" + snapshot.latestTerrainVisibleMask()
+                    + "; " + giG6CensusSummary(
+                    snapshot, GiLiveRuntime.deviceGeneration())
+                    + "; " + giG6RuntimeSummary());
+            return;
+        }
+        if (this.measuredFrames == config.orbitEndFrame()) {
+            this.visualProbeMotionCompleted = true;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_MOTION_COMPLETE route={} rig={} "
+                            + "measured_frame={} bindings_before={} bindings_now={} "
+                            + "zero_before={} zero_now={} field_before={} field_now={} "
+                            + "zero_delta={} field_delta={} status=PASS",
+                    this.route.routeId(), config.rigId(), this.measuredFrames,
+                    this.visualProbeMotionBaselineBindings, snapshot.terrainBindings(),
+                    this.visualProbeMotionBaselineZeroBindings, snapshot.terrainZeroBindings(),
+                    this.visualProbeMotionBaselineFieldBindings, snapshot.terrainFieldBindings(),
+                    snapshot.terrainZeroBindings() - this.visualProbeMotionBaselineZeroBindings,
+                    snapshot.terrainFieldBindings() - this.visualProbeMotionBaselineFieldBindings
+            );
+        }
+    }
+
+    /**
+     * Captures never sample the previous field after a server torch mutation. The barrier needs
+     * a current authoritative G6 tuple, complete all-cascade readiness, an exact terrain bind,
+     * and a source/field advance relative to the pre-torch baseline. Its fixed B16 stabilization
+     * bound closes before the first absolute capture at measured frame 570.
+     */
+    private void driveVisualProbeReadiness(final Minecraft minecraft) {
+        VisualProbeConfig config = this.route.visualProbe();
+        if (config == null || this.visualProbeReadyMeasuredFrame >= 0) return;
+        if (!this.torchEpochAppliedLogged || this.torchEpochRemovalRequested) return;
+        if (!GiLiveRuntime.isRequested()) {
+            // The OFF arm deliberately has no G6 field. It still uses the identical geometry,
+            // torch epoch, camera motion, and absolute capture schedule as the ON arm.
+            this.visualProbeReadyMeasuredFrame = this.torchEpochAppliedMeasuredFrame;
+            return;
+        }
+        if (this.visualProbePreTorchFieldGeneration <= 0L || this.visualProbePreTorchSourceTick < 0L) {
+            fail(minecraft, "GI visual probe lacks a current pre-torch G6 receipt");
+            return;
+        }
+        if (visualProbeReadinessDeadlineExpired(
+                this.measuredFrames, this.torchEpochAppliedMeasuredFrame)) {
+            fail(minecraft, "GI visual probe current G6 field did not converge within 260 frames of torch placement");
+            return;
+        }
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        long deviceGeneration = GiLiveRuntime.deviceGeneration();
+        if (!visualProbeCurrentPostTorchReceipt(
+                snapshot, deviceGeneration,
+                this.visualProbePreTorchFieldGeneration,
+                this.visualProbePreTorchSourceTick
+        )) return;
+        String cpuChainFailure = verifyVisualProbeCpuChain(minecraft, config);
+        if (cpuChainFailure != null) {
+            fail(minecraft, cpuChainFailure);
+            return;
+        }
+        this.visualProbeReadyMeasuredFrame = this.measuredFrames;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_READY route={} rig={} measured_frame={} field_generation={} source_tick={} ready_mask={} exact_bind=true all_cascades=true status=PASS",
+                this.route.routeId(), config.rigId(), this.visualProbeReadyMeasuredFrame,
+                snapshot.fieldGeneration(), snapshot.sourceTick(), snapshot.readyMask()
+        );
+    }
+
+    /**
+     * Reads G3's C0 direct/geometry textures before testing G6. This makes a missing bounce
+     * attributable: a zero red reflector here is a G3/source problem, not a transport or
+     * receiver problem. Native blits into one preallocated shared buffer and this method never
+     * waits for the GPU.
+     */
+    private void driveVisualProbeGpuDirectProbe(final Minecraft minecraft) {
+        VisualProbeConfig config = this.route.visualProbe();
+        if (config == null || !GiLiveRuntime.isRequested()
+                || this.visualProbeGpuDirectProbeCompleted
+                || this.visualProbeReadyMeasuredFrame < 0) {
+            return;
+        }
+        MetalDevice device = MetalDevice.getInstance();
+        if (device == null) {
+            fail(minecraft, "GI visual probe G3 GPU direct probe has no Metal device");
+            return;
+        }
+        if (this.visualProbeGpuDirectProbeDeadlineMeasuredFrame < 0) {
+            this.visualProbeGpuDirectProbeDeadlineMeasuredFrame = this.measuredFrames
+                    + VISUAL_PROBE_GPU_FIELD_TIMEOUT_FRAMES;
+        }
+        if (this.measuredFrames > this.visualProbeGpuDirectProbeDeadlineMeasuredFrame) {
+            fail(minecraft, "GI visual probe G3 GPU direct probe exceeded "
+                    + VISUAL_PROBE_GPU_FIELD_TIMEOUT_FRAMES + " presented frames");
+            return;
+        }
+        if (this.visualProbeGpuDirectProbeRequestedMeasuredFrame < 0) {
+            GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+            if (!visualProbeCurrentPostTorchReceipt(
+                    snapshot, GiLiveRuntime.deviceGeneration(),
+                    this.visualProbePreTorchFieldGeneration,
+                    this.visualProbePreTorchSourceTick
+            )) {
+                return;
+            }
+            if (this.visualProbeGpuDirectProbeAttempts >= VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS) {
+                fail(minecraft, "GI visual probe G3 GPU direct probe exhausted "
+                        + VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS + " stale-retry attempts");
+                return;
+            }
+            int status = device.beginGiDirectDebugProbe(
+                    VISUAL_PROBE_GPU_DIRECT_WORLD_XS,
+                    VISUAL_PROBE_GPU_DIRECT_WORLD_YS,
+                    VISUAL_PROBE_GPU_DIRECT_WORLD_ZS
+            );
+            if (status == GiDirectSourceGpuResources.STATUS_BUSY
+                    || status == GiDirectSourceGpuResources.STATUS_STALE) {
+                return;
+            }
+            if (status != GiDirectSourceGpuResources.STATUS_OK) {
+                fail(minecraft, "GI visual probe G3 GPU direct probe request failed: status=" + status);
+                return;
+            }
+            this.visualProbeGpuDirectProbeAttempts++;
+            this.visualProbeGpuDirectProbeRequestedMeasuredFrame = this.measuredFrames;
+            return;
+        }
+        final GiDirectSourceGpuResources.DebugProbeCapture capture;
+        try {
+            capture = device.pollGiDirectDebugProbe();
+        } catch (RuntimeException | LinkageError failure) {
+            fail(minecraft, "GI visual probe G3 GPU direct probe poll failed: "
+                    + failure.getClass().getSimpleName() + ": " + failure.getMessage());
+            return;
+        }
+        if (capture == null) {
+            int pollStatus = device.giDirectDebugProbeLastStatus();
+            if (visualProbeGpuDirectProbeShouldRetry(
+                    pollStatus, this.visualProbeGpuDirectProbeAttempts)) {
+                this.visualProbeGpuDirectProbeRequestedMeasuredFrame = -1;
+                return;
+            }
+            if (pollStatus != GiDirectSourceGpuResources.STATUS_BUSY) {
+                fail(minecraft, "GI visual probe G3 GPU direct probe poll returned unexpected status="
+                        + pollStatus);
+            }
+            return;
+        }
+        GiLiveRuntime.FinalSnapshot current = GiLiveRuntime.finalSnapshot();
+        if (!visualProbeGpuDirectProbeMatchesCurrentReceipt(capture, current)) {
+            this.visualProbeGpuDirectProbeRequestedMeasuredFrame = -1;
+            return;
+        }
+        int latencyFrames = this.measuredFrames - this.visualProbeGpuDirectProbeRequestedMeasuredFrame;
+        if (!visualProbeGpuDirectProbePasses(capture)) {
+            fail(minecraft, "GI visual probe G3 GPU direct probe did not prove direct red source/geometry: "
+                    + visualProbeGpuDirectProbeSummary(capture));
+            return;
+        }
+        this.visualProbeGpuDirectProbeCompleted = true;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_GPU_DIRECT route={} rig={} "
+                        + "measured_frame={} requested_frame={} latency_frames={} identity={} "
+                        + "red_direct=true red_dominates=true white=OCCLUDED baffle=SOLID empty=AIR {} status=PASS",
+                this.route.routeId(), config.rigId(), this.measuredFrames,
+                this.visualProbeGpuDirectProbeRequestedMeasuredFrame, latencyFrames,
+                visualProbeGpuDirectProbeIdentity(capture), visualProbeGpuDirectProbeSamples(capture)
+        );
+    }
+
+    static boolean visualProbeGpuDirectProbePasses(
+            final GiDirectSourceGpuResources.DebugProbeCapture capture
+    ) {
+        if (capture == null || capture.sampleValidMask() != 0x7F || capture.samples().length != 7) {
+            return false;
+        }
+        GiDirectSourceGpuResources.DebugProbeSample[] samples = capture.samples();
+        for (int index = 0; index < samples.length; index++) {
+            GiDirectSourceGpuResources.DebugProbeSample sample = samples[index];
+            if (sample.worldX() != VISUAL_PROBE_GPU_DIRECT_WORLD_XS[index]
+                    || sample.worldY() != VISUAL_PROBE_GPU_DIRECT_WORLD_YS[index]
+                    || sample.worldZ() != VISUAL_PROBE_GPU_DIRECT_WORLD_ZS[index]
+                    || sample.flags() != 1
+                    || !directProbeSampleIsFinite(sample)
+                    || (sample.geometryState() != GiDirectSourceGpuResources.GEOMETRY_EMPTY
+                    && sample.geometryState() != GiDirectSourceGpuResources.GEOMETRY_CONTENT)) {
+                return false;
+            }
+        }
+        GiDirectSourceGpuResources.DebugProbeSample white = samples[0];
+        GiDirectSourceGpuResources.DebugProbeSample red = samples[1];
+        GiDirectSourceGpuResources.DebugProbeSample baffle = samples[2];
+        GiDirectSourceGpuResources.DebugProbeSample empty = samples[3];
+        return white.geometryState() == GiDirectSourceGpuResources.GEOMETRY_CONTENT
+                && red.geometryState() == GiDirectSourceGpuResources.GEOMETRY_CONTENT
+                && baffle.geometryState() == GiDirectSourceGpuResources.GEOMETRY_CONTENT
+                && empty.geometryState() == GiDirectSourceGpuResources.GEOMETRY_EMPTY
+                // The white receiver is physically occluded from the torch.  A nonzero direct
+                // term here would make a later red bounce result non-causal.
+                && directProbeIsZero(white)
+                && red.directAlpha() > 0.0F
+                && red.directRed() > 0.0F && red.directRed() > red.directGreen()
+                && red.directRed() > red.directBlue();
+    }
+
+    private static boolean directProbeSampleIsFinite(
+            final GiDirectSourceGpuResources.DebugProbeSample sample
+    ) {
+        return Float.isFinite(sample.directRed()) && Float.isFinite(sample.directGreen())
+                && Float.isFinite(sample.directBlue()) && Float.isFinite(sample.directAlpha());
+    }
+
+    private static boolean directProbeIsZero(
+            final GiDirectSourceGpuResources.DebugProbeSample sample
+    ) {
+        return sample.directRed() == 0.0F && sample.directGreen() == 0.0F
+                && sample.directBlue() == 0.0F && sample.directAlpha() == 0.0F;
+    }
+
+    static boolean visualProbeGpuDirectProbeShouldRetry(final int status, final int attempts) {
+        return status == GiDirectSourceGpuResources.STATUS_STALE
+                && attempts > 0 && attempts < VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS;
+    }
+
+    static boolean visualProbeGpuDirectProbeMatchesCurrentReceipt(
+            final GiDirectSourceGpuResources.DebugProbeCapture capture,
+            final GiLiveRuntime.FinalSnapshot snapshot,
+            final long deviceGeneration,
+            final long preTorchFieldGeneration,
+            final long preTorchSourceTick
+    ) {
+        return capture != null
+                && capture.worldGeneration() > 0L
+                && capture.clipmapGeneration() > 0L
+                && capture.paletteGeneration() > 0L
+                && capture.contentGeneration() > 0L
+                && capture.staticSourceEpoch() > 0L
+                && capture.environmentEpoch() > 0L
+                && capture.nearOrigin().length == 3
+                && snapshot != null
+                && visualProbeCurrentPostTorchReceipt(
+                        snapshot, deviceGeneration, preTorchFieldGeneration, preTorchSourceTick
+                );
+    }
+
+    private boolean visualProbeGpuDirectProbeMatchesCurrentReceipt(
+            final GiDirectSourceGpuResources.DebugProbeCapture capture,
+            final GiLiveRuntime.FinalSnapshot snapshot
+    ) {
+        return visualProbeGpuDirectProbeMatchesCurrentReceipt(
+                capture, snapshot, GiLiveRuntime.deviceGeneration(),
+                this.visualProbePreTorchFieldGeneration,
+                this.visualProbePreTorchSourceTick
+        );
+    }
+
+    private static String visualProbeGpuDirectProbeIdentity(
+            final GiDirectSourceGpuResources.DebugProbeCapture capture
+    ) {
+        return "world=" + capture.worldGeneration()
+                + "/clipmap=" + capture.clipmapGeneration()
+                + "/palette=" + capture.paletteGeneration()
+                + "/content=" + capture.contentGeneration()
+                + "/static=" + capture.staticSourceEpoch()
+                + "/environment=" + capture.environmentEpoch()
+                + "/origin=" + Arrays.toString(capture.nearOrigin())
+                + "/valid=" + capture.sampleValidMask();
+    }
+
+    private static String visualProbeGpuDirectProbeSamples(
+            final GiDirectSourceGpuResources.DebugProbeCapture capture
+    ) {
+        StringBuilder out = new StringBuilder(640);
+        GiDirectSourceGpuResources.DebugProbeSample[] samples = capture.samples();
+        for (int index = 0; index < samples.length; index++) {
+            if (index != 0) out.append(' ');
+            GiDirectSourceGpuResources.DebugProbeSample sample = samples[index];
+            out.append("sample").append(index).append('@')
+                    .append(sample.worldX()).append(',').append(sample.worldY()).append(',')
+                    .append(sample.worldZ()).append("/local=")
+                    .append(sample.localX()).append(',').append(sample.localY()).append(',')
+                    .append(sample.localZ()).append("/direct=")
+                    .append(sample.directRed()).append(',').append(sample.directGreen()).append(',')
+                    .append(sample.directBlue()).append(',').append(sample.directAlpha())
+                    .append("/geometry=").append(sample.geometryState())
+                    .append("/flags=").append(sample.flags());
+        }
+        return out.toString();
+    }
+
+    private static String visualProbeGpuDirectProbeSummary(
+            final GiDirectSourceGpuResources.DebugProbeCapture capture
+    ) {
+        return "identity=" + visualProbeGpuDirectProbeIdentity(capture)
+                + " samples=" + visualProbeGpuDirectProbeSamples(capture);
+    }
+
+    /**
+     * Asynchronously reads seven fixed G6 texels after the strict current post-torch receipt.
+     * This is benchmark-only evidence: the request/poll pair never waits for GPU completion and
+     * the immutable capture is consumed immediately on the render thread.
+     */
+    private void driveVisualProbeGpuFieldProbe(final Minecraft minecraft) {
+        VisualProbeConfig config = this.route.visualProbe();
+        if (config == null || !GiLiveRuntime.isRequested()
+                || this.visualProbeGpuFieldProbeCompleted
+                || this.visualProbeReadyMeasuredFrame < 0) {
+            return;
+        }
+        MetalDevice device = MetalDevice.getInstance();
+        if (device == null) {
+            fail(minecraft, "GI visual probe G6 GPU field probe has no Metal device");
+            return;
+        }
+        if (this.visualProbeGpuFieldProbeDeadlineMeasuredFrame < 0) {
+            this.visualProbeGpuFieldProbeDeadlineMeasuredFrame = this.measuredFrames
+                    + VISUAL_PROBE_GPU_FIELD_TIMEOUT_FRAMES;
+        }
+        if (this.measuredFrames > this.visualProbeGpuFieldProbeDeadlineMeasuredFrame) {
+            fail(minecraft, "GI visual probe G6 GPU field probe exceeded "
+                    + VISUAL_PROBE_GPU_FIELD_TIMEOUT_FRAMES + " presented frames");
+            return;
+        }
+        if (this.visualProbeGpuFieldProbeRequestedMeasuredFrame < 0) {
+            GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+            if (!visualProbeCurrentPostTorchReceipt(
+                    snapshot, GiLiveRuntime.deviceGeneration(),
+                    this.visualProbePreTorchFieldGeneration,
+                    this.visualProbePreTorchSourceTick
+            )) {
+                // A STALE readback is permitted to wait for the successor's exact tuple. The
+                // single wall-clock budget below still makes a non-converging successor fail.
+                return;
+            }
+            if (this.visualProbeGpuFieldProbeAttempts >= VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS) {
+                fail(minecraft, "GI visual probe G6 GPU field probe exhausted "
+                        + VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS + " stale-retry attempts");
+                return;
+            }
+            int status = device.beginGiLiveDebugProbe(
+                    VISUAL_PROBE_GPU_FIELD_CASCADES,
+                    VISUAL_PROBE_GPU_FIELD_WORLD_XS,
+                    VISUAL_PROBE_GPU_FIELD_WORLD_YS,
+                    VISUAL_PROBE_GPU_FIELD_WORLD_ZS
+            );
+            if (status == GiLiveLayout.STATUS_BUSY || status == GiLiveLayout.STATUS_STALE) {
+                return;
+            }
+            if (status != GiLiveLayout.STATUS_OK) {
+                fail(minecraft, "GI visual probe G6 GPU field probe request failed: status=" + status);
+                return;
+            }
+            this.visualProbeGpuFieldProbeAttempts++;
+            this.visualProbeGpuFieldProbeRequestedMeasuredFrame = this.measuredFrames;
+            return;
+        }
+        final GiLiveGpuResources.DebugProbeCapture capture;
+        try {
+            capture = device.pollGiLiveDebugProbe();
+        } catch (RuntimeException | LinkageError failure) {
+            fail(minecraft, "GI visual probe G6 GPU field probe poll failed: "
+                    + failure.getClass().getSimpleName() + ": " + failure.getMessage());
+            return;
+        }
+        if (capture == null) {
+            int pollStatus = device.giLiveDebugProbeLastStatus();
+            if (visualProbeGpuFieldProbeShouldRetry(
+                    pollStatus, this.visualProbeGpuFieldProbeAttempts
+            )) {
+                this.visualProbeGpuFieldProbeRequestedMeasuredFrame = -1;
+                return;
+            }
+            if (pollStatus != GiLiveLayout.STATUS_BUSY) {
+                fail(minecraft, "GI visual probe G6 GPU field probe poll returned unexpected status="
+                        + pollStatus);
+            }
+            return;
+        }
+        int latencyFrames = this.measuredFrames - this.visualProbeGpuFieldProbeRequestedMeasuredFrame;
+        if (!visualProbeGpuFieldProbePasses(capture)) {
+            fail(minecraft, "GI visual probe G6 GPU field probe did not prove sampleable colored bounce: "
+                    + visualProbeGpuFieldProbeSummary(capture));
+            return;
+        }
+        this.visualProbeGpuFieldProbeCompleted = true;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_GPU_FIELD route={} rig={} "
+                        + "measured_frame={} requested_frame={} latency_frames={} identity={} "
+                        + "samples=7 c0_white_nonzero=true c0_red_nonzero=true red_dominates=true "
+                        + "baffle=DIAGNOSTIC sampleable=true {} status=PASS",
+                this.route.routeId(), config.rigId(), this.measuredFrames,
+                this.visualProbeGpuFieldProbeRequestedMeasuredFrame, latencyFrames,
+                visualProbeGpuFieldProbeIdentity(capture), visualProbeGpuFieldProbeSamples(capture)
+        );
+    }
+
+    static boolean visualProbeGpuFieldProbePasses(
+            final GiLiveGpuResources.DebugProbeCapture capture
+    ) {
+        if (capture == null || capture.readyMask() != GiLiveLayout.READY_MASK_ALL
+                || capture.receiverVisibleMask() != GiLiveLayout.READY_MASK_ALL
+                || capture.sampleValidMask() != 0x7F) {
+            return false;
+        }
+        GiLiveGpuResources.DebugProbeSample[] samples = capture.samples();
+        if (samples.length != VISUAL_PROBE_GPU_FIELD_CASCADES.length) return false;
+        for (int index = 0; index < samples.length; index++) {
+            GiLiveGpuResources.DebugProbeSample sample = samples[index];
+            if (sample.cascade() != VISUAL_PROBE_GPU_FIELD_CASCADES[index]
+                    || sample.worldX() != VISUAL_PROBE_GPU_FIELD_WORLD_XS[index]
+                    || sample.worldY() != VISUAL_PROBE_GPU_FIELD_WORLD_YS[index]
+                    || sample.worldZ() != VISUAL_PROBE_GPU_FIELD_WORLD_ZS[index]
+                    || sample.confidence() == 0 || sample.surfaceCoverage() == 0) {
+                return false;
+            }
+        }
+        return hasNonzeroSh(samples[0]) && hasNonzeroSh(samples[1]) && hasNonzeroSh(samples[2])
+                && hasNonzeroSh(samples[3]) && hasRedDominance(samples[3]);
+    }
+
+    static boolean visualProbeGpuFieldProbeShouldRetry(final int status, final int attempts) {
+        return status == GiLiveLayout.STATUS_STALE
+                && attempts > 0 && attempts < VISUAL_PROBE_GPU_FIELD_MAX_ATTEMPTS;
+    }
+
+    private static boolean hasNonzeroSh(final GiLiveGpuResources.DebugProbeSample sample) {
+        for (float coefficient : sample.shCoefficients()) {
+            if (coefficient != 0.0F) return true;
+        }
+        return false;
+    }
+
+    /** The RGB L0 terms are raw FP16-decoded field values; no visual gain is applied here. */
+    private static boolean hasRedDominance(final GiLiveGpuResources.DebugProbeSample sample) {
+        float[] coefficients = sample.shCoefficients();
+        return coefficients[0] > coefficients[4] && coefficients[0] > coefficients[8];
+    }
+
+    private static String visualProbeGpuFieldProbeIdentity(
+            final GiLiveGpuResources.DebugProbeCapture capture
+    ) {
+        return "world=" + capture.worldGeneration()
+                + "/clipmap=" + capture.clipmapGeneration()
+                + "/palette=" + capture.paletteGeneration()
+                + "/content=" + capture.contentGeneration()
+                + "/static=" + capture.staticSourceEpoch()
+                + "/dynamic=" + capture.dynamicSourceEpoch()
+                + "/environment=" + capture.environmentEpoch()
+                + "/field=" + capture.fieldGeneration()
+                + "/source=" + capture.sourceTick()
+                + "/origins=" + Arrays.toString(capture.receiverOrigins())
+                + "/ready=" + capture.readyMask()
+                + "/receiver=" + capture.receiverVisibleMask()
+                + "/valid=" + capture.sampleValidMask();
+    }
+
+    private static String visualProbeGpuFieldProbeSamples(
+            final GiLiveGpuResources.DebugProbeCapture capture
+    ) {
+        StringBuilder out = new StringBuilder(768);
+        GiLiveGpuResources.DebugProbeSample[] samples = capture.samples();
+        for (int index = 0; index < samples.length; index++) {
+            if (index != 0) out.append(' ');
+            GiLiveGpuResources.DebugProbeSample sample = samples[index];
+            float[] sh = sample.shCoefficients();
+            out.append("sample").append(index)
+                    .append("=c").append(sample.cascade())
+                    .append('@').append(sample.worldX()).append(',')
+                    .append(sample.worldY()).append(',').append(sample.worldZ())
+                    .append("/local=").append(sample.localX()).append(',')
+                    .append(sample.localY()).append(',').append(sample.localZ())
+                    .append("/flags=").append(sample.flags())
+                    .append("/sh_r=").append(sh[0]).append(',').append(sh[1])
+                    .append(',').append(sh[2]).append(',').append(sh[3])
+                    .append("/sh_g=").append(sh[4]).append(',').append(sh[5])
+                    .append(',').append(sh[6]).append(',').append(sh[7])
+                    .append("/sh_b=").append(sh[8]).append(',').append(sh[9])
+                    .append(',').append(sh[10]).append(',').append(sh[11])
+                    .append("/confidence=").append(sample.confidence())
+                    .append("/coverage=").append(sample.surfaceCoverage());
+        }
+        return out.toString();
+    }
+
+    private static String visualProbeGpuFieldProbeSummary(
+            final GiLiveGpuResources.DebugProbeCapture capture
+    ) {
+        return "identity=" + visualProbeGpuFieldProbeIdentity(capture)
+                + " samples=" + visualProbeGpuFieldProbeSamples(capture);
+    }
+
+    /**
+     * Proves the exact post-torch CPU inputs consumed by G3/G6 before any visual claim is made.
+     * This benchmark-only receipt executes once, after the authoritative G6 readiness barrier.
+     */
+    private String verifyVisualProbeCpuChain(
+            final Minecraft minecraft,
+            final VisualProbeConfig config
+    ) {
+        if (minecraft.level == null) return "GI visual probe CPU chain has no client level";
+        AdvancedLightRegistry registry = AdvancedLightRegistry.global();
+        Object worldIdentity = registry.activeWorldIdentityForGi();
+        if (worldIdentity != minecraft.level) {
+            return "GI visual probe CPU chain has a mismatched L3 world identity";
+        }
+        GiSemanticTransportFieldView field = GiSemanticController.global().transportField(
+                worldIdentity
+        );
+        GiSemanticFieldSnapshot semantic = GiSemanticController.global().fieldSnapshot(
+                worldIdentity
+        );
+        if (field == null || semantic == null || !field.world().equals(semantic.world())
+                || field.clipmapGeneration() != semantic.clipmapGeneration()
+                || field.paletteGeneration() != semantic.paletteGeneration()
+                || field.contentGeneration() != semantic.contentGeneration()) {
+            return "GI visual probe CPU chain lacks one coherent G2 field";
+        }
+        GiStaticSourceState staticState = registry.staticSourceStateForGi(
+                field.world().dimensionId()
+        );
+        if (staticState == null
+                || registry.activeWorldTokenForGi(
+                worldIdentity, field.world().dimensionId()) == null
+                || !registry.staticSourceIdentityMatchesForGi(
+                staticState.world(), staticState.registryEpoch())) {
+            return "GI visual probe CPU chain lacks one coherent G3 static-source epoch";
+        }
+
+        int reflectorBrick = GiDirectSourceLayout.brickIdForWorld(
+                0, field.nearOriginX(), field.nearOriginY(), field.nearOriginZ(),
+                84, 77, -110
+        );
+        if (reflectorBrick < 0) {
+            return "GI visual probe red reflector is outside G3 cascade zero";
+        }
+        int minX = GiDirectSourceLayout.brickMinWorldBlock(
+                0, field.nearOriginX(), GiDirectSourceLayout.brickX(reflectorBrick));
+        int minY = GiDirectSourceLayout.brickMinWorldBlock(
+                0, field.nearOriginY(), GiDirectSourceLayout.brickY(reflectorBrick));
+        int minZ = GiDirectSourceLayout.brickMinWorldBlock(
+                0, field.nearOriginZ(), GiDirectSourceLayout.brickZ(reflectorBrick));
+        int span = GiDirectSourceLayout.BRICK_EDGE_CELLS
+                * GiDirectSourceLayout.cellSizeBlocks(0);
+        int selected = registry.copyStaticSourcesForGi(
+                staticState.world(), minX, minY, minZ,
+                (double) minX + span, (double) minY + span, (double) minZ + span,
+                this.visualProbeStaticSourceScratch, 0,
+                this.visualProbeStaticSourceScratch.length
+        );
+        AdvancedLight torch = null;
+        for (int index = 0; index < selected; index++) {
+            AdvancedLight source = this.visualProbeStaticSourceScratch[index];
+            if (GiStaticSourceSnapshot.isStaticSource(source)
+                    && source.emitsFromBlock(
+                    config.torchEpoch().x(), config.torchEpoch().y(),
+                    config.torchEpoch().z())) {
+                torch = source;
+                break;
+            }
+        }
+        if (torch == null) {
+            return "GI visual probe G3 reflector brick does not contain the synchronized torch source";
+        }
+
+        int[] origins = semantic.origins();
+        short[] albedo = semantic.albedoRgb();
+        short[] emission = semantic.emissionRgbIntensity();
+        byte[] occupancy = semantic.occupancy();
+        byte[] validity = semantic.validity();
+        byte[] provenance = semantic.provenance();
+        byte[] faces = semantic.faceWeights();
+        byte[] coverage = semantic.knownCoverage();
+        short[] materialIds = semantic.dominantMaterialIds();
+        VisualProbeSemanticCell torchCell = visualProbeSemanticCell(
+                semantic, 80, 75, -112, albedo, emission, occupancy, validity,
+                provenance, faces, coverage, materialIds
+        );
+        VisualProbeSemanticCell redCell = visualProbeSemanticCell(
+                semantic, 84, 77, -110, albedo, emission, occupancy, validity,
+                provenance, faces, coverage, materialIds
+        );
+        VisualProbeSemanticCell whiteCell = visualProbeSemanticCell(
+                semantic, 82, 77, -110, albedo, emission, occupancy, validity,
+                provenance, faces, coverage, materialIds
+        );
+        VisualProbeSemanticCell emptyCell = visualProbeSemanticCell(
+                semantic, 83, 77, -110, albedo, emission, occupancy, validity,
+                provenance, faces, coverage, materialIds
+        );
+        VisualProbeSemanticCell baffleCell = visualProbeSemanticCell(
+                semantic, 81, 76, -111, albedo, emission, occupancy, validity,
+                provenance, faces, coverage, materialIds
+        );
+        if (torchCell == null || redCell == null || whiteCell == null
+                || emptyCell == null || baffleCell == null) {
+            return "GI visual probe CPU semantic cells left cascade zero";
+        }
+        if (!torchCell.isContent()
+                || !redCell.isContent() || redCell.occupancy() == 0
+                || redCell.coverage() == 0 || redCell.albedoRed() <= redCell.albedoGreen()
+                || redCell.albedoRed() <= redCell.albedoBlue()
+                || redCell.faceNegX() == 0
+                || !whiteCell.isContent() || whiteCell.occupancy() == 0
+                || whiteCell.coverage() == 0 || whiteCell.albedoRed() == 0
+                || whiteCell.albedoGreen() == 0 || whiteCell.albedoBlue() == 0
+                || whiteCell.facePosX() == 0
+                || emptyCell.validity() != GiSemanticValidity.KNOWN_EMPTY
+                || emptyCell.occupancy() != 0 || emptyCell.coverage() == 0
+                || !baffleCell.isContent() || baffleCell.occupancy() == 0
+                || baffleCell.coverage() == 0) {
+            return "GI visual probe CPU semantic chain does not match the tracked one-bounce rig: "
+                    + "torch=" + torchCell + " red=" + redCell + " white=" + whiteCell
+                    + " empty=" + emptyCell + " baffle=" + baffleCell;
+        }
+
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_CPU_CHAIN route={} rig={} "
+                        + "g2_world={} g2_clipmap={} g2_palette={} g2_content={} "
+                        + "c0_origin={},{},{} reflector_brick={} brick_aabb={},{},{}..{},{},{} "
+                        + "selected_sources={} torch_id={} torch_position={},{},{} "
+                        + "torch_radius={} torch_rgb={},{},{} torch_intensity={} "
+                        + "torch_cell={} red_cell={} white_cell={} empty_cell={} "
+                        + "baffle_cell={} status=PASS",
+                this.route.routeId(), config.rigId(), semantic.world().worldGeneration(),
+                semantic.clipmapGeneration(), semantic.paletteGeneration(),
+                semantic.contentGeneration(), origins[0], origins[1], origins[2],
+                reflectorBrick, minX, minY, minZ, minX + span, minY + span, minZ + span,
+                selected, Long.toUnsignedString(torch.stableId()), torch.x(), torch.y(), torch.z(),
+                torch.radius(), torch.red(), torch.green(), torch.blue(), torch.intensity(),
+                torchCell, redCell, whiteCell, emptyCell, baffleCell
+        );
+        Arrays.fill(this.visualProbeStaticSourceScratch, 0, selected, null);
+        return null;
+    }
+
+    private static VisualProbeSemanticCell visualProbeSemanticCell(
+            final GiSemanticFieldSnapshot semantic,
+            final int worldX, final int worldY, final int worldZ,
+            final short[] albedo, final short[] emission, final byte[] occupancy,
+            final byte[] validity, final byte[] provenance, final byte[] faces,
+            final byte[] coverage, final short[] materialIds
+    ) {
+        int cell = semantic.cellIndexForWorld(0, worldX, worldY, worldZ);
+        if (cell < 0) return null;
+        int albedoBase = cell * 3;
+        int emissionBase = cell * 4;
+        int faceBase = cell * 6;
+        return new VisualProbeSemanticCell(
+                cell,
+                GiSemanticValidity.fromAbiId(Byte.toUnsignedInt(validity[cell])),
+                Byte.toUnsignedInt(occupancy[cell]), Byte.toUnsignedInt(coverage[cell]),
+                Short.toUnsignedInt(materialIds[cell]), Byte.toUnsignedInt(provenance[cell]),
+                Short.toUnsignedInt(albedo[albedoBase]),
+                Short.toUnsignedInt(albedo[albedoBase + 1]),
+                Short.toUnsignedInt(albedo[albedoBase + 2]),
+                Short.toUnsignedInt(emission[emissionBase]),
+                Short.toUnsignedInt(emission[emissionBase + 1]),
+                Short.toUnsignedInt(emission[emissionBase + 2]),
+                Short.toUnsignedInt(emission[emissionBase + 3]),
+                Byte.toUnsignedInt(faces[faceBase]), Byte.toUnsignedInt(faces[faceBase + 1]),
+                Byte.toUnsignedInt(faces[faceBase + 2]), Byte.toUnsignedInt(faces[faceBase + 3]),
+                Byte.toUnsignedInt(faces[faceBase + 4]), Byte.toUnsignedInt(faces[faceBase + 5])
+        );
+    }
+
+    private record VisualProbeSemanticCell(
+            int index,
+            GiSemanticValidity validity,
+            int occupancy,
+            int coverage,
+            int materialId,
+            int provenance,
+            int albedoRed,
+            int albedoGreen,
+            int albedoBlue,
+            int emissionRed,
+            int emissionGreen,
+            int emissionBlue,
+            int emissionIntensity,
+            int faceNegX,
+            int facePosX,
+            int faceNegY,
+            int facePosY,
+            int faceNegZ,
+            int facePosZ
+    ) {
+        private boolean isContent() {
+            return this.validity == GiSemanticValidity.KNOWN_CONTENT;
+        }
+    }
+
+    static boolean visualProbeCurrentAllCascadeReceipt(
+            final GiLiveRuntime.FinalSnapshot snapshot,
+            final long deviceGeneration
+    ) {
+        return GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.READY
+                && GiLiveRuntime.finalReceiptIsCurrent(snapshot, deviceGeneration)
+                && snapshot.readyMask() == 7
+                && !snapshot.buildInFlight()
+                && snapshot.staleRejects() == 0L
+                && snapshot.rejectedCount() == 0L
+                && snapshot.latestTerrainExactMaskNonzero()
+                && snapshot.latestTerrainVisibleMask() == GiLiveLayout.READY_MASK_ALL
+                && snapshot.latestTerrainReadyMask() == 7
+                && snapshot.latestTerrainFieldGeneration() == snapshot.fieldGeneration()
+                && snapshot.latestTerrainSourceTick() == snapshot.sourceTick();
+    }
+
+    static boolean visualProbeCurrentPostTorchReceipt(
+            final GiLiveRuntime.FinalSnapshot snapshot,
+            final long deviceGeneration,
+            final long preTorchFieldGeneration,
+            final long preTorchSourceTick
+    ) {
+        return preTorchFieldGeneration > 0L && preTorchSourceTick >= 0L
+                && visualProbeCurrentAllCascadeReceipt(snapshot, deviceGeneration)
+                && (snapshot.fieldGeneration() > preTorchFieldGeneration
+                || snapshot.sourceTick() > preTorchSourceTick);
+    }
+
+    /**
+     * A moving capture may observe the post-torch field through a compatible remapped receiver
+     * while its authoritative successor is still rebuilding. Readiness was already proven before
+     * motion; require the bind-time all-cascade tuple here so an honest retained frame is captured
+     * instead of either aborting or weakening the initial torch-update barrier.
+     */
+    static boolean visualProbePostTorchContinuityReceipt(
+            final GiLiveRuntime.FinalSnapshot snapshot,
+            final long deviceGeneration,
+            final long preTorchFieldGeneration,
+            final long preTorchSourceTick
+    ) {
+        return preTorchFieldGeneration > 0L && preTorchSourceTick >= 0L
+                && GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.READY
+                && GiLiveRuntime.latestTerrainAllCascadeBindingIsUsable(
+                snapshot, deviceGeneration)
+                && (snapshot.fieldGeneration() > preTorchFieldGeneration
+                || snapshot.sourceTick() > preTorchSourceTick);
+    }
+
+    static boolean visualProbeReadinessDeadlineExpired(
+            final int measuredFrame,
+            final int torchAppliedMeasuredFrame
+    ) {
+        return measuredFrame > torchAppliedMeasuredFrame + VISUAL_PROBE_READY_TIMEOUT_FRAMES;
+    }
+
     private void beginTorchEpoch(
             final Minecraft minecraft,
             final TorchEpochConfig config
     ) {
+        if (this.route.visualProbe() != null && GiLiveRuntime.isRequested()) {
+            GiLiveRuntime.FinalSnapshot baseline = GiLiveRuntime.finalSnapshot();
+            if (!visualProbeCurrentAllCascadeReceipt(baseline, GiLiveRuntime.deviceGeneration())) {
+                fail(minecraft, "GI visual probe requires a current all-cascade G6 receipt before torch placement");
+                return;
+            }
+            this.visualProbePreTorchFieldGeneration = baseline.fieldGeneration();
+            this.visualProbePreTorchSourceTick = baseline.sourceTick();
+        }
         IntegratedServer server = minecraft.getSingleplayerServer();
         if (server == null) {
             fail(minecraft, "TORCH_EPOCH requires an integrated singleplayer server");
@@ -2298,7 +3568,8 @@ public final class MetalFxBenchmarkController {
             com.metallum.client.lighting.AdvancedLightRegistry.global().resetBenchmarkTelemetry();
             if (this.captureScreenshots
                     && !this.fiValidationRequired
-                    && !GiLiveRuntime.isRequested()) {
+                    && !GiLiveRuntime.isRequested()
+                    && this.route.torchEpoch() == null) {
                 Screenshot.grab(minecraft, false);
                 Metallum.LOGGER.info(
                         "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={}",
@@ -2579,6 +3850,8 @@ public final class MetalFxBenchmarkController {
         int chunkZ = Mth.floor(this.route.z()) >> 4;
         if (apply) {
             level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+            String visualProbeFailure = installVisualProbeRig(level, this.route.visualProbe());
+            if (visualProbeFailure != null) return visualProbeFailure;
             String netherPreparationFailure = prepareG6MatrixNetherChunk(server);
             if (netherPreparationFailure != null) return netherPreparationFailure;
             level.getGameRules().set(GameRules.ADVANCE_TIME, false, server);
@@ -2640,6 +3913,74 @@ public final class MetalFxBenchmarkController {
             }
         }
         return serverRouteMismatch(server, level, player, clock, chunkX, chunkZ);
+    }
+
+    private String installVisualProbeRig(
+            final ServerLevel level,
+            final VisualProbeConfig config
+    ) {
+        if (config == null) return null;
+        if (!visualProbeConfigExact(config)) {
+            return "GI visual probe rig configuration is not the tracked exact geometry";
+        }
+        for (int chunkX = VISUAL_PROBE_MIN_X >> 4; chunkX <= VISUAL_PROBE_MAX_X >> 4; chunkX++) {
+            for (int chunkZ = VISUAL_PROBE_MIN_Z >> 4; chunkZ <= VISUAL_PROBE_MAX_Z >> 4; chunkZ++) {
+                level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+            }
+        }
+        for (BlockPos pos : BlockPos.betweenClosed(
+                VISUAL_PROBE_MIN_X, VISUAL_PROBE_MIN_Y, VISUAL_PROBE_MIN_Z,
+                VISUAL_PROBE_MAX_X, VISUAL_PROBE_MAX_Y, VISUAL_PROBE_MAX_Z
+        )) {
+            level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL);
+        }
+        for (int x = VISUAL_PROBE_MIN_X; x <= VISUAL_PROBE_MAX_X; x++) {
+            for (int z = VISUAL_PROBE_MIN_Z; z <= VISUAL_PROBE_MAX_Z; z++) {
+                level.setBlock(new BlockPos(x, 74, z), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+                level.setBlock(new BlockPos(x, 82, z), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+            }
+        }
+        for (int y = 75; y <= 81; y++) {
+            for (int x = VISUAL_PROBE_MIN_X; x <= VISUAL_PROBE_MAX_X; x++) {
+                level.setBlock(new BlockPos(x, y, VISUAL_PROBE_MIN_Z), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+                level.setBlock(new BlockPos(x, y, VISUAL_PROBE_MAX_Z), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+            }
+            for (int z = VISUAL_PROBE_MIN_Z; z <= VISUAL_PROBE_MAX_Z; z++) {
+                level.setBlock(new BlockPos(VISUAL_PROBE_MIN_X, y, z), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+                level.setBlock(new BlockPos(VISUAL_PROBE_MAX_X, y, z), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+            }
+        }
+        level.setBlock(config.torchEpoch().position().below(), Blocks.GRASS_BLOCK.defaultBlockState(), Block.UPDATE_ALL);
+        for (int y = 75; y <= 80; y++) {
+            for (int z = -114; z <= -106; z++) {
+                level.setBlock(new BlockPos(84, y, z), visualProbeRed().defaultBlockState(), Block.UPDATE_ALL);
+            }
+            level.setBlock(new BlockPos(82, y, -110), visualProbeWhite().defaultBlockState(), Block.UPDATE_ALL);
+        }
+        level.setBlock(new BlockPos(81, 76, -111), visualProbeBlack().defaultBlockState(), Block.UPDATE_ALL);
+        if (!visualProbeRigMatches(level, config)) {
+            return "GI visual probe rig did not materialize exactly in the disposable route world";
+        }
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_VISUAL_PROBE_RIG_APPLIED route={} rig={} clone_only=true direct_path=OCCLUDED bounce_path=OPEN status=PASS",
+                this.route.routeId(), config.rigId()
+        );
+        return null;
+    }
+
+    private static boolean visualProbeRigMatches(final Level level, final VisualProbeConfig config) {
+        if (level == null || !visualProbeConfigExact(config)
+                || !level.getBlockState(config.torchEpoch().position().below()).is(Blocks.GRASS_BLOCK)) {
+            return false;
+        }
+        for (int y = 75; y <= 80; y++) {
+            for (int z = -114; z <= -106; z++) {
+                if (!level.getBlockState(new BlockPos(84, y, z)).is(visualProbeRed())) return false;
+            }
+            if (!level.getBlockState(new BlockPos(82, y, -110)).is(visualProbeWhite())) return false;
+        }
+        if (!level.getBlockState(new BlockPos(81, 76, -111)).is(visualProbeBlack())) return false;
+        return visualProbeOneBouncePathIsSeparated();
     }
 
     private String prepareG6MatrixNetherChunk(final IntegratedServer server) {
@@ -2811,6 +4152,10 @@ public final class MetalFxBenchmarkController {
     }
 
     private String serverWorkloadStateMismatch(final ServerLevel level) {
+        VisualProbeConfig visualProbe = this.route.visualProbe();
+        if (visualProbe != null && !visualProbeRigMatches(level, visualProbe)) {
+            return "GI visual probe server geometry differs from the tracked rig";
+        }
         G6MatrixConfig matrix = this.route.g6Matrix();
         if (matrix != null) {
             return level.getBlockState(matrix.lavaPosition()).is(Blocks.AIR)
@@ -2840,6 +4185,10 @@ public final class MetalFxBenchmarkController {
     }
 
     private String clientWorkloadStateMismatch(final Minecraft minecraft) {
+        VisualProbeConfig visualProbe = this.route.visualProbe();
+        if (visualProbe != null && !visualProbeRigMatches(minecraft.level, visualProbe)) {
+            return "GI visual probe client geometry differs from the tracked rig";
+        }
         if (this.route.g6Matrix() != null) {
             if (!this.g6MatrixReady || !minecraft.player.getMainHandItem().is(Items.TORCH)
                     || this.l6ProbeEntities.size() != 1) {
@@ -3200,13 +4549,41 @@ public final class MetalFxBenchmarkController {
             requestG6MatrixServerAction(
                     minecraft, G6MatrixServerAction.NETHER_ENTER, frame, snapshot
             );
-        } else if (frame == config.netherReturnFrame()) {
-            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
-                    minecraft, "NETHER_RETURN"
-            );
-            if (snapshot == null) return;
+        } else if (frame >= config.netherReturnFrame()
+                && (this.g6MatrixReceiptMask & G6_MATRIX_RECEIPT_NETHER) == 0
+                && this.g6MatrixAwaitingClientAction == null
+                && this.g6MatrixAwaitingRecovery == null) {
+            int requestedFrame = config.netherReturnFrame();
+            if (g6MatrixPreActionCleanWaitExpired(frame, requestedFrame)) {
+                logG6MatrixPendingRecovery(minecraft, "NETHER_RETURN");
+                fail(minecraft, "G6 matrix action NETHER_RETURN exceeded its bounded "
+                        + "full-field pre-action wait");
+                return;
+            }
+            GiLiveRuntime.FinalSnapshot snapshot = cleanG6MatrixSnapshotOrNull();
+            if (snapshot == null) {
+                if (frame == requestedFrame) {
+                    Metallum.LOGGER.info(
+                            "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_PRE_ACTION_WAIT route={} "
+                                    + "action=NETHER_RETURN requested_frame={} deadline={} "
+                                    + "status=WAITING",
+                            this.route.routeId(), requestedFrame,
+                            requestedFrame + G6_MATRIX_PRE_ACTION_CLEAN_TIMEOUT_FRAMES
+                    );
+                }
+                return;
+            }
+            if (frame > requestedFrame) {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_PRE_ACTION_WAIT route={} "
+                                + "action=NETHER_RETURN requested_frame={} measured_frame={} "
+                                + "waited_frames={} ready_mask={} build_in_flight={} status=PASS",
+                        this.route.routeId(), requestedFrame, frame, frame - requestedFrame,
+                        snapshot.readyMask(), snapshot.buildInFlight()
+                );
+            }
             requestG6MatrixServerAction(
-                    minecraft, G6MatrixServerAction.NETHER_RETURN, frame, snapshot
+                    minecraft, G6MatrixServerAction.NETHER_RETURN, requestedFrame, snapshot
             );
         }
     }
@@ -3214,13 +4591,20 @@ public final class MetalFxBenchmarkController {
     private GiLiveRuntime.FinalSnapshot requireCleanG6MatrixSnapshot(
             final Minecraft minecraft, final String action
     ) {
+        GiLiveRuntime.FinalSnapshot snapshot = cleanG6MatrixSnapshotOrNull();
+        if (snapshot == null) {
+            logG6MatrixPendingRecovery(minecraft, action);
+            fail(minecraft, "G6 matrix action " + action + " lacks a clean current field");
+        }
+        return snapshot;
+    }
+
+    private GiLiveRuntime.FinalSnapshot cleanG6MatrixSnapshotOrNull() {
         if (this.g6MatrixServerTaskPending.get()
                 || this.g6MatrixAwaitingClientAction != null
                 || this.g6MatrixAwaitingRecovery != null
                 || (this.g6MatrixResourceReload != null
                 && !this.g6MatrixResourceReload.isDone())) {
-            logG6MatrixPendingRecovery(minecraft, action);
-            fail(minecraft, "G6 matrix action " + action + " overlapped unfinished work");
             return null;
         }
         GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
@@ -3228,10 +4612,16 @@ public final class MetalFxBenchmarkController {
                 || !GiLiveRuntime.finalReceiptIsCurrent(snapshot, GiLiveRuntime.deviceGeneration())
                 || snapshot.readyMask() != 7 || snapshot.buildInFlight()
                 || snapshot.staleRejects() != 0L || snapshot.rejectedCount() != 0L) {
-            fail(minecraft, "G6 matrix action " + action + " lacks a clean current field");
             return null;
         }
         return snapshot;
+    }
+
+    static boolean g6MatrixPreActionCleanWaitExpired(
+            final int measuredFrame, final int requestedFrame
+    ) {
+        return measuredFrame > (long) requestedFrame
+                + G6_MATRIX_PRE_ACTION_CLEAN_TIMEOUT_FRAMES;
     }
 
     /** Rapid stream steps may supersede compatible mid/far work after exact near recovery. */
@@ -3254,6 +4644,7 @@ public final class MetalFxBenchmarkController {
                 || !g6MatrixRecoveryCoverageReady(
                 snapshot.readyMask(), snapshot.buildInFlight(), true)
                 || snapshot.staleRejects() != 0L || snapshot.rejectedCount() != 0L) {
+            logG6MatrixPendingRecovery(minecraft, action);
             fail(minecraft, "G6 matrix action " + action
                     + " lacks current exact near coverage");
             return null;
@@ -4479,6 +5870,15 @@ public final class MetalFxBenchmarkController {
         this.torchEpochFailure = null;
         this.torchEpochAppliedMeasuredFrame = -1;
         this.torchEpochRemovedMeasuredFrame = -1;
+        this.visualProbeReadyMeasuredFrame = -1;
+        this.visualProbeGpuFieldProbeRequestedMeasuredFrame = -1;
+        this.visualProbeGpuFieldProbeCompleted = false;
+        this.visualProbePreTorchFieldGeneration = -1L;
+        this.visualProbePreTorchSourceTick = -1L;
+        this.visualProbeMotionBaselineBindings = -1L;
+        this.visualProbeMotionBaselineZeroBindings = -1L;
+        this.visualProbeMotionBaselineFieldBindings = -1L;
+        this.visualProbeMotionCompleted = false;
         this.g6MatrixReceiptMask = 0;
         this.g6MatrixOrbitFieldGeneration = -1L;
         this.g6MatrixOrbitBlockSamples = -1L;
@@ -4612,7 +6012,8 @@ public final class MetalFxBenchmarkController {
                 "state=%s current_device=%d telemetry_device=%d admission=%s/%d/%d "
                         + "ready=%d in_flight=%s field=%d source=%d stale=%d rejected=%d "
                         + "terrain=%s/%d/%d bind=%d carrier=%s frame=%s terrain_ready=%d "
-                        + "terrain_exact=%s terrain_field=%d terrain_source=%d bytes=%d "
+                        + "terrain_exact=%s terrain_visible=%d terrain_field=%d "
+                        + "terrain_source=%d bytes=%d "
                         + "block_samples=%d block_p95=%d block_p99=%d block_sla=%s "
                         + "static_samples=%d static_p95=%d static_p99=%d static_sla=%s "
                         + "scroll_samples=%d scroll_p95=%d scroll_p99=%d scroll_sla=%s "
@@ -4628,6 +6029,7 @@ public final class MetalFxBenchmarkController {
                 snapshot.latestTerrainBindStatus(), snapshot.latestTerrainCarrierSafe(),
                 snapshot.latestTerrainFrameCompatible(), snapshot.latestTerrainReadyMask(),
                 snapshot.latestTerrainExactMaskNonzero(),
+                snapshot.latestTerrainVisibleMask(),
                 snapshot.latestTerrainFieldGeneration(), snapshot.latestTerrainSourceTick(),
                 snapshot.accountedBytes(), snapshot.blockSamples(), snapshot.blockP95Submits(),
                 snapshot.blockP99Submits(), snapshot.blockSla(),

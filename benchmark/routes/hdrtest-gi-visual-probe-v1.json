@@ -1,0 +1,55 @@
+{
+  "schema_version": 6,
+  "id": "hdrtest-gi-visual-probe-v1",
+  "fixture": {
+    "id": "hdrtest-static-v1",
+    "sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "player": {
+    "name": "MetallumBench",
+    "uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9"
+  },
+  "dimension": "minecraft:overworld",
+  "position": [84.5, 80.0, -116.0],
+  "rotation": {
+    "yaw": 18.43494882,
+    "pitch": 15.0
+  },
+  "camera": "FIRST_PERSON",
+  "clock": {
+    "total_ticks": 181406,
+    "paused": true
+  },
+  "weather": {
+    "mode": "clear",
+    "frozen": true,
+    "clear_duration_ticks": 6000
+  },
+  "simulation": {
+    "frozen": true
+  },
+  "readiness": {
+    "stable_frames": 120,
+    "timeout_frames": 1200,
+    "position_epsilon": 0.0001,
+    "angle_epsilon": 0.001
+  },
+  "gi_visual_probe": {
+    "rig_id": "red-reflector-occluded-v1",
+    "torch_position": [80, 75, -112],
+    "torch_epoch": {
+      "apply_after_measured_frames": 300,
+      "observation_frames": 450,
+      "remove_after_measured_frames": 690
+    },
+    "camera_orbit": {
+      "start_after_measured_frames": 540,
+      "end_after_measured_frames": 690,
+      "translation_radius_blocks": 0.75,
+      "yaw_amplitude_degrees": 12.0,
+      "pitch_amplitude_degrees": 3.0,
+      "period_frames": 120
+    },
+    "capture_frames": [570, 600, 630, 660]
+  }
+}

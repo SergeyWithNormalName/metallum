@@ -1169,7 +1169,7 @@ def route_values(path: Path) -> list[str]:
         raise FixtureError(f"cannot read route {path}: {error}") from error
     route = _object(payload, "root")
     schema_version = _integer(route.get("schema_version"), "schema_version", 1)
-    if schema_version not in (1, 2, 3, 4, 5):
+    if schema_version not in (1, 2, 3, 4, 5, 6):
         raise FixtureError("unsupported route schema_version")
     root_keys = {
         "schema_version", "id", "fixture", "player", "dimension",
@@ -1182,6 +1182,8 @@ def route_values(path: Path) -> list[str]:
         root_keys.add("l6_dynamic_shadow")
     if schema_version == 5:
         root_keys.add("gi_g6_matrix")
+    if schema_version == 6:
+        root_keys.add("gi_visual_probe")
     _exact_keys(route, "root", root_keys)
     route_id = _string(route.get("id"), "id", SAFE_ID_RE)
     fixture = _object(route.get("fixture"), "fixture")
@@ -1279,6 +1281,103 @@ def route_values(path: Path) -> list[str]:
     ]
     if schema_version == 1:
         return values
+
+    if schema_version == 6:
+        if dimension != "minecraft:overworld":
+            raise FixtureError("GI visual probe must run in minecraft:overworld")
+        if (x, y, z, yaw, pitch) != (84.5, 80.0, -116.0, 18.43494882, 15.0):
+            raise FixtureError("GI visual probe camera pose differs from the tracked over-baffle view")
+        probe = _object(route.get("gi_visual_probe"), "gi_visual_probe")
+        _exact_keys(
+            probe,
+            "gi_visual_probe",
+            {"rig_id", "torch_position", "torch_epoch", "camera_orbit", "capture_frames"},
+        )
+        rig_id = _string(probe.get("rig_id"), "gi_visual_probe.rig_id", SAFE_ID_RE)
+        if rig_id != "red-reflector-occluded-v1":
+            raise FixtureError("GI visual probe must use the tracked red-reflector rig")
+        torch_position = probe.get("torch_position")
+        if not isinstance(torch_position, list) or len(torch_position) != 3:
+            raise FixtureError("GI visual probe torch_position must contain three integers")
+        torch_x, torch_y, torch_z = (
+            _signed_integer(value, f"gi_visual_probe.torch_position[{index}]")
+            for index, value in enumerate(torch_position)
+        )
+        if (torch_x, torch_y, torch_z) != (80, 75, -112):
+            raise FixtureError("GI visual probe torch position differs from the occluded rig")
+        torch_epoch = _object(probe.get("torch_epoch"), "gi_visual_probe.torch_epoch")
+        _exact_keys(
+            torch_epoch,
+            "gi_visual_probe.torch_epoch",
+            {
+                "apply_after_measured_frames", "observation_frames",
+                "remove_after_measured_frames",
+            },
+        )
+        torch_apply = _integer(
+            torch_epoch.get("apply_after_measured_frames"),
+            "gi_visual_probe.torch_epoch.apply_after_measured_frames", 1,
+        )
+        torch_observation = _integer(
+            torch_epoch.get("observation_frames"),
+            "gi_visual_probe.torch_epoch.observation_frames", 1,
+        )
+        torch_remove = _integer(
+            torch_epoch.get("remove_after_measured_frames"),
+            "gi_visual_probe.torch_epoch.remove_after_measured_frames", 1,
+        )
+        if (torch_apply, torch_observation, torch_remove) != (300, 450, 690):
+            raise FixtureError("GI visual probe torch epoch differs from the tracked settle window")
+        orbit = _object(probe.get("camera_orbit"), "gi_visual_probe.camera_orbit")
+        _exact_keys(
+            orbit,
+            "gi_visual_probe.camera_orbit",
+            {
+                "start_after_measured_frames", "end_after_measured_frames",
+                "translation_radius_blocks",
+                "yaw_amplitude_degrees", "pitch_amplitude_degrees", "period_frames",
+            },
+        )
+        orbit_start = _integer(
+            orbit.get("start_after_measured_frames"),
+            "gi_visual_probe.camera_orbit.start_after_measured_frames", 1,
+        )
+        orbit_end = _integer(
+            orbit.get("end_after_measured_frames"),
+            "gi_visual_probe.camera_orbit.end_after_measured_frames", 1,
+        )
+        orbit_translation_radius = _number(
+            orbit.get("translation_radius_blocks"),
+            "gi_visual_probe.camera_orbit.translation_radius_blocks",
+        )
+        orbit_yaw = _number(
+            orbit.get("yaw_amplitude_degrees"),
+            "gi_visual_probe.camera_orbit.yaw_amplitude_degrees",
+        )
+        orbit_pitch = _number(
+            orbit.get("pitch_amplitude_degrees"),
+            "gi_visual_probe.camera_orbit.pitch_amplitude_degrees",
+        )
+        orbit_period = _integer(
+            orbit.get("period_frames"), "gi_visual_probe.camera_orbit.period_frames", 1
+        )
+        if (orbit_start, orbit_end, orbit_translation_radius,
+                orbit_yaw, orbit_pitch, orbit_period) != (540, 690, 0.75, 12.0, 3.0, 120):
+            raise FixtureError("GI visual probe orbit differs from the tracked motion schedule")
+        captures = probe.get("capture_frames")
+        if not isinstance(captures, list) or any(
+                isinstance(value, bool) or not isinstance(value, int) for value in captures):
+            raise FixtureError("GI visual probe capture_frames must contain integers")
+        if captures != [570, 600, 630, 660]:
+            raise FixtureError("GI visual probe capture frames differ from the tracked schedule")
+        return values + [
+            "GI_VISUAL_PROBE", rig_id,
+            str(torch_x), str(torch_y), str(torch_z),
+            str(torch_apply), str(torch_observation), str(torch_remove),
+            str(orbit_start), str(orbit_end), repr(orbit_translation_radius),
+            repr(orbit_yaw), repr(orbit_pitch),
+            str(orbit_period), *(str(value) for value in captures),
+        ]
 
     if schema_version == 5:
         if dimension != "minecraft:overworld":
@@ -2032,6 +2131,48 @@ def self_test() -> None:
             "1", "0", "-1", "-1", "-1", "0", "1", "0",
             "2170", "320", "32", "0", "2430", "2620", "0", "96", "0", "3090",
         ]
+
+        visual_probe_payload = json.loads(route.read_text(encoding="utf-8"))
+        visual_probe_payload["schema_version"] = 6
+        visual_probe_payload["id"] = "test-gi-visual-probe-v1"
+        visual_probe_payload["position"] = [84.5, 80.0, -116.0]
+        visual_probe_payload["rotation"] = {"yaw": 18.43494882, "pitch": 15.0}
+        visual_probe_payload["gi_visual_probe"] = {
+            "rig_id": "red-reflector-occluded-v1",
+            "torch_position": [80, 75, -112],
+            "torch_epoch": {
+                "apply_after_measured_frames": 300,
+                "observation_frames": 450,
+                "remove_after_measured_frames": 690,
+            },
+            "camera_orbit": {
+                "start_after_measured_frames": 540,
+                "end_after_measured_frames": 690,
+                "translation_radius_blocks": 0.75,
+                "yaw_amplitude_degrees": 12.0,
+                "pitch_amplitude_degrees": 3.0,
+                "period_frames": 120,
+            },
+            "capture_frames": [570, 600, 630, 660],
+        }
+        visual_probe_route = root / "visual-probe-route.json"
+        visual_probe_route.write_text(json.dumps(visual_probe_payload), encoding="utf-8")
+        visual_probe_values = route_values(visual_probe_route)
+        assert visual_probe_values[0] == "test-gi-visual-probe-v1"
+        assert len(visual_probe_values) == 37
+        assert visual_probe_values[19:] == [
+            "GI_VISUAL_PROBE", "red-reflector-occluded-v1", "80", "75", "-112",
+            "300", "450", "690", "540", "690", "0.75", "12.0", "3.0", "120",
+            "570", "600", "630", "660",
+        ]
+        visual_probe_payload["rotation"]["pitch"] = 14.0
+        visual_probe_route.write_text(json.dumps(visual_probe_payload), encoding="utf-8")
+        try:
+            route_values(visual_probe_route)
+        except FixtureError:
+            pass
+        else:
+            raise AssertionError("GI visual probe accepted a changed camera pose")
 
         invalid_route = root / "invalid-route.json"
 
