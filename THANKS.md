@@ -52,11 +52,14 @@ performance-улучшения; принятые изменения только
 - Зачем: прежний `min(available, requested)` мог скрыть ошибку allocator-а. GPU slice
   при этом сохранял полный размер, а его хвост мог остаться stale/uninitialized. Это
   хуже детерминированного отказа.
-- Проверка: добавлены exact-boundary и negative-range tests в
-  `MetalRuntimeTests`; `metalRuntimeUnitTest` проходит.
+- Проверка: exact-boundary и negative-range cases вынесены в
+  `TransientMemoryRangeTests` и выполняются через `rendererArchitectureUnitTest`.
+  Отдельно проходят `metalRuntimeUnitTest` и immutable G4 contract.
 - Граница доказательства: normal allocator path не воспроизвёл overflow; это
   стабилизация аварийного поведения, а не performance claim.
-- Откат: отдельный локальный commit `a0fdb43`.
+- Откат: production guard — `a0fdb43`; его изолированная test wiring вне
+  G4 evidence seam — `db5bf1b`. Для полного отката этого заимствования откатывать
+  их в обратном порядке.
 
 ## Что изучено, но не перенесено
 
