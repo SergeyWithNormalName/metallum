@@ -40,6 +40,7 @@ public final class GiDirectSourceCpuTests {
         liveInputSuccessorRequiresAnExactStableGrid();
         liveInputRebasePreservesQueuedBacklog();
         queueBoundsCoalescingAndStarvation();
+        nearCascadePreemptsOuterBacklogWithoutStarvingIt();
         acceptedFailureRetriesAndStaleCompletionCannotPublish();
         sameCommandProjectedSourceSurvivesExactIdentityChurn();
         rotatedLifetimeCountersCanProveASettledCurrentField();
@@ -683,6 +684,24 @@ public final class GiDirectSourceCpuTests {
         check(queue.telemetry().starvationPromotions() == drained, "starvation promotion");
         check(queue.telemetry().fullVolumeRebuilds() == 1L,
                 "initial full-field invalidation was not counted exactly once");
+    }
+
+    private static void nearCascadePreemptsOuterBacklogWithoutStarvingIt() {
+        GiDirectSourceEpoch epoch = epoch(1L, 1L);
+        GiDirectDirtyQueue queue = new GiDirectDirtyQueue();
+        queue.rotateEpoch(epoch);
+        int outer = GiDirectSourceLayout.brickId(1, 0, 0, 0);
+        queue.enqueue(epoch, outer, 1L);
+        queue.enqueue(epoch, GiDirectSourceLayout.brickId(0, 0, 0, 0), 2L);
+        int[] one = new int[1];
+        check(queue.drainTo(epoch, 2L, one) == 1 && one[0] == 0,
+                "fresh C0 did not preempt stale outer-cascade backlog");
+        check(queue.completeBatch(epoch, one, 1) == GiDirectDirtyQueue.CompletionResult.COMPLETED,
+                "near-cascade priority fixture did not retire C0 ownership");
+
+        queue.enqueue(epoch, GiDirectSourceLayout.brickId(0, 1, 0, 0), 17L);
+        check(queue.drainTo(epoch, 17L, one) == 1 && one[0] == outer,
+                "starved outer-cascade work lost its bounded promotion to fresh C0");
     }
 
     private static void acceptedFailureRetriesAndStaleCompletionCannotPublish() {

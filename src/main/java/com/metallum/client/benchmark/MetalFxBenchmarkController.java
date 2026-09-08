@@ -554,23 +554,27 @@ public final class MetalFxBenchmarkController {
                 && visualProbeTransportRayIsExact();
     }
 
-    /** The red cell (84,77,-110) reaches the white cell (82,77,-110) on (+1,0,0), k=2. */
+    /**
+     * The white receiver (82,77,-110) reaches the red source (84,77,-110) on
+     * (+1,0,0), k=2.  G6 evaluates incident radiance at the former, so the
+     * source-to-receiver direction is the negation of this ray in Metal.
+     */
     static boolean visualProbeTransportRayIsExact() {
-        int sourceX = 82;
-        int sourceY = 77;
-        int sourceZ = -110;
-        int receiverX = 84;
+        int receiverX = 82;
         int receiverY = 77;
         int receiverZ = -110;
-        int dx = receiverX - sourceX;
-        int dy = receiverY - sourceY;
-        int dz = receiverZ - sourceZ;
+        int sourceX = 84;
+        int sourceY = 77;
+        int sourceZ = -110;
+        int dx = sourceX - receiverX;
+        int dy = sourceY - receiverY;
+        int dz = sourceZ - receiverZ;
         int steps = Math.max(Math.max(Math.abs(dx), Math.abs(dy)), Math.abs(dz));
         if (steps != 2 || steps > 8 || dx / steps != 1 || dy != 0 || dz != 0) {
             return false;
         }
         return visualProbeSupercoverPathClear(
-                sourceX, sourceY, sourceZ, receiverX, receiverY, receiverZ
+                receiverX, receiverY, receiverZ, sourceX, sourceY, sourceZ
         ) && visualProbeLegacyDiagonalPathIsBlocked();
     }
 
@@ -2043,8 +2047,13 @@ public final class MetalFxBenchmarkController {
                 return false;
             }
         }
-        return hasNonzeroSh(samples[0]) && hasNonzeroSh(samples[1]) && hasNonzeroSh(samples[2])
-                && hasNonzeroSh(samples[3]) && hasRedDominance(samples[3]);
+        // G6 stores incident indirect radiance at the sampled surface.  The red
+        // reflector is a G3 source control, not a G6 receiver that should itself
+        // become red.  The exact open transfer ray terminates at white sample 1;
+        // that raw L0 must therefore carry the reflector's red-dominant energy.
+        // Samples 0 and 2 deliberately exercise adjacent geometry and may be
+        // occluded by the conservative supercover rule.
+        return hasNonzeroSh(samples[1]) && hasRedDominance(samples[1]);
     }
 
     static boolean visualProbeGpuFieldProbeShouldRetry(final int status, final int attempts) {

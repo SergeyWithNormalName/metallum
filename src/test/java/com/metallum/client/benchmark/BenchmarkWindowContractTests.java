@@ -429,14 +429,23 @@ public final class BenchmarkWindowContractTests {
                 new int[9], 7, 7, 0x7F, samples
         );
         require(MetalFxBenchmarkController.visualProbeGpuFieldProbePasses(capture),
-                "GI visual GPU field receipt must accept raw sampleable white/red SH evidence");
-        samples[3] = debugProbeSample(0, 84, 77, -110, 0.04F, 0.05F, 0.01F);
+                "GI visual GPU field receipt must accept a raw red bounce at its white receiver");
+        samples[0] = debugProbeSample(0, 82, 76, -110, 0.0F, 0.0F, 0.0F);
+        samples[2] = debugProbeSample(0, 82, 78, -110, 0.0F, 0.0F, 0.0F);
+        samples[3] = debugProbeSample(0, 84, 77, -110, 0.0F, 0.0F, 0.0F);
+        GiLiveGpuResources.DebugProbeCapture exactReceiverCapture = new GiLiveGpuResources.DebugProbeCapture(
+                1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 0L,
+                new int[9], 7, 7, 0x7F, samples
+        );
+        require(MetalFxBenchmarkController.visualProbeGpuFieldProbePasses(exactReceiverCapture),
+                "GI visual GPU field receipt rejected the exact receiver for adjacent or source controls");
+        samples[1] = debugProbeSample(0, 82, 77, -110, 0.04F, 0.05F, 0.01F);
         GiLiveGpuResources.DebugProbeCapture nonRedCapture = new GiLiveGpuResources.DebugProbeCapture(
                 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 0L,
                 new int[9], 7, 7, 0x7F, samples
         );
         require(!MetalFxBenchmarkController.visualProbeGpuFieldProbePasses(nonRedCapture),
-                "GI visual GPU field receipt accepted a reflector without raw red dominance");
+                "GI visual GPU field receipt accepted a white receiver without raw red dominance");
     }
 
     private static void requiresExactAndCausalGiVisualProbeDirectReceipt() {

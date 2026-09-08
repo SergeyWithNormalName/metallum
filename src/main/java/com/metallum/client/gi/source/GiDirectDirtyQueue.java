@@ -332,6 +332,16 @@ public final class GiDirectDirtyQueue {
         if (leftStarved != rightStarved) {
             return leftStarved;
         }
+        // A newly changed C0 brick is the only source for block-scale field correctness.
+        // Do not let an older C1/C2 catch-up backlog leave it sampling the initial UNKNOWN field;
+        // once an outer brick reaches STARVATION_TICKS the age rule below wins unchanged.
+        if (!leftStarved) {
+            int leftCascade = GiDirectSourceLayout.cascadeForBrickId(leftBrick);
+            int rightCascade = GiDirectSourceLayout.cascadeForBrickId(rightBrick);
+            if (leftCascade != rightCascade) {
+                return leftCascade < rightCascade;
+            }
+        }
         if (left.enqueueTick != right.enqueueTick) {
             return left.enqueueTick < right.enqueueTick;
         }

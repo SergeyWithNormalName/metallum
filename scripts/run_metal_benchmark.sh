@@ -1604,7 +1604,16 @@ if [ "$METAL_VALIDATION" -eq 0 ]; then
     unset MTL_SHADER_VALIDATION
     unset MTL_SHADER_VALIDATION_REPORT_TO_STDERR
 fi
-unset MTL_CAPTURE_ENABLED
+case "${METALLUM_GPU_CAPTURE:-0}" in
+    0) unset MTL_CAPTURE_ENABLED MTL_CAPTURE_WAIT_FOR_SIGNAL ;;
+    1)
+        # Explicit diagnostic-only escape hatch for gpucapture. It is never part of a
+        # timing/attestation run: wait at MTLDevice creation until the capture client attaches.
+        export MTL_CAPTURE_ENABLED=1
+        export MTL_CAPTURE_WAIT_FOR_SIGNAL=1
+        ;;
+    *) die "METALLUM_GPU_CAPTURE must be 0 or 1" ;;
+esac
 unset MTL_HUD_ENABLED
 unset MTL_HUD_LOG_ENABLED
 unset METAL_DEVICE_WRAPPER_TYPE

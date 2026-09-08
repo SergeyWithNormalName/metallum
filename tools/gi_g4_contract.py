@@ -176,7 +176,7 @@ G6_STABILITY_SUCCESSOR_OVERLAY_SHA256 = {
     "docs/GI_G4.md": "db06c3aae3031b6b112ce1bddeb6f6b5267b31af7ffaca7951949e5cbd839f16",
     "scripts/run_metal_benchmark.sh": "4138fe4587c9bc7614983b4cf7b456003345fd42334077aec3e325eb6c8f9fdd",
     "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "905d792ca4824259ec05c9c2c99dbb69867e28d729181c758fc59aec26f4601c",
-    "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java": "89962cdc10ceedcb44bd6eec310301bae9cf9b24d91838004e71c1d5e90613c9",
+    "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java": "0a9ee7e72e9bb129a21fd9a36134d093215f05fb67a2d37335be67a9cc08a194",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "f3036eb37628f28251234fcb3c045214d9cf99eda32f2a574f5fd4e221a88df9",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java": "8718209d39209293f46b336fb990c7199eb910cabc59b67342f9b9f466793719",
     "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "f9a2fe337a759f049339e64325de4275d7f537a66bf40261d2d234c1ad9bdd7f",
@@ -194,8 +194,8 @@ G6_STABILITY_SUCCESSOR_OVERLAY_SHA256 = {
 # so no historical G4/G6 receipt is relabelled as proof for this topology.
 G6_TOPOLOGY_SUCCESSOR_OVERLAY_SHA256 = {
     "build.gradle": "9523bf7d96b7f4f6382a1bac05c37e67e0f5d336462f034c675d74883eba9ba5",
-    "scripts/run_metal_benchmark.sh": "e199a326abf1ee2fb386e95390a81a1c9e8522ede40ad7bc853d2dcfe567ae5c",
-    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "8cc0360fe7e8b6f19eb7a73bccd8b9d4b610144bcc1ca5cbde203e94f069df02",
+    "scripts/run_metal_benchmark.sh": "b84a898ca0e739bf99c7a1e15fbd5dc86d0e19422c42895e2020936e04a25ff1",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "b4c251e576de3109474fde11042b52f626a3922c0744688cd59595fe07312b5d",
     "src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java": "f75a0b304d079b14fdf594acf5c77db09ef864c8ab1530b038ae16a40d85447f",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "f2de20378c06e047db42e0e0047b21be402aebe2da61f947bcffac6622efdd3c",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java": "6f20eedf6bee4fa07f06b1d39209e6176e2ecddc629aa6dade3d51226ddf449b",
@@ -204,9 +204,9 @@ G6_TOPOLOGY_SUCCESSOR_OVERLAY_SHA256 = {
     "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "8cafa90dc8126297129a03b4603bd60321e7226851cb838ba96a2ea3ea9d2bb4",
     "src/main/metal/MetallumGiTransport.metal": "534bda56ec8ff43d66dc9be1804c16fb1a58cb17bc9ffde5bb8fa8b603d2f3b6",
     "src/main/native/MetallumNative.swift": "6a747081a98ab917a8b670b86d3cea66f3288eec72ce84d1094e3f598c9df6a9",
-    "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "6d6074ea9e95be2305f8e5f5704880862b4edceffadfdd1ea1bfbd041b081820",
+    "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "8565f2f0870309b1832abe8274c722a3a229b576c229feab737e68f0909327f8",
     "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java": "57a5bf13b1bb6196515ea07c13b9f3c3411134c482d623015b3119373e11d6f7",
-    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "e7b3f44a0ba4d2de55ce9bf89a68c65ce798142b27a6da86ddb15ddc1014ef29",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "1d34c04d7c65639a9f5f99778eee5cd674d0fe40fdb6c14cd9ac88c35525ff1e",
     "src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java": "a3b1035fc3164f8da801906e3c24f6d0de3e8e9eca934a8f11e0a08006b1e837",
     "src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java": "7dcde033c1500d9f8088d47e46a7bfac59e417654dd560bfea42021f4bea9c20",
     "src/test/java/com/metallum/client/gi/transport/GiTransportSourceChainTests.java": "a9092d7ce307821bc46e94ff16d50975e9ed3ff7b1a6c319212e1bd66d7e6a74",
@@ -214,7 +214,7 @@ G6_TOPOLOGY_SUCCESSOR_OVERLAY_SHA256 = {
 G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
 # The value-bearing line is normalized before hashing, avoiding a circular digest while still
 # making every other byte of this verifier part of the exact successor seam.
-G4_CONTRACT_SELF_NORMALIZED_SHA256 = "5834bb09ddc432e3009e655da20fd8a8cce153ef0d76e74f1e8c66864b8c88e9"
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "ca88739a3f9ed218d75e9c0e5614a96bfed7edb5e7d228e56e2e9d3b830c383a"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,

@@ -44,10 +44,13 @@ masquerade as a bounce.
 Only after that receipt does the runner require one asynchronous `GI_VISUAL_PROBE_GPU_FIELD` receipt.
 It reads exactly seven immutable G6 texels: three C0 white-receiver voxels, the C0 red reflector, the
 baffle diagnostic, and the same white point in C1/C2. The receipt preserves raw FP16-decoded RGB L1
-SH coefficients, confidence, coverage, and the native identity/origin tuple. It passes only when every
-requested sample is usable, the C0 white and red values are nonzero, and the red reflector's raw L0
-red term exceeds green and blue. It does not apply a gain or infer a visual result from the baffle. The
-OFF arm forces this flag off and rejects either GPU receipt.
+SH coefficients, confidence, coverage, and the native identity/origin tuple. Every requested texel must
+be usable. The causality assertion is deliberately narrower: the exact open C0 white receiver at
+`(82,77,-110)` must have nonzero, red-dominant raw L0. G6 stores incident indirect radiance at the
+sampled surface, so it would be physically wrong to require the red reflector itself to have red G6 SH;
+G3 GPU_DIRECT already establishes its red outgoing source. The adjacent C0 controls can be zero when
+the conservative supercover transport ray is blocked. No gain is applied and the baffle does not imply a
+visual result. The OFF arm forces this flag off and rejects either GPU receipt.
 
 The OFF arm intentionally has no G6 field and therefore emits no readiness or G6 motion marker; it
 preserves the same world, torch epoch, pre-render camera motion, and capture frames. The runner
