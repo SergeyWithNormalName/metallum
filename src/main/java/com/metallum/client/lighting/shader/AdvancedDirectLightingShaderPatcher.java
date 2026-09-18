@@ -1139,6 +1139,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return albedo * diffuse * 0.31830988618;
             }
             """).append("""
+            float metallumSsrViewDepthV1(float rawDepth, float p22, float p32) {
+                float denominator = rawDepth + p22;
+                if (rawDepth <= 1.0e-5 || abs(denominator) <= 1.0e-7) {
+                    return -1.0;
+                }
+                return abs(p32 / denominator);
+            }
+
             vec4 metallumTraceScreenSpaceReflectionV1(
                     vec3 viewPosition,
                     vec3 viewDirection,
@@ -1148,16 +1156,81 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (textureSize(metallumReflectionDepth, 0).x <= 1) {
                     return vec4(0.0);
                 }
-                vec3 reflectionNormal = metallumSafeNormalV1(mix(flatNormal, waveNormal, 0.20));
+                vec2 textureExtent = vec2(textureSize(metallumReflectionDepth, 0));
+                vec3 stableFlatNormal = metallumSafeNormalV1(flatNormal);
+                vec3 reflectionNormal = metallumSafeNormalV1(
+                        mix(stableFlatNormal, waveNormal, 0.35));
                 vec3 rayDirection = reflect(-viewDirection, reflectionNormal);
+                float surfaceDeparture = dot(rayDirection, stableFlatNormal);
+                if (any(isnan(rayDirection)) || any(isinf(rayDirection))
+                        || surfaceDeparture <= 0.01) {
+                    return vec4(0.0);
+                }
                 float p22 = metallumLighting.projection[2][2];
                 float p32 = metallumLighting.projection[3][2];
-                const int STEP_COUNT = 24;
-                float stepStride = maxDistance / float(STEP_COUNT);
-                float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-                vec3 prevRayPos = viewPosition + rayDirection * max(0.15, abs(viewPosition.z) * 0.015);
-                vec3 currentRayPos = prevRayPos + rayDirection * (stepStride * (0.3 + 0.7 * dither));
-                for (int i = 0; i < STEP_COUNT; i++) {
+                float nearPlane = max(metallumLighting.depth.x, 0.05);
+                float clippedMaxDistance = max(maxDistance, 0.0);
+                if (rayDirection.z > 0.0) {
+                    clippedMaxDistance = min(
+                            clippedMaxDistance,
+                            (-nearPlane - viewPosition.z) / rayDirection.z);
+                }
+                if (clippedMaxDistance <= 0.20) {
+                    return vec4(0.0);
+                }
+
+                // The depth snapshot was rendered with the final world projection, while the
+                // shared lighting packet intentionally carries the stable camera projection.
+                // Recover the small per-fragment jitter/bobbing offset from the raster position
+                // so the ray and copied depth remain registered during motion.
+                vec4 receiverClip = metallumLighting.projection * vec4(viewPosition, 1.0);
+                if (receiverClip.w <= 0.05) {
+                    return vec4(0.0);
+                }
+                vec2 receiverProjectedUv = receiverClip.xy / receiverClip.w * 0.5 + 0.5;
+                vec2 receiverRasterUv = gl_FragCoord.xy / textureExtent;
+                vec2 projectionUvCorrection = receiverRasterUv - receiverProjectedUv;
+                if (any(greaterThan(abs(projectionUvCorrection), vec2(0.10)))) {
+                    return vec4(0.0);
+                }
+
+                // The opaque snapshot contains the terrain below water, not the translucent
+                // water itself. A small ray-direction bias is therefore sufficient and avoids
+                // skipping nearby reflectors as the old depth-proportional start offset did.
+                float originBias = clamp(-viewPosition.z * 0.0015, 0.06, 0.18);
+                vec3 rayOrigin = viewPosition + rayDirection * originBias;
+                vec4 originClip = metallumLighting.projection * vec4(rayOrigin, 1.0);
+                vec3 rayEnd = rayOrigin + rayDirection * clippedMaxDistance;
+                vec4 endClip = metallumLighting.projection * vec4(rayEnd, 1.0);
+                if (originClip.w <= 0.05 || endClip.w <= 0.05) {
+                    return vec4(0.0);
+                }
+                vec2 originUv = originClip.xy / originClip.w * 0.5 + 0.5
+                        + projectionUvCorrection;
+                vec2 endUv = endClip.xy / endClip.w * 0.5 + 0.5
+                        + projectionUvCorrection;
+                if (any(lessThan(originUv, vec2(0.001)))
+                        || any(greaterThan(originUv, vec2(0.999)))) {
+                    return vec4(0.0);
+                }
+                float screenSpanPixels = length((endUv - originUv) * textureExtent);
+                int stepCount = int(clamp(ceil(screenSpanPixels * 0.20), 24.0, 48.0));
+
+                float originRawDepth = texture(metallumReflectionDepth, originUv).r;
+                float originSceneDepth = metallumSsrViewDepthV1(originRawDepth, p22, p32);
+                bool previousSceneValid = originSceneDepth > 0.0;
+                float previousDepthDiff = -rayOrigin.z - originSceneDepth;
+                vec3 previousRayPos = rayOrigin;
+                const int MAX_STEP_COUNT = 48;
+                for (int i = 0; i < MAX_STEP_COUNT; i++) {
+                    if (i >= stepCount) {
+                        break;
+                    }
+                    float u = float(i + 1) / float(stepCount);
+                    // Quadratic spacing spends most samples close to the receiver, where a
+                    // one-block Minecraft silhouette would otherwise fit inside a single step.
+                    float rayTravel = clippedMaxDistance * u * (0.15 + 0.85 * u);
+                    vec3 currentRayPos = rayOrigin + rayDirection * rayTravel;
                     if (currentRayPos.z >= -0.1) {
                         break;
                     }
@@ -1165,48 +1238,120 @@ public final class AdvancedDirectLightingShaderPatcher {
                     if (clipPos.w <= 0.05) {
                         break;
                     }
-                    vec2 sampleUv = clipPos.xy / clipPos.w * 0.5 + 0.5;
+                    vec2 sampleUv = clipPos.xy / clipPos.w * 0.5 + 0.5
+                            + projectionUvCorrection;
                     if (sampleUv.x < 0.001 || sampleUv.x > 0.999 || sampleUv.y < 0.001 || sampleUv.y > 0.999) {
                         break;
                     }
                     float rawDepth = texture(metallumReflectionDepth, sampleUv).r;
-                    if (rawDepth > 1.0e-5) {
-                        float sceneDistance = abs(p32 / (rawDepth + p22));
-                        float rayDistance = abs(currentRayPos.z);
+                    float sceneDistance = metallumSsrViewDepthV1(rawDepth, p22, p32);
+                    if (sceneDistance > 0.0) {
+                        float rayDistance = -currentRayPos.z;
                         float depthDiff = rayDistance - sceneDistance;
-                        float thickness = max(1.2, stepStride * 0.65);
-                        if (depthDiff >= 0.0 && depthDiff <= thickness) {
-                            vec3 minPos = prevRayPos;
+                        float depthAdvance = abs(rayDistance + previousRayPos.z);
+                        float thickness = clamp(
+                                depthAdvance * 1.10 + sceneDistance * 0.0025,
+                                0.10,
+                                0.65);
+                        bool crossedSurface = depthDiff >= 0.0
+                                && ((previousSceneValid && previousDepthDiff < 0.0)
+                                || (!previousSceneValid && depthDiff <= thickness * 0.25));
+                        if (crossedSurface && depthDiff <= thickness) {
+                            vec3 minPos = previousRayPos;
                             vec3 maxPos = currentRayPos;
                             vec2 hitUv = sampleUv;
-                            for (int b = 0; b < 4; b++) {
+                            for (int b = 0; b < 5; b++) {
                                 vec3 midPos = mix(minPos, maxPos, 0.5);
                                 if (midPos.z >= -0.1) break;
                                 vec4 midClip = metallumLighting.projection * vec4(midPos, 1.0);
                                 if (midClip.w <= 0.05) break;
-                                vec2 midUv = midClip.xy / midClip.w * 0.5 + 0.5;
+                                vec2 midUv = midClip.xy / midClip.w * 0.5 + 0.5
+                                        + projectionUvCorrection;
                                 float midRaw = texture(metallumReflectionDepth, midUv).r;
-                                if (midRaw > 1.0e-5) {
-                                    float midScene = abs(p32 / (midRaw + p22));
-                                    float midRay = abs(midPos.z);
-                                    if (midRay >= midScene) {
-                                        maxPos = midPos;
-                                        hitUv = midUv;
-                                    } else {
-                                        minPos = midPos;
-                                    }
+                                float midScene = metallumSsrViewDepthV1(midRaw, p22, p32);
+                                if (midScene <= 0.0) {
+                                    minPos = midPos;
+                                } else if (-midPos.z >= midScene) {
+                                    maxPos = midPos;
+                                    hitUv = midUv;
+                                } else {
+                                    minPos = midPos;
                                 }
                             }
+                            float hitRawDepth = texture(metallumReflectionDepth, hitUv).r;
+                            float hitSceneDepth = metallumSsrViewDepthV1(
+                                    hitRawDepth, p22, p32);
+                            float hitResidual = max(-maxPos.z - hitSceneDepth, 0.0);
+                            if (hitSceneDepth <= 0.0 || hitResidual > thickness) {
+                                previousRayPos = currentRayPos;
+                                previousDepthDiff = depthDiff;
+                                previousSceneValid = true;
+                                continue;
+                            }
+
+                            // A depth-only SSR cannot validate the hit normal. Reject the common
+                            // silhouette-stretching failure by fading discontinuous 4-neighbours.
+                            vec2 texelSize = vec2(1.0) / textureExtent;
+                            float neighborLeft = metallumSsrViewDepthV1(texture(
+                                    metallumReflectionDepth, hitUv - vec2(texelSize.x, 0.0)).r,
+                                    p22, p32);
+                            float neighborRight = metallumSsrViewDepthV1(texture(
+                                    metallumReflectionDepth, hitUv + vec2(texelSize.x, 0.0)).r,
+                                    p22, p32);
+                            float neighborDown = metallumSsrViewDepthV1(texture(
+                                    metallumReflectionDepth, hitUv - vec2(0.0, texelSize.y)).r,
+                                    p22, p32);
+                            float neighborUp = metallumSsrViewDepthV1(texture(
+                                    metallumReflectionDepth, hitUv + vec2(0.0, texelSize.y)).r,
+                                    p22, p32);
+                            float depthContinuity = 0.0;
+                            if (min(min(neighborLeft, neighborRight),
+                                    min(neighborDown, neighborUp)) > 0.0) {
+                                float largestNeighborDelta = max(max(
+                                        abs(neighborLeft - hitSceneDepth),
+                                        abs(neighborRight - hitSceneDepth)), max(
+                                        abs(neighborDown - hitSceneDepth),
+                                        abs(neighborUp - hitSceneDepth)));
+                                float continuityStart = max(0.45, hitSceneDepth * 0.010);
+                                depthContinuity = 1.0 - smoothstep(
+                                        continuityStart,
+                                        continuityStart * 4.0,
+                                        largestNeighborDelta);
+                            }
                             float edgeDist = min(min(hitUv.x, hitUv.y), min(1.0 - hitUv.x, 1.0 - hitUv.y));
-                            float edgeFade = smoothstep(0.0, 0.06, edgeDist);
-                            float distFade = 1.0 - smoothstep(maxDistance * 0.70, maxDistance, length(currentRayPos - viewPosition));
-                            float confidence = edgeFade * distFade;
-                            vec4 sceneColor = texture(metallumPlanarReflection, clamp(hitUv, vec2(0.001), vec2(0.999)));
-                            return vec4(sceneColor.rgb, confidence);
+                            float edgeFade = smoothstep(0.015, 0.10, edgeDist);
+                            float distFade = 1.0 - smoothstep(0.68, 0.98, u);
+                            float residualFade = 1.0 - smoothstep(
+                                    thickness * 0.20, thickness, hitResidual);
+                            float screenTravel = length((hitUv - originUv) * textureExtent);
+                            float travelFade = smoothstep(2.0, 8.0, screenTravel);
+                            float departureFade = smoothstep(0.015, 0.08, surfaceDeparture);
+                            float confidence = edgeFade * distFade * residualFade
+                                    * travelFade * departureFade * depthContinuity;
+                            if (confidence <= 0.001) {
+                                return vec4(0.0);
+                            }
+
+                            // Filter across, not along, the screen-space ray. This removes the
+                            // last single-pixel stair-step without elongating the reflected shape.
+                            vec2 screenDirection = (hitUv - originUv)
+                                    / max(length(hitUv - originUv), 1.0e-6);
+                            vec2 filterAxis = vec2(-screenDirection.y, screenDirection.x)
+                                    * texelSize * mix(0.65, 1.25, u);
+                            vec3 sceneColor = texture(
+                                    metallumPlanarReflection, hitUv).rgb * 0.50;
+                            sceneColor += texture(
+                                    metallumPlanarReflection, hitUv - filterAxis).rgb * 0.25;
+                            sceneColor += texture(
+                                    metallumPlanarReflection, hitUv + filterAxis).rgb * 0.25;
+                            return vec4(max(sceneColor, vec3(0.0)), confidence);
                         }
+                        previousDepthDiff = depthDiff;
+                        previousSceneValid = true;
+                    } else {
+                        previousSceneValid = false;
                     }
-                    prevRayPos = currentRayPos;
-                    currentRayPos += rayDirection * stepStride;
+                    previousRayPos = currentRayPos;
                 }
                 return vec4(0.0);
             }
@@ -2820,79 +2965,6 @@ public final class AdvancedDirectLightingShaderPatcher {
             throw new IllegalStateException("Failed to strip external shadow samplers from AMBIENT_ONLY helper");
         }
 
-        String fullSsrTrace = """
-            vec4 metallumTraceScreenSpaceReflectionV1(
-                    vec3 viewPosition,
-                    vec3 viewDirection,
-                    vec3 flatNormal,
-                    vec3 waveNormal,
-                    float maxDistance) {
-                if (textureSize(metallumReflectionDepth, 0).x <= 1) {
-                    return vec4(0.0);
-                }
-                vec3 reflectionNormal = metallumSafeNormalV1(mix(flatNormal, waveNormal, 0.20));
-                vec3 rayDirection = reflect(-viewDirection, reflectionNormal);
-                float p22 = metallumLighting.projection[2][2];
-                float p32 = metallumLighting.projection[3][2];
-                const int STEP_COUNT = 24;
-                float stepStride = maxDistance / float(STEP_COUNT);
-                float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-                vec3 prevRayPos = viewPosition + rayDirection * max(0.15, abs(viewPosition.z) * 0.015);
-                vec3 currentRayPos = prevRayPos + rayDirection * (stepStride * (0.3 + 0.7 * dither));
-                for (int i = 0; i < STEP_COUNT; i++) {
-                    if (currentRayPos.z >= -0.1) {
-                        break;
-                    }
-                    vec4 clipPos = metallumLighting.projection * vec4(currentRayPos, 1.0);
-                    if (clipPos.w <= 0.05) {
-                        break;
-                    }
-                    vec2 sampleUv = clipPos.xy / clipPos.w * 0.5 + 0.5;
-                    if (sampleUv.x < 0.001 || sampleUv.x > 0.999 || sampleUv.y < 0.001 || sampleUv.y > 0.999) {
-                        break;
-                    }
-                    float rawDepth = texture(metallumReflectionDepth, sampleUv).r;
-                    if (rawDepth > 1.0e-5) {
-                        float sceneDistance = abs(p32 / (rawDepth + p22));
-                        float rayDistance = abs(currentRayPos.z);
-                        float depthDiff = rayDistance - sceneDistance;
-                        float thickness = max(1.2, stepStride * 0.65);
-                        if (depthDiff >= 0.0 && depthDiff <= thickness) {
-                            vec3 minPos = prevRayPos;
-                            vec3 maxPos = currentRayPos;
-                            vec2 hitUv = sampleUv;
-                            for (int b = 0; b < 4; b++) {
-                                vec3 midPos = mix(minPos, maxPos, 0.5);
-                                if (midPos.z >= -0.1) break;
-                                vec4 midClip = metallumLighting.projection * vec4(midPos, 1.0);
-                                if (midClip.w <= 0.05) break;
-                                vec2 midUv = midClip.xy / midClip.w * 0.5 + 0.5;
-                                float midRaw = texture(metallumReflectionDepth, midUv).r;
-                                if (midRaw > 1.0e-5) {
-                                    float midScene = abs(p32 / (midRaw + p22));
-                                    float midRay = abs(midPos.z);
-                                    if (midRay >= midScene) {
-                                        maxPos = midPos;
-                                        hitUv = midUv;
-                                    } else {
-                                        minPos = midPos;
-                                    }
-                                }
-                            }
-                            float edgeDist = min(min(hitUv.x, hitUv.y), min(1.0 - hitUv.x, 1.0 - hitUv.y));
-                            float edgeFade = smoothstep(0.0, 0.06, edgeDist);
-                            float distFade = 1.0 - smoothstep(maxDistance * 0.70, maxDistance, length(currentRayPos - viewPosition));
-                            float confidence = edgeFade * distFade;
-                            vec4 sceneColor = texture(metallumPlanarReflection, clamp(hitUv, vec2(0.001), vec2(0.999)));
-                            return vec4(sceneColor.rgb, confidence);
-                        }
-                    }
-                    prevRayPos = currentRayPos;
-                    currentRayPos += rayDirection * stepStride;
-                }
-                return vec4(0.0);
-            }
-""";
         String ambientSsrTrace = """
             vec4 metallumTraceScreenSpaceReflectionV1(
                     vec3 viewPosition,
@@ -2903,10 +2975,17 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return vec4(0.0);
             }
 """;
-        source = replaceExactlyOnce(source, fullSsrTrace, ambientSsrTrace);
-        if (source == null) {
+        String ssrStartAnchor = "            vec4 metallumTraceScreenSpaceReflectionV1(";
+        String ssrEndAnchor = "\n\n            vec3 metallumEvaluateMaterialEnvironmentV1(";
+        int ssrStart = source.indexOf(ssrStartAnchor);
+        int ssrEnd = ssrStart < 0 ? -1 : source.indexOf(ssrEndAnchor, ssrStart);
+        if (ssrStart < 0 || ssrEnd < 0
+                || source.indexOf(ssrStartAnchor, ssrStart + ssrStartAnchor.length()) >= 0) {
             throw new IllegalStateException("Failed to specialize metallumTraceScreenSpaceReflectionV1 for AMBIENT_ONLY helper");
         }
+        source = source.substring(0, ssrStart)
+                + ambientSsrTrace
+                + source.substring(ssrEnd);
 
         // 2. Specialize environment lookup and remove water square celestial masks
         String fullEnvLookupAndMasks = """
