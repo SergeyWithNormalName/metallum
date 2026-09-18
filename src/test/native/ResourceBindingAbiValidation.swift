@@ -32,16 +32,6 @@ private typealias NativeBufferHandleIsLive = @convention(c) (
     UnsafeMutableRawPointer?
 ) -> Int32
 
-private typealias NativeDrawIndexedCpuCommands = @convention(c) (
-    UnsafeMutableRawPointer?,
-    UInt,
-    UInt,
-    UnsafeMutableRawPointer?,
-    UnsafeRawPointer?,
-    Int,
-    UInt64
-) -> Void
-
 private let headerBytes = 32
 private let recordBytes = 48
 
@@ -144,22 +134,18 @@ private enum ResourceBindingAbiValidationMain {
                   let bufferHandleIsLiveSymbol = dlsym(
                       library,
                       "metallum_buffer_handle_is_live"
-                  ),
-                  let drawIndexedCpuCommandsSymbol = dlsym(
-                      library,
-                      "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands"
                   ) else {
                 throw ValidationFailure.message("Native buffer lifecycle ABI symbols are missing")
             }
+            try require(
+                dlsym(library, "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands") == nil,
+                "Retired CPU indexed-command replay ABI is still exported"
+            )
             let nativeCreateBuffer = unsafeBitCast(createBufferSymbol, to: NativeCreateBuffer.self)
             let nativeReleaseObject = unsafeBitCast(releaseObjectSymbol, to: NativeReleaseObject.self)
             let nativeBufferHandleIsLive = unsafeBitCast(
                 bufferHandleIsLiveSymbol,
                 to: NativeBufferHandleIsLive.self
-            )
-            let nativeDrawIndexedCpuCommands = unsafeBitCast(
-                drawIndexedCpuCommandsSymbol,
-                to: NativeDrawIndexedCpuCommands.self
             )
 
             guard let device = MTLCreateSystemDefaultDevice(),
@@ -224,21 +210,6 @@ private enum ResourceBindingAbiValidationMain {
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
                 throw ValidationFailure.message("Could not create Metal validation encoder")
-            }
-
-            let staleDrawCommand: [UInt32] = [3, 1, 0, 0, 0]
-            withExtendedLifetime(lifecycleProbeObject) {
-                staleDrawCommand.withUnsafeBytes { raw in
-                    nativeDrawIndexedCpuCommands(
-                        Unmanaged.passUnretained(encoder as AnyObject).toOpaque(),
-                        MTLPrimitiveType.triangle.rawValue,
-                        MTLIndexType.uint16.rawValue,
-                        lifecycleProbe,
-                        raw.baseAddress,
-                        1,
-                        UInt64(raw.count)
-                    )
-                }
             }
 
             let valid = validPacket(buffer: buffer, texture: texture, sampler: sampler)
@@ -331,7 +302,7 @@ private enum ResourceBindingAbiValidationMain {
             commandBuffer.waitUntilCompleted()
             try require(commandBuffer.status == .completed,
                         "Command buffer failed after applying valid resource bindings")
-            print("Native resource binding ABI validation passed (19 negative cases + stale indexed draw)")
+            print("Native resource binding ABI validation passed (19 negative cases + retired CPU replay absent)")
         } catch {
             fputs("Native resource binding ABI validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

@@ -1,6 +1,8 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.lighting.AdvancedLightResidentSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionEmptyTaskSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionTask;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelEmptyTaskSlot;
 import com.metallum.client.voxel.VoxelResidentSlot;
@@ -15,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Associates lifecycle deletion with the exact accepted registry owner. */
 @Mixin(value = RenderSection.class, remap = false)
 abstract class RenderSectionAdvancedLightMixin implements AdvancedLightResidentSlot, VoxelResidentSlot,
-        VoxelEmptyTaskSlot {
+        VoxelEmptyTaskSlot, FrozenReflectionEmptyTaskSlot {
     @Unique
     private Object metallum$advancedLightWorldIdentity;
 
@@ -36,6 +38,9 @@ abstract class RenderSectionAdvancedLightMixin implements AdvancedLightResidentS
 
     @Unique
     private VoxelSectionTask metallum$emptyVoxelSectionTask;
+
+    @Unique
+    private FrozenReflectionSectionTask metallum$emptyFrozenReflectionTask;
 
     @Override
     public void metallum$bindAdvancedLightSection(
@@ -131,9 +136,25 @@ abstract class RenderSectionAdvancedLightMixin implements AdvancedLightResidentS
         return task;
     }
 
+    @Override
+    public synchronized void metallum$setEmptyFrozenReflectionTask(final FrozenReflectionSectionTask task) {
+        if (task == null) {
+            throw new NullPointerException("task");
+        }
+        this.metallum$emptyFrozenReflectionTask = task;
+    }
+
+    @Override
+    public synchronized FrozenReflectionSectionTask metallum$claimEmptyFrozenReflectionTask() {
+        FrozenReflectionSectionTask task = this.metallum$emptyFrozenReflectionTask;
+        this.metallum$emptyFrozenReflectionTask = null;
+        return task;
+    }
+
     @Inject(method = "delete()V", at = @At("HEAD"))
     private void metallum$deleteOwnedAdvancedLights(final CallbackInfo ci) {
         this.metallum$emptyVoxelSectionTask = null;
+        this.metallum$emptyFrozenReflectionTask = null;
         if (this.metallum$advancedLightWorldIdentity != null) {
             com.metallum.client.lighting.AdvancedLightRegistry.global().removeSectionIfOwner(
                     this.metallum$advancedLightWorldIdentity,

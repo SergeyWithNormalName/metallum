@@ -8,9 +8,10 @@ of one-off investigations.
 | --- | --- |
 | Architecture, thread confinement, ABI | [architecture.md](architecture.md) |
 | Native Metal resources and presentation | [metal-renderer.md](metal-renderer.md) |
-| Lighting and local shadows | [lighting.md](lighting.md), [shadows.md](shadows.md), [CLOUD_SHADOWS.md](CLOUD_SHADOWS.md), [WATER_CAUSTICS.md](WATER_CAUSTICS.md) |
+| Lighting and local shadows | [lighting.md](lighting.md), [shadows.md](shadows.md), [CLOUD_SHADOWS.md](CLOUD_SHADOWS.md), [WATER_CAUSTICS.md](WATER_CAUSTICS.md), [GOD_RAYS.md](GOD_RAYS.md) |
 | Resource lifetime | [memory.md](memory.md) |
 | Benchmarks and evidence rules | [BENCHMARKING.md](BENCHMARKING.md) |
+| Global illumination plan and stage contracts | [GLOBAL_ILLUMINATION_PLAN.md](GLOBAL_ILLUMINATION_PLAN.md), [GI_G0.md](GI_G0.md), [GI_G1.md](GI_G1.md), [GI_G2.md](GI_G2.md), [GI_G3.md](GI_G3.md), [GI_G4.md](GI_G4.md), [GI_G5.md](GI_G5.md), [GI_G6.md](GI_G6.md) |
 | Temporal scaling and DRS | [TEMPORAL_UPSCALING_DRS.md](TEMPORAL_UPSCALING_DRS.md) |
 | Frame-interpolation cadence | [promotion-frame-scheduler.md](promotion-frame-scheduler.md) |
 | Current technical priorities | [../TECH_DEBT.md](../TECH_DEBT.md) |

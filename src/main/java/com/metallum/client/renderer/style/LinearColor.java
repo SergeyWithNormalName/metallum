@@ -54,6 +54,55 @@ public record LinearColor(float red, float green, float blue) {
         return new LinearColor(r, g, bl);
     }
 
+    /**
+     * Creates a LinearColor by converting encoded sRGB color channels [0, 1] to linear space.
+     */
+    public static LinearColor fromSrgb(final float srgbRed, final float srgbGreen, final float srgbBlue) {
+        requireFinite(srgbRed, "srgbRed");
+        requireFinite(srgbGreen, "srgbGreen");
+        requireFinite(srgbBlue, "srgbBlue");
+        return new LinearColor(
+                srgbToLinearChannel(Math.max(0.0f, srgbRed)),
+                srgbToLinearChannel(Math.max(0.0f, srgbGreen)),
+                srgbToLinearChannel(Math.max(0.0f, srgbBlue))
+        );
+    }
+
+    /**
+     * Converts the red linear channel to sRGB [0, 1].
+     */
+    public float toSrgbRed() {
+        return linearToSrgbChannel(this.red);
+    }
+
+    /**
+     * Converts the green linear channel to sRGB [0, 1].
+     */
+    public float toSrgbGreen() {
+        return linearToSrgbChannel(this.green);
+    }
+
+    /**
+     * Converts the blue linear channel to sRGB [0, 1].
+     */
+    public float toSrgbBlue() {
+        return linearToSrgbChannel(this.blue);
+    }
+
+    public static float srgbToLinearChannel(final float srgb) {
+        if (srgb <= 0.04045f) {
+            return srgb / 12.92f;
+        }
+        return (float) Math.pow((srgb + 0.055f) / 1.055f, 2.4);
+    }
+
+    public static float linearToSrgbChannel(final float linear) {
+        if (linear <= 0.0031308f) {
+            return linear * 12.92f;
+        }
+        return (float) (1.055 * Math.pow(linear, 1.0 / 2.4) - 0.055);
+    }
+
     private static void requireFinite(final float value, final String name) {
         if (!Float.isFinite(value)) {
             throw new IllegalArgumentException(name + " must be finite");

@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.MetallumMaterialState;
+import com.metallum.client.metal.render.PlanarReflectionRenderer;
 import com.metallum.client.metal.render.SunShadowRenderer;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
@@ -9,6 +10,7 @@ import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderPassBackend;
 import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import net.minecraft.client.renderer.RenderPipelines;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -33,8 +35,16 @@ abstract class RenderPassMixin {
             cancellable = true
     )
     private void metallum$allowFp16SceneAttachment(final RenderPipeline pipeline, final CallbackInfo ci) {
-        if (SunShadowRenderer.isRendering()) {
-            this.backend.setPipeline(pipeline);
+        if (SunShadowRenderer.isRendering() || PlanarReflectionRenderer.isRendering()) {
+            // Mirroring reverses triangle winding. Fancy clouds normally use back-face culling,
+            // which would reject their reflected mesh entirely; the flat-cloud pipeline is the
+            // identical cloud shader contract with culling disabled. Scope the substitution to
+            // this one reflected cloud draw so the main sky and every terrain pipeline are intact.
+            RenderPipeline reflectedPipeline = PlanarReflectionRenderer.isRenderingCloudDraw()
+                            && pipeline == RenderPipelines.CLOUDS
+                    ? RenderPipelines.FLAT_CLOUDS
+                    : pipeline;
+            this.backend.setPipeline(reflectedPipeline);
             ci.cancel();
             return;
         }

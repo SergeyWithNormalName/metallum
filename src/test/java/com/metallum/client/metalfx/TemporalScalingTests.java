@@ -90,6 +90,8 @@ public final class TemporalScalingTests {
         require(BenchmarkScalingMode.parse("temporal_performance")
                         == BenchmarkScalingMode.TEMPORAL_PERFORMANCE,
                 "Temporal benchmark parsing");
+        require(BenchmarkScalingMode.TEMPORAL.temporalMode() == TemporalScalingMode.TEMPORAL,
+                "native Temporal benchmark keeps a 1.0 input scale");
         require(BenchmarkScalingMode.TEMPORAL_PERFORMANCE.spatialMode() == SpatialScalingMode.OFF,
                 "Temporal benchmark disables Spatial");
         require(BenchmarkScalingMode.TEMPORAL_PERFORMANCE.temporalMode()

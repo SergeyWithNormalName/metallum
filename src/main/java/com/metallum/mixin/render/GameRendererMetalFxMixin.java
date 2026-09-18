@@ -1,6 +1,10 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.gi.live.GiLiveRuntime;
+import com.metallum.client.gi.source.GiEnvironmentObservationLatch;
+import com.metallum.client.gi.source.GiDirectSourceRuntime;
+import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.water.WaterCausticsPolicy;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -50,14 +54,14 @@ abstract class GameRendererMetalFxMixin {
     @Shadow @Final
     private GameRenderState gameRenderState;
 
-    private final Matrix4f metallum$previousBaseProjection = new Matrix4f();
     private final Matrix4f metallum$cameraInverse = new Matrix4f();
     private final Matrix4f metallum$jitteredProjection = new Matrix4f();
     private final Matrix4f metallum$postProjectionTransform = new Matrix4f();
-    private boolean metallum$hasPreviousBaseProjection;
     private Entity metallum$previousCameraEntity;
     private Object metallum$dimensionKey;
     private long metallum$dimensionIdentity;
+    private final GiEnvironmentObservationLatch metallum$giEnvironmentLatch =
+            new GiEnvironmentObservationLatch();
 
     @Inject(method = "render", at = @At("HEAD"))
     private void metallum$applyDeferredScale(final CallbackInfo ci) {
@@ -175,13 +179,6 @@ abstract class GameRendererMetalFxMixin {
             int displayWidth = MetalFxUpscaling.configuredDisplayWidth(this.mainRenderTarget.width);
             int displayHeight = MetalFxUpscaling.configuredDisplayHeight(this.mainRenderTarget.height);
             device.publishRendererGenerationState(displayWidth, displayHeight);
-            if (this.metallum$hasPreviousBaseProjection
-                    && !this.metallum$previousBaseProjection.equals(camera.projectionMatrix)) {
-                TemporalResetEvents.signal(FrameState.HistoryResetReason.FOV_PROJECTION_CHANGE);
-            }
-            this.metallum$previousBaseProjection.set(camera.projectionMatrix);
-            this.metallum$hasPreviousBaseProjection = true;
-
             Entity cameraEntity = this.minecraft.getCameraEntity();
             if (this.metallum$previousCameraEntity != null
                     && cameraEntity != this.metallum$previousCameraEntity) {
@@ -229,7 +226,7 @@ abstract class GameRendererMetalFxMixin {
             Matrix4 view = matrix(camera.viewRotationMatrix);
             Matrix4 cameraMatrix = matrix(this.metallum$cameraInverse);
             Matrix4 projection = matrix(jitteredProjection);
-            Matrix4 unjitteredProjection = matrix(finalProjection);
+            Matrix4 unjitteredProjection = matrix(camera.projectionMatrix);
             FrameState.Transforms transforms = new FrameState.Transforms(
                     cameraMatrix,
                     view,
@@ -246,6 +243,31 @@ abstract class GameRendererMetalFxMixin {
                 );
             }
             EnvironmentDescriptor environment = metallum$environmentDescriptor(camera, deltaTracker);
+            long worldIdentity = Integer.toUnsignedLong(
+                    System.identityHashCode(this.minecraft.level)
+            );
+            EnvironmentDescriptor observedGiEnvironment = (GiDirectSourceRuntime.isRequested()
+                    || GiTransportRuntime.isRequested())
+                    ? GiTransportRuntime.stabilizeDebugEnvironment(
+                            this.metallum$dimensionIdentity,
+                            metallum$environmentDescriptor(camera, deltaTracker, true)
+                    )
+                    : EnvironmentDescriptor.NONE;
+            EnvironmentDescriptor giEnvironment = observedGiEnvironment;
+            boolean giEnvironmentReady = true;
+            if (GiLiveRuntime.isRequested()) {
+                // The extractor refreshes all physical sky coefficients together only on this
+                // boundary. Retain that coherent source packet across intervening render submits;
+                // interpolated raw sun values are not a new source authority between ticks.
+                EnvironmentDescriptor coherentGiEnvironment =
+                        this.metallum$giEnvironmentLatch.observe(
+                                this.minecraft.level, observedGiEnvironment,
+                                this.gameRenderState.lightmapRenderState.needsUpdate
+                        );
+                giEnvironmentReady = coherentGiEnvironment != null;
+                giEnvironment = giEnvironmentReady
+                        ? coherentGiEnvironment : EnvironmentDescriptor.NONE;
+            }
             com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow =
                     metallum$cloudShadowFrameState(environment, deltaTracker, device);
             device.publishFrameState(new FrameCapture(
@@ -254,10 +276,12 @@ abstract class GameRendererMetalFxMixin {
                     deltaSeconds,
                     0.05,
                     camera.depthFar,
-                    Integer.toUnsignedLong(System.identityHashCode(this.minecraft.level)),
+                    worldIdentity,
                     this.metallum$dimensionIdentity,
                     environment,
-                    cloudShadow
+                    cloudShadow,
+                    giEnvironment,
+                    giEnvironmentReady
             ));
             return projectionBuffer.getBuffer(jitteredProjection);
         }
@@ -275,6 +299,8 @@ abstract class GameRendererMetalFxMixin {
         net.minecraft.client.CloudStatus cloudStatus = this.minecraft.options.cloudStatus().get();
         float cloudHeight = this.gameRenderState.levelRenderState.cloudHeight;
         int cloudColor = this.gameRenderState.levelRenderState.cloudColor;
+        SkyRenderState sky = this.gameRenderState.levelRenderState.skyRenderState;
+        int cloudRange = this.minecraft.options.cloudRange().get();
         long gameTime = this.gameRenderState.levelRenderState.gameTime;
         float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
         com.metallum.client.lighting.cloud.CloudShadowSource source = device.cloudShadowSource();
@@ -282,6 +308,9 @@ abstract class GameRendererMetalFxMixin {
                 cloudStatus,
                 cloudHeight,
                 cloudColor,
+                sky.skyColor,
+                sky.sunriseAndSunsetColor,
+                cloudRange,
                 gameTime,
                 partialTick,
                 environment,
@@ -293,7 +322,17 @@ abstract class GameRendererMetalFxMixin {
             final CameraRenderState camera,
             final DeltaTracker deltaTracker
     ) {
-        EnvironmentDescriptor.Medium medium = switch (camera.fogType) {
+        return metallum$environmentDescriptor(camera, deltaTracker, false);
+    }
+
+    private EnvironmentDescriptor metallum$environmentDescriptor(
+            final CameraRenderState camera,
+            final DeltaTracker deltaTracker,
+            final boolean directSource
+    ) {
+        EnvironmentDescriptor.Medium medium = directSource
+                ? EnvironmentDescriptor.Medium.AIR
+                : switch (camera.fogType) {
             case WATER -> EnvironmentDescriptor.Medium.WATER;
             case LAVA -> EnvironmentDescriptor.Medium.LAVA;
             case POWDER_SNOW -> EnvironmentDescriptor.Medium.POWDER_SNOW;
@@ -326,7 +365,7 @@ abstract class GameRendererMetalFxMixin {
             float waterSurfaceY = 64.0f;
             com.metallum.client.lighting.LightningEnvironmentPolicy.FlashContribution flash =
                     com.metallum.client.lighting.LightningEnvironmentPolicy.FlashContribution.NONE;
-            if (camera.pos != null && this.minecraft.level != null) {
+            if (!directSource && camera.pos != null && this.minecraft.level != null) {
                 waterSurfaceY = WaterCausticsPolicy.resolveWaterSurfaceY(
                         this.minecraft.level,
                         camera.pos.x,

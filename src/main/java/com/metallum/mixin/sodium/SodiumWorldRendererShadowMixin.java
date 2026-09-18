@@ -1,5 +1,7 @@
 package com.metallum.mixin.sodium;
 
+import com.metallum.client.metal.render.PlanarReflectionRenderer;
+import com.metallum.client.sodium.SodiumPlanarReflectionLists;
 import com.metallum.client.sodium.SodiumShadowCasterLists;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderer;
@@ -38,6 +40,11 @@ abstract class SodiumWorldRendererShadowMixin {
     ) {
         RenderSectionManagerShadowAccess access =
                 (RenderSectionManagerShadowAccess) this.renderSectionManager;
+        if (PlanarReflectionRenderer.activeTerrainToken() != 0L) {
+            return SodiumPlanarReflectionLists.select(
+                    ordinaryLists, access.metallum$shadowRegions()
+            );
+        }
         return SodiumShadowCasterLists.select(ordinaryLists, access.metallum$shadowRegions());
     }
 }

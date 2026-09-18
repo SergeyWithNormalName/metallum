@@ -1,16 +1,20 @@
 package com.metallum.client.gui;
 
+import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
+import com.metallum.client.lighting.reflection.CloudReflectionConfig;
+import com.metallum.client.lighting.reflection.WaterReflectionConfig;
+import com.metallum.client.lighting.reflection.WaterReflectionMode;
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
+import com.metallum.client.lighting.shader.L6TemporalShadowExperimentConfig;
 import com.metallum.client.metal.render.MetalDevice;
-import com.metallum.client.metalfx.MetalFxSpatialScaling;
-import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metalfx.MetalFxUpscalingMode;
-import com.metallum.client.metalfx.SpatialScalingMode;
-import com.metallum.client.metalfx.TemporalScalingMode;
+import com.metallum.client.renderer.GlobalIlluminationMode;
+import com.metallum.client.renderer.GraphicsPreset;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.style.VisualStyle;
@@ -18,12 +22,14 @@ import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.voxel.VoxelPreviewMode;
 import com.metallum.client.voxel.VoxelPreviewSettings;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
+import net.caffeinemc.mods.sodium.api.config.ConfigState;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
+import net.caffeinemc.mods.sodium.client.config.structure.Config;
+import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
-import net.minecraft.client.Minecraft;
 
 import java.util.Locale;
 
@@ -33,24 +39,38 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     };
 
     @Override
-    public void registerConfigLate(ConfigBuilder builder) {
+    public void registerConfigLate(final ConfigBuilder builder) {
         builder.registerOwnModOptions()
             .setName("Metallum")
             .addPage(builder.createOptionPage()
                 .setName(Component.translatable("metallum.options.page"))
+                // 1. Основные настройки (Quick Settings / Summary)
                 .addOptionGroup(builder.createOptionGroup()
-                    .setName(Component.translatable("metallum.options.group.lighting"))
+                    .setName(Component.translatable("metallum.options.group.summary"))
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "graphics_preset"),
+                                GraphicsPreset.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.graphics_preset.name"))
+                            .setTooltip(Component.translatable("metallum.options.graphics_preset.tooltip"))
+                            .setElementNameProvider(preset -> Component.translatable(preset.translationKey()))
+                            .setDefaultValue(GraphicsPreset.BALANCED)
+                            .setBinding(
+                                    GraphicsPreset::apply,
+                                    GraphicsPreset::detect
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
+                    )
                     .addOption(builder.createEnumOption(
                                 Identifier.fromNamespaceAndPath("metallum", "visual_style"),
                                 VisualStyle.class
                             )
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.visual_style.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.visual_style.tooltip"
-                            ))
+                            .setName(Component.translatable("metallum.options.visual_style.name"))
+                            .setTooltip(Component.translatable("metallum.options.visual_style.tooltip"))
                             .setElementNameProvider(style -> Component.translatable(
                                     "metallum.options.visual_style." + style.persistentName()
                             ))
@@ -58,65 +78,6 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setBinding(
                                     MetallumSodiumConfig::setVisualStyle,
                                     VisualStyleRuntime::activeStyle
-                            )
-                    )
-                    .addOption(builder.createBooleanOption(
-                                Identifier.fromNamespaceAndPath("metallum", "improved_lighting")
-                            )
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.improved_lighting.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.improved_lighting.tooltip"
-                            ))
-                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
-                            .setDefaultValue(false)
-                            .setBinding(
-                                    MetallumSodiumConfig::setImprovedLighting,
-                                    () -> RendererConfig.load().improvedLighting()
-                            )
-                    )
-                    .addOption(builder.createEnumOption(
-                                Identifier.fromNamespaceAndPath("metallum", "lighting_preset"),
-                                LightingPreset.class
-                            )
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.lighting_preset.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.lighting_preset.tooltip"
-                            ))
-                            .setElementNameProvider(preset -> Component.translatable(
-                                    "metallum.options.lighting_preset."
-                                            + preset.name().toLowerCase(Locale.ROOT)
-                            ))
-                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
-                            .setDefaultValue(LightingPreset.BALANCED)
-                            .setBinding(
-                                    MetallumSodiumConfig::setLightingPreset,
-                                    () -> RendererConfig.load().lightingPreset()
-                            )
-                    )
-                )
-                .addOptionGroup(builder.createOptionGroup()
-                    .setName(Component.translatable("metallum.options.group.metalfx"))
-                    .addOption(builder.createBooleanOption(
-                                Identifier.fromNamespaceAndPath("metallum", "frame_interpolation")
-                            )
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.frame_interpolation.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.frame_interpolation.tooltip"
-                            ))
-                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
-                            .setDefaultValue(false)
-                            .setBinding(
-                                    MetallumSodiumConfig::setFrameInterpolation,
-                                    () -> RendererConfig.load().frameInterpolation()
                             )
                     )
                     .addOption(builder.createEnumOption(
@@ -132,6 +93,20 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                                     MetalFxUpscaling::setRequestedMode,
                                     MetalFxUpscaling::requestedMode
                             )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "hdr_enabled"))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.hdr_enabled.name"))
+                            .setTooltip(Component.translatable("metallum.options.hdr_enabled.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    enabled -> updateConfig(c -> new HdrConfig(enabled ? HdrMode.AUTO : HdrMode.OFF, c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
+                                    () -> getConfig().mode() != HdrMode.OFF
+                            )
                     )
                     .addOption(builder.createBooleanOption(
                                 Identifier.fromNamespaceAndPath("metallum", "metalfx_resolution_overlay")
@@ -146,71 +121,228 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             )
                     )
                 )
+                // 2. Освещение и глобальный свет (Lighting & Global Illumination)
                 .addOptionGroup(builder.createOptionGroup()
-                    .setName(Component.translatable("metallum.options.group.hdr"))
-                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "hdr_enabled"))
-                        .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.translatable("metallum.options.hdr_enabled.name"))
-                        .setTooltip(Component.translatable("metallum.options.hdr_enabled.tooltip"))
-                        .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
-                        .setDefaultValue(true)
-                        .setBinding(
-                            enabled -> updateConfig(c -> new HdrConfig(enabled ? HdrMode.AUTO : HdrMode.OFF, c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
-                            () -> getConfig().mode() != HdrMode.OFF
-                        )
+                    .setName(Component.translatable("metallum.options.group.lighting"))
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "improved_lighting")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.improved_lighting.name"))
+                            .setTooltip(Component.translatable("metallum.options.improved_lighting.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setImprovedLighting,
+                                    () -> RendererConfig.load().improvedLighting()
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
                     )
-                    .addOption(builder.createEnumOption(Identifier.fromNamespaceAndPath("metallum", "source_encoding"), HdrSourceEncoding.class)
-                        .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.translatable("metallum.options.source_encoding.name"))
-                        .setTooltip(Component.translatable("metallum.options.source_encoding.tooltip"))
-                        .setElementNameProvider(mode -> Component.translatable("metallum.options.source_encoding." + mode.name().toLowerCase(Locale.ROOT)))
-                        .setDefaultValue(HdrSourceEncoding.SRGB)
-                        .setBinding(
-                            encoding -> updateConfig(c -> new HdrConfig(c.mode(), encoding, c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
-                            () -> getConfig().sourceEncoding()
-                        )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "global_illumination"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.global_illumination.name"))
+                            .setTooltip(Component.translatable("metallum.options.global_illumination.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setGlobalIllumination,
+                                    () -> RendererConfig.load().globalIllumination().isDynamic()
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
+                    )
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "lighting_preset"),
+                                LightingPreset.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.lighting_preset.name"))
+                            .setTooltip(Component.translatable("metallum.options.lighting_preset.tooltip"))
+                            .setElementNameProvider(preset -> Component.translatable(
+                                    "metallum.options.lighting_preset."
+                                            + preset.name().toLowerCase(Locale.ROOT)
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(LightingPreset.BALANCED)
+                            .setBinding(
+                                    MetallumSodiumConfig::setLightingPreset,
+                                    () -> RendererConfig.load().lightingPreset()
+                            )
                     )
                 )
+                // 3. Тени (Shadows)
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.shadows"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "experimental_shadows"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.experimental_shadows.name"))
+                            .setTooltip(Component.translatable("metallum.options.experimental_shadows.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    L6TemporalShadowExperimentConfig::setEnabled,
+                                    L6TemporalShadowExperimentConfig::isEnabled
+                            )
+                    )
+                )
+                // 4. Отражения (Reflections)
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.reflections"))
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "water_reflection_mode"),
+                                WaterReflectionMode.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.water_reflection_mode.name"))
+                            .setTooltip(Component.translatable("metallum.options.water_reflection_mode.tooltip"))
+                            .setElementNameProvider(mode -> {
+                                boolean needsRestart = WaterReflectionConfig.isRestartRequiredFor(mode);
+                                String suffix = needsRestart ? ".restart" : "";
+                                return Component.translatable(
+                                        "metallum.options.water_reflection_mode." + mode.persistentName() + suffix
+                                );
+                            })
+                            .setDefaultValue(WaterReflectionMode.OFF)
+                            .setBinding(
+                                    WaterReflectionConfig::setMode,
+                                    WaterReflectionConfig::getPersistedMode
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "cloud_reflections")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.cloud_reflections.name"))
+                            .setTooltip(Component.translatable("metallum.options.cloud_reflections.tooltip"))
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    CloudReflectionConfig::setEnabled,
+                                    CloudReflectionConfig::isEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_reflection_face_aware_appearance"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.water_reflection_face_aware_appearance.name"))
+                            .setTooltip(Component.translatable("metallum.options.water_reflection_face_aware_appearance.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    WaterReflectionQualityConfig::setFaceAwareAppearanceEnabled,
+                                    WaterReflectionQualityConfig::isFaceAwareAppearanceEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_reflection_first_surface_integration"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.water_reflection_first_surface_integration.name"))
+                            .setTooltip(Component.translatable("metallum.options.water_reflection_first_surface_integration.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    WaterReflectionQualityConfig::setFirstSurfaceBiasedIntegrationEnabled,
+                                    WaterReflectionQualityConfig::isFirstSurfaceBiasedIntegrationEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_reflection_representation_confidence"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.water_reflection_representation_confidence.name"))
+                            .setTooltip(Component.translatable("metallum.options.water_reflection_representation_confidence.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    WaterReflectionQualityConfig::setRepresentationConfidenceEnabled,
+                                    WaterReflectionQualityConfig::isRepresentationConfidenceEnabled
+                            )
+                    )
+                )
+                // 5. Постобработка и HDR (Post-Processing & HDR)
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.post_processing"))
+                    .addOption(builder.createEnumOption(Identifier.fromNamespaceAndPath("metallum", "source_encoding"), HdrSourceEncoding.class)
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.source_encoding.name"))
+                            .setTooltip(Component.translatable("metallum.options.source_encoding.tooltip"))
+                            .setElementNameProvider(mode -> Component.translatable("metallum.options.source_encoding." + mode.name().toLowerCase(Locale.ROOT)))
+                            .setDefaultValue(HdrSourceEncoding.SRGB)
+                            .setBinding(
+                                    encoding -> updateConfig(c -> new HdrConfig(c.mode(), encoding, c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
+                                    () -> getConfig().sourceEncoding()
+                            )
+                    )
                     .addOption(builder.createIntegerOption(Identifier.fromNamespaceAndPath("metallum", "hdr_strength"))
-                        .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.translatable("metallum.options.hdr_strength.name"))
-                        .setTooltip(Component.translatable("metallum.options.hdr_strength.tooltip"))
-                        .setDefaultValue(100)
-                        .setRange(0, 200, 5)
-                        .setValueFormatter(val -> Component.literal(String.format(Locale.ROOT, "%.2f", val / 100.0f)))
-                        .setBinding(
-                            val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), val / 100.0f, c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
-                            () -> (int) (getConfig().hdrStrength() * 100)
-                        )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.hdr_strength.name"))
+                            .setTooltip(Component.translatable("metallum.options.hdr_strength.tooltip"))
+                            .setDefaultValue(100)
+                            .setRange(0, 200, 5)
+                            .setValueFormatter(val -> Component.literal(String.format(Locale.ROOT, "%.2f", val / 100.0f)))
+                            .setBinding(
+                                    val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), val / 100.0f, c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
+                                    () -> (int) (getConfig().hdrStrength() * 100)
+                            )
                     )
                     .addOption(builder.createIntegerOption(Identifier.fromNamespaceAndPath("metallum", "bloom_strength"))
-                        .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.translatable("metallum.options.bloom_strength.name"))
-                        .setTooltip(Component.translatable("metallum.options.bloom_strength.tooltip"))
-                        .setDefaultValue(22)
-                        .setRange(0, 100, 1)
-                        .setValueFormatter(val -> Component.literal(String.format(Locale.ROOT, "%.2f", val / 100.0f)))
-                        .setBinding(
-                            val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), c.hdrStrength(), val / 100.0f, c.diagnosticPattern(), c.experimentalFp16())),
-                            () -> (int) (getConfig().bloomStrength() * 100)
-                        )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.bloom_strength.name"))
+                            .setTooltip(Component.translatable("metallum.options.bloom_strength.tooltip"))
+                            .setDefaultValue(22)
+                            .setRange(0, 100, 1)
+                            .setValueFormatter(val -> Component.literal(String.format(Locale.ROOT, "%.2f", val / 100.0f)))
+                            .setBinding(
+                                    val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), c.hdrStrength(), val / 100.0f, c.diagnosticPattern(), c.experimentalFp16())),
+                                    () -> (int) (getConfig().bloomStrength() * 100)
+                            )
+                    )
+                    .addOption(builder.createIntegerOption(
+                                Identifier.fromNamespaceAndPath("metallum", "god_ray_intensity")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.god_ray_intensity.name"))
+                            .setTooltip(Component.translatable("metallum.options.god_ray_intensity.tooltip"))
+                            .setDefaultValue(30)
+                            .setRange(0, 100, 5)
+                            .setValueFormatter(val -> Component.literal(val + "%"))
+                            .setBinding(
+                                    val -> com.metallum.client.lighting.GodRayVisibilityDiagnostic.setIntensity(val / 100.0f),
+                                    () -> (int) (com.metallum.client.lighting.GodRayVisibilityDiagnostic.intensity() * 100.0f)
+                            )
                     )
                 )
+                // 6. Экспериментальные и диагностика (Advanced & Diagnostics)
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.experimental"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "experimental_fp16"))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.experimental_fp16.name"))
+                            .setTooltip(Component.translatable("metallum.options.experimental_fp16.tooltip"))
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), val)),
+                                    () -> getConfig().experimentalFp16()
+                            )
+                    )
                     .addOption(builder.createEnumOption(
                                 Identifier.fromNamespaceAndPath("metallum", "voxel_preview_mode"),
                                 VoxelPreviewMode.class
                             )
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_preview_mode.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_preview_mode.tooltip"
-                            ))
+                            .setName(Component.translatable("metallum.options.voxel_preview_mode.name"))
+                            .setTooltip(Component.translatable("metallum.options.voxel_preview_mode.tooltip"))
                             .setElementNameProvider(mode -> Component.translatable(
                                     "metallum.options.voxel_preview_mode."
                                             + mode.name().toLowerCase(Locale.ROOT)
@@ -223,12 +355,8 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                                     "metallum", "voxel_preview_level"
                             ))
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_preview_level.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_preview_level.tooltip"
-                            ))
+                            .setName(Component.translatable("metallum.options.voxel_preview_level.name"))
+                            .setTooltip(Component.translatable("metallum.options.voxel_preview_level.tooltip"))
                             .setDefaultValue(0)
                             .setRange(0, 2, 1)
                             .setValueFormatter(value -> Component.literal(Integer.toString(value)))
@@ -239,12 +367,8 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                                     "metallum", "voxel_preview_slice"
                             ))
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_preview_slice.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_preview_slice.tooltip"
-                            ))
+                            .setName(Component.translatable("metallum.options.voxel_preview_slice.name"))
+                            .setTooltip(Component.translatable("metallum.options.voxel_preview_slice.tooltip"))
                             .setDefaultValue(0)
                             .setRange(0, 383, 1)
                             .setValueFormatter(value -> Component.literal(Integer.toString(value)))
@@ -255,12 +379,8 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                                     "metallum", "voxel_debug_checksum"
                             ))
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_debug_checksum.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_debug_checksum.tooltip"
-                            ))
+                            .setName(Component.translatable("metallum.options.voxel_debug_checksum.name"))
+                            .setTooltip(Component.translatable("metallum.options.voxel_debug_checksum.tooltip"))
                             .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
                             .setDefaultValue(false)
                             .setBinding(
@@ -268,30 +388,64 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                                     () -> RendererConfig.load().voxelDebugChecksum()
                             )
                     )
-                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "diagnostic_pattern"))
-                        .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.translatable("metallum.options.diagnostic_pattern.name"))
-                        .setTooltip(Component.translatable("metallum.options.diagnostic_pattern.tooltip"))
-                        .setDefaultValue(false)
-                        .setBinding(
-                            val -> updateConfig(c -> c.withDiagnosticPattern(val)),
-                            () -> getConfig().diagnosticPattern()
-                        )
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "god_ray_debug")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.god_ray_debug.name"))
+                            .setTooltip(Component.translatable("metallum.options.god_ray_debug.tooltip"))
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::setActive,
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::isActive
+                            )
                     )
-                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "experimental_fp16"))
-                        .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.translatable("metallum.options.experimental_fp16.name"))
-                        .setTooltip(Component.translatable("metallum.options.experimental_fp16.tooltip"))
-                        .setDefaultValue(false)
-                        .setBinding(
-                            val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), val)),
-                            () -> getConfig().experimentalFp16()
-                        )
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "god_ray_debug_mode"),
+                                com.metallum.client.lighting.GodRayVisibilityDiagnostic.Mode.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.god_ray_debug_mode.name"))
+                            .setTooltip(Component.translatable("metallum.options.god_ray_debug_mode.tooltip"))
+                            .setElementNameProvider(mode -> Component.translatable(
+                                    "metallum.options.god_ray_debug_mode."
+                                            + mode.name().toLowerCase(Locale.ROOT)
+                            ))
+                            .setDefaultValue(com.metallum.client.lighting.GodRayVisibilityDiagnostic.Mode.FROXEL)
+                            .setBinding(
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::setMode,
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::mode
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "diagnostic_pattern"))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.diagnostic_pattern.name"))
+                            .setTooltip(Component.translatable("metallum.options.diagnostic_pattern.tooltip"))
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    val -> updateConfig(c -> c.withDiagnosticPattern(val)),
+                                    () -> getConfig().diagnosticPattern()
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "gi_g4_debug_hud"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.gi_g4_debug_hud.name"))
+                            .setTooltip(Component.translatable("metallum.options.gi_g4_debug_hud.tooltip"))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setGiTransportDebugEnabled,
+                                    GiTransportDebugSettings::isEnabled
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
                     )
                 )
             );
     }
-
 
     private static Component upscalingTooltip(final MetalFxUpscalingMode mode) {
         Minecraft minecraft = Minecraft.getInstance();
@@ -315,6 +469,13 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                     displayHeight
             );
         }
+        if (mode == MetalFxUpscalingMode.TEMPORAL_FI) {
+            return Component.translatable(
+                    "metallum.options.metalfx_upscaling.tooltip.temporal_fi",
+                    displayWidth,
+                    displayHeight
+            );
+        }
         return Component.translatable(
                 "metallum.options.metalfx_upscaling.tooltip.temporal",
                 displayWidth,
@@ -333,19 +494,55 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     }
 
     private static void setImprovedLighting(final boolean enabled) {
-        RendererConfig.load().withImprovedLighting(enabled).save();
+        applyImprovedLightingSelection(RendererConfig.load(), enabled).save();
     }
 
     private static void setLightingPreset(final LightingPreset preset) {
         RendererConfig.load().withLightingPreset(preset).save();
     }
 
-    private static void setFrameInterpolation(final boolean enabled) {
-        RendererConfig.load().withFrameInterpolation(enabled).save();
-    }
-
     private static void setVoxelDebugChecksum(final boolean enabled) {
         RendererConfig.load().withVoxelDebugChecksum(enabled).save();
+    }
+
+    private static void setGlobalIllumination(final boolean enabled) {
+        if (enabled) {
+            GiTransportDebugSettings.setEnabled(false);
+        }
+        applyGlobalIlluminationSelection(RendererConfig.load(), enabled).save();
+    }
+
+    private static void setGiTransportDebugEnabled(final boolean enabled) {
+        if (enabled) {
+            applyGlobalIlluminationSelection(RendererConfig.load(), false).save();
+        }
+        GiTransportDebugSettings.setEnabled(enabled);
+    }
+
+    static void resynchronizeCoupledSodiumBindings(final ConfigState state) {
+        if (state instanceof Config config) {
+            config.resetAllOptionsFromBindings();
+        }
+    }
+
+    static RendererConfig applyImprovedLightingSelection(
+            final RendererConfig current,
+            final boolean enabled
+    ) {
+        RendererConfig updated = current.withImprovedLighting(enabled);
+        return enabled
+                ? updated
+                : updated.withGlobalIllumination(GlobalIlluminationMode.OFF);
+    }
+
+    static RendererConfig applyGlobalIlluminationSelection(
+            final RendererConfig current,
+            final boolean enabled
+    ) {
+        RendererConfig updated = current.withGlobalIllumination(
+                enabled ? GlobalIlluminationMode.DYNAMIC : GlobalIlluminationMode.OFF
+        );
+        return enabled ? updated.withImprovedLighting(true) : updated;
     }
 
     private static void updateConfig(java.util.function.Function<HdrConfig, HdrConfig> updater) {

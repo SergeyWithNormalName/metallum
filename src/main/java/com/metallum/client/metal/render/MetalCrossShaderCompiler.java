@@ -4,11 +4,19 @@ import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.gi.receiver.GiReceiverBindingAbi;
+import com.metallum.client.gi.receiver.GiReceiverLayout;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
+import com.metallum.client.gi.live.GiLiveRuntime;
+import com.metallum.client.lighting.reflection.VertexReflectionBindingAbi;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.lighting.shader.CloudShadowBindingAbi;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
+import com.metallum.client.lighting.shader.L6TemporalShaderPatcher;
+import com.metallum.client.lighting.shader.L6TemporalShadowExperiment;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
@@ -24,6 +32,8 @@ import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout.VulkanBindGroupEntryType;
 import com.mojang.blaze3d.vulkan.glsl.*;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.client.renderer.ShaderDefines;
+import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -48,6 +58,10 @@ final class MetalCrossShaderCompiler {
     private static final Map<String, Integer> L8_REACTIVE_OUTPUT_LOCATIONS = Map.of(
             "fragColor", 0,
             "metallumL8ReactiveMask", 1
+    );
+    private static final Map<String, Integer> L6_TEMPORAL_OUTPUT_LOCATIONS = Map.of(
+            "fragColor", 0,
+            L6TemporalShaderPatcher.HISTORY_OUTPUT, 1
     );
     private static final String VOXEL_TRAVERSAL_LOOP_MSL =
             "    for (uint hardStep = 0u; hardStep < maxSteps; hardStep++)";
@@ -184,6 +198,31 @@ final class MetalCrossShaderCompiler {
                                 reactive
                         );
                         variants.put(HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE, reactive);
+
+                        if (L6TemporalShadowExperiment.enabled()
+                                && isSodiumOpaqueTerrainReceiverPipeline(pipeline)) {
+                            try {
+                                MetalCompiledRenderPipeline.ShaderVariantSource temporal = compileVariant(
+                                        device,
+                                        pipeline,
+                                        shaderSource,
+                                        HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
+                                );
+                                validateVariantParity(
+                                        pipeline,
+                                        HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL,
+                                        legacy,
+                                        temporal
+                                );
+                                variants.put(HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL, temporal);
+                            } catch (ShaderCompileException | RuntimeException exception) {
+                                AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                                        "failed to compile METALLUM_ADVANCED_L6_TEMPORAL for "
+                                                + pipeline.getLocation() + ": "
+                                                + failureMessage(exception)
+                                );
+                            }
+                        }
 
                         try {
                             MetalCompiledRenderPipeline.ShaderVariantSource reactiveAmbient = compileVariant(
@@ -369,17 +408,24 @@ final class MetalCrossShaderCompiler {
             final HdrShaderFlavor flavor,
             @Nullable final List<MetalCompiledRenderPipeline.ResourceBinding> canonicalResources
     ) throws ShaderCompileException {
+        boolean vertexReflection = VertexReflectionExperiment.isLayoutEnabled()
+                && isSodiumReflectionTerrainPipeline(pipeline)
+                && isAdvancedFlavor(flavor);
+        ShaderDefines vertexDefines = vertexReflection
+                ? withVertexReflectionDefine(pipeline.getShaderDefines())
+                : pipeline.getShaderDefines();
+        ShaderDefines fragmentDefines = vertexDefines;
         IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(
                 pipeline.getVertexShader(),
                 ShaderType.VERTEX,
-                pipeline.getShaderDefines(),
+                vertexDefines,
                 shaderSource,
                 flavor
         );
         IntermediaryShaderModule fragmentSpirv = device.getOrCompileShader(
                 pipeline.getFragmentShader(),
                 ShaderType.FRAGMENT,
-                pipeline.getShaderDefines(),
+                fragmentDefines,
                 shaderSource,
                 flavor
         );
@@ -388,22 +434,27 @@ final class MetalCrossShaderCompiler {
                     "Couldn't compile " + flavor + " shader for pipeline " + pipeline.getLocation()
             );
         }
+        IntermediaryShaderModule vertexLayoutSpirv = withoutExternalVertexReflectionSamplers(
+                vertexSpirv,
+                flavor
+        );
         IntermediaryShaderModule fragmentLayoutSpirv = withoutExternalShadowSamplers(
                 fragmentSpirv,
                 flavor
         );
+        fragmentLayoutSpirv = withoutExternalL6TemporalResources(fragmentLayoutSpirv, flavor);
 
         List<VulkanBindGroupLayout.Entry> layoutEntries = new ArrayList<>();
         if (canonicalResources != null) {
             seedCanonicalLayout(layoutEntries, canonicalResources);
         }
-        addToBindGroup(layoutEntries, vertexSpirv, pipeline);
+        addToBindGroup(layoutEntries, vertexLayoutSpirv, pipeline);
         addToBindGroup(layoutEntries, fragmentLayoutSpirv, pipeline);
         canonicalizeLayoutEntries(layoutEntries);
         List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
 
-        vertexSpirv.rebind(
-                tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexSpirv.inputs()),
+        vertexLayoutSpirv.rebind(
+                tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexLayoutSpirv.inputs()),
                 layoutEntries
         );
         MslShader vertexMsl = spirvToMsl(
@@ -418,11 +469,13 @@ final class MetalCrossShaderCompiler {
         );
         boolean reactive = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+        boolean temporal = flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL;
         MslShader fragmentMsl = spirvToMsl(
                 fragmentSpirv.spirv(),
                 layoutEntries.size(),
                 Map.of(),
-                reactive ? L8_REACTIVE_OUTPUT_LOCATIONS : Map.of()
+                reactive ? L8_REACTIVE_OUTPUT_LOCATIONS
+                        : temporal ? L6_TEMPORAL_OUTPUT_LOCATIONS : Map.of()
         );
 
         String fragmentSource = isAdvancedFlavor(flavor)
@@ -430,6 +483,8 @@ final class MetalCrossShaderCompiler {
                 : fragmentMsl.source();
         if (reactive) {
             validateL8ReactiveMslOutputs(fragmentSource);
+        } else if (temporal) {
+            validateL6TemporalMslOutputs(fragmentSource);
         }
         String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
         String fragmentEntryPoint = extractEntryPoint(fragmentSource, FRAGMENT_ENTRY_PATTERN, "main0");
@@ -540,11 +595,12 @@ final class MetalCrossShaderCompiler {
         }
         // The GLSL ablation removes receiver work, not the original external sampler
         // declarations.  They must still be stripped from the intermediary module so
-        // the generated Metal diagnostic variant has no L4/cloud texture/sampler bindings.
-        int expectedRemoved = EnvironmentShadowBindingAbi.shadowTextureSlots().length + 1;
+        // the generated Metal diagnostic variant has no external L4/cloud texture/sampler bindings.
+        int expectedRemoved = AdvancedDirectLightingShaderPatcher.totalExternalSamplerCount();
         if (removed != expectedRemoved) {
             throw new IllegalStateException(
-                    "Advanced fragment must expose exactly four external L4/cloud shadow samplers (removed " + removed + ", expected " + expectedRemoved + ")"
+                    "Advanced fragment must expose exactly " + expectedRemoved
+                            + " external L4/cloud shadow samplers (removed " + removed + ")"
             );
         }
         return new IntermediaryShaderModule(
@@ -554,6 +610,95 @@ final class MetalCrossShaderCompiler {
                 filtered,
                 module.outputs(),
                 module.inputs()
+        );
+    }
+
+    /** Temporal history is native-owned just like the existing L4 samplers; it must not enter
+     * Mojang's canonical bind group or parity comparisons. */
+    private static IntermediaryShaderModule withoutExternalL6TemporalResources(
+            final IntermediaryShaderModule module,
+            final HdrShaderFlavor flavor
+    ) {
+        if (flavor != HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL) {
+            return module;
+        }
+        var samplers = module.samplers().stream()
+                .filter(sampler -> !L6TemporalShaderPatcher.HISTORY_SAMPLER.equals(sampler.name()))
+                .toList();
+        // The params declaration is an SSBO, so Mojang's intermediary layout does not
+        // expose it in uniformBuffers. Its exact native slot and byte layout are checked
+        // later against generated MSL; only the sampled history enters this sampler list.
+        if (samplers.size() + 1 != module.samplers().size()) {
+            throw new IllegalStateException(
+                    "L6 temporal shader did not expose exactly one native history sampler"
+                            + "; samplers=" + module.samplers().stream().map(SpvSampler::name).toList()
+            );
+        }
+        return new IntermediaryShaderModule(
+                module.name(), module.spirv(), module.uniformBuffers(), samplers,
+                module.outputs(), module.inputs()
+        );
+    }
+
+    /**
+     * Reflection textures are native-owned external vertex bindings, not ordinary pipeline
+     * descriptors. Keep the GLSL name in SPIR-V so MSL declares slot 10, but omit it
+     * from the canonical bind group (which otherwise tries to create Java-owned samplers).
+     */
+    private static IntermediaryShaderModule withoutExternalVertexReflectionSamplers(
+            final IntermediaryShaderModule module,
+            final HdrShaderFlavor flavor
+    ) {
+        if (!isAdvancedFlavor(flavor)) {
+            return module;
+        }
+        var filtered = module.samplers().stream()
+                .filter(sampler -> !VertexReflectionExperiment.isExperimentSampler(sampler.name()))
+                .filter(sampler -> !GiReceiverBindingAbi.isExternalSampler(sampler.name()))
+                .toList();
+        if (filtered.size() == module.samplers().size()) {
+            return module;
+        }
+        return new IntermediaryShaderModule(
+                module.name(),
+                module.spirv(),
+                module.uniformBuffers(),
+                filtered,
+                module.outputs(),
+                module.inputs()
+        );
+    }
+
+    private static ShaderDefines withVertexReflectionDefine(final ShaderDefines defines) {
+        var builder = ShaderDefines.builder();
+        for (String flag : defines.flags()) {
+            builder.define(flag);
+        }
+        for (var entry : defines.values().entrySet()) {
+            builder.define(entry.getKey(), entry.getValue());
+        }
+        builder.define("METALLUM_VERTEX_REFLECTION", 1);
+        return builder.build();
+    }
+
+    static boolean isSodiumReflectionTerrainPipeline(
+            final Identifier location,
+            final Identifier vertex,
+            final Identifier fragment
+    ) {
+        return "sodium".equals(location.getNamespace())
+                && ("pipeline/solid_terrain".equals(location.getPath())
+                || "pipeline/cutout_terrain".equals(location.getPath())
+                || "pipeline/translucent_terrain".equals(location.getPath()))
+                && "sodium".equals(vertex.getNamespace())
+                && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH.equals(vertex.getPath())
+                && "sodium".equals(fragment.getNamespace())
+                && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH.equals(fragment.getPath());
+    }
+
+    static boolean isSodiumReflectionTerrainPipeline(final RenderPipeline pipeline) {
+        return isSodiumReflectionTerrainPipeline(
+                pipeline.getLocation(), pipeline.getVertexShader(), pipeline.getFragmentShader()
         );
     }
 
@@ -572,14 +717,16 @@ final class MetalCrossShaderCompiler {
         }
         if (flavor == HdrShaderFlavor.METALLUM
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY) {
             boolean reactive = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                     || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
-            if (variant.semanticOutput() != reactive) {
+            boolean temporal = flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL;
+            if (variant.semanticOutput() != (reactive || temporal)) {
                 throw new IllegalStateException(
-                        flavor + " variant has the wrong reactive attachment contract for pipeline "
+                        flavor + " variant has the wrong auxiliary attachment contract for pipeline "
                                 + pipeline.getLocation()
                 );
             }
@@ -612,6 +759,8 @@ final class MetalCrossShaderCompiler {
             final HdrShaderFlavor flavor,
             final MetalCompiledRenderPipeline.ShaderVariantSource variant
     ) {
+        boolean giReceiver = GiReceiverRuntime.isRequested()
+                && isSodiumReflectionTerrainPipeline(pipeline);
         for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
             if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER
                     && (AdvancedLightingBindingAbi.ownsFragmentSlot(binding.bindingIndex())
@@ -636,8 +785,11 @@ final class MetalCrossShaderCompiler {
         }
         for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
             String marker = "[[buffer(" + slot + ")]]";
+            boolean reflectionOwnsVertexSlot = slot == VertexReflectionBindingAbi.PARAMS_BUFFER_SLOT
+                    && VertexReflectionExperiment.isLayoutEnabled()
+                    && isSodiumReflectionTerrainPipeline(pipeline);
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
-                    || variant.vertexMsl().contains(marker)) {
+                    || (variant.vertexMsl().contains(marker) && !reflectionOwnsVertexSlot)) {
                 throw new IllegalStateException(
                         "Advanced lighting fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
@@ -645,6 +797,18 @@ final class MetalCrossShaderCompiler {
                 );
             }
         }
+        VertexReflectionBindingAbi.validateMsl(
+                variant.vertexMsl(),
+                variant.fragmentMsl(),
+                VertexReflectionExperiment.isLayoutEnabled()
+                        && isSodiumReflectionTerrainPipeline(pipeline)
+        );
+        GiReceiverBindingAbi.validateMsl(
+                variant.vertexMsl(),
+                variant.fragmentMsl(),
+                giReceiver,
+                GiLiveRuntime.isRequested() ? 3 : 1
+        );
         String visibilityCacheMarker = "[[buffer("
                 + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT + ")]]";
         if (countOccurrences(variant.fragmentMsl(), visibilityCacheMarker) != 1
@@ -658,8 +822,19 @@ final class MetalCrossShaderCompiler {
              slot <= VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
+            boolean vertexFieldOwnsVoxelParams = slot == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT
+                    && ((VertexReflectionExperiment.isLayoutEnabled()
+                    && isSodiumReflectionTerrainPipeline(pipeline)) || giReceiver);
+            boolean diagnosticProxyRemoved = slot == VoxelShadowBindingAbi.PROXY_BUFFER_SLOT
+                    && com.metallum.client.benchmark.DiagnosticAblationMode
+                    .getSystemCurrent().l6NoProxy() == 1;
+            if (diagnosticProxyRemoved
+                    && !variant.fragmentMsl().contains(marker)
+                    && !variant.vertexMsl().contains(marker)) {
+                continue;
+            }
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
-                    || variant.vertexMsl().contains(marker)) {
+                    || (variant.vertexMsl().contains(marker) && !vertexFieldOwnsVoxelParams)) {
                 throw new IllegalStateException(
                         "L6 active local-shadow fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
@@ -671,8 +846,12 @@ final class MetalCrossShaderCompiler {
              slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
+            boolean g5OwnsVertexParams = giReceiver
+                    && slot == GiReceiverLayout.PARAMS_BUFFER_SLOT;
             if (variant.fragmentMsl().contains(marker)
-                    || variant.vertexMsl().contains(marker)) {
+                    || (variant.vertexMsl().contains(marker) && !g5OwnsVertexParams)
+                    || (g5OwnsVertexParams
+                    && countOccurrences(variant.vertexMsl(), marker) != 1)) {
                 throw new IllegalStateException(
                         "L6 unreachable exact-DDA buffer slot " + slot
                                 + " survived production compilation for pipeline "
@@ -691,12 +870,34 @@ final class MetalCrossShaderCompiler {
         }
         String environmentMarker = "[[buffer("
                 + EnvironmentShadowBindingAbi.PARAMS_SLOT + ")]]";
+        boolean reflectionOwnsVertexEnvironment = VertexReflectionExperiment.isLayoutEnabled()
+                && isSodiumReflectionTerrainPipeline(pipeline);
         if (countOccurrences(variant.fragmentMsl(), environmentMarker) != 1
-                || variant.vertexMsl().contains(environmentMarker)) {
+                || countOccurrences(variant.vertexMsl(), environmentMarker)
+                != (reflectionOwnsVertexEnvironment ? 1 : 0)) {
             throw new IllegalStateException(
-                    "L4 environment buffer is missing, repeated, or visible to the vertex stage for "
-                            + pipeline.getLocation()
+                    "L4 environment buffer is missing, repeated, or has the wrong stage visibility for "
+                        + pipeline.getLocation()
             );
+        }
+        if (flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL) {
+            String temporalBuffer = "[[buffer("
+                    + AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_SLOT + ")]]";
+            String temporalTexture = "[[texture("
+                    + AdvancedLightingBindingAbi.L6_TEMPORAL_HISTORY_SLOT + ")]]";
+            String temporalSampler = "[[sampler("
+                    + AdvancedLightingBindingAbi.L6_TEMPORAL_HISTORY_SLOT + ")]]";
+            if (countOccurrences(variant.fragmentMsl(), temporalBuffer) != 1
+                    || countOccurrences(variant.fragmentMsl(), temporalTexture) != 1
+                    || countOccurrences(variant.fragmentMsl(), temporalSampler) != 1
+                    || variant.vertexMsl().contains(temporalBuffer)
+                    || variant.vertexMsl().contains(temporalTexture)
+                    || variant.vertexMsl().contains(temporalSampler)) {
+                throw new IllegalStateException(
+                        "L6 temporal native bindings are not fragment-only/canonical for "
+                                + pipeline.getLocation()
+                );
+            }
         }
         boolean isAmbientOnly = flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
@@ -799,8 +1000,15 @@ final class MetalCrossShaderCompiler {
                 && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH);
     }
 
+    private static boolean isSodiumOpaqueTerrainReceiverPipeline(final RenderPipeline pipeline) {
+        return isSodiumTerrainReceiverPipeline(pipeline)
+                && "sodium".equals(pipeline.getLocation().getNamespace())
+                && "pipeline/solid_terrain".equals(pipeline.getLocation().getPath());
+    }
+
     private static boolean isAdvancedFlavor(final HdrShaderFlavor flavor) {
         return flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
@@ -1199,6 +1407,17 @@ final class MetalCrossShaderCompiler {
                 || countOccurrences(source, "[[color(0)]]") != 1
                 || countOccurrences(source, "[[color(1)]]") != 1) {
             throw new IllegalStateException("L8 reactive MSL output locations are not canonical");
+        }
+    }
+
+    private static void validateL6TemporalMslOutputs(final String source) {
+        boolean color = source.contains("float4 fragColor [[color(0)]];");
+        boolean history = source.contains("float4 " + L6TemporalShaderPatcher.HISTORY_OUTPUT
+                + " [[color(1)]];");
+        if (!color || !history
+                || countOccurrences(source, "[[color(0)]]") != 1
+                || countOccurrences(source, "[[color(1)]]") != 1) {
+            throw new IllegalStateException("L6 temporal MSL output locations are not canonical");
         }
     }
 

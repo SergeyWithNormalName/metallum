@@ -1,0 +1,53 @@
+{
+  "schema_version": 4,
+  "id": "reflection-house-voxel-motion-v1",
+  "fixture": {
+    "id": "reflection-house-voxel-v1",
+    "sha256": "6c2d00ee96ecfead1b0dac27d21b95323b02980e84084e3dd79d718c4045d2bb"
+  },
+  "player": {
+    "name": "MetallumBench",
+    "uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9"
+  },
+  "dimension": "minecraft:overworld",
+  "position": [238.805, 66.0, 140.183],
+  "rotation": {
+    "yaw": -142.8,
+    "pitch": 15.9
+  },
+  "camera": "FIRST_PERSON",
+  "clock": {
+    "total_ticks": 6000,
+    "paused": true
+  },
+  "weather": {
+    "mode": "clear",
+    "frozen": true,
+    "clear_duration_ticks": 6000
+  },
+  "simulation": {
+    "frozen": true
+  },
+  "readiness": {
+    "stable_frames": 120,
+    "timeout_frames": 2400,
+    "position_epsilon": 0.0001,
+    "angle_epsilon": 0.001
+  },
+  "l6_dynamic_shadow": {
+    "held_item": "minecraft:torch",
+    "camera_orbit": {
+      "radius": 20.0,
+      "yaw_amplitude_degrees": 10.0,
+      "pitch_amplitude_degrees": 4.0,
+      "period_frames": 600
+    },
+    "entity_probes": {
+      "count": 4,
+      "origin": [238.805, 67.0, 140.183],
+      "radius": 1.0,
+      "vertical_amplitude": 0.25,
+      "period_frames": 120
+    }
+  }
+}

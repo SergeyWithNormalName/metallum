@@ -16,12 +16,18 @@ Metallum defines exactly three built-in visual styles:
    - Preserves familiar Minecraft and reference Metallum visual character.
    - Restrained adjustments; acts as the regression-preserving visual oracle.
    - Exact legacy celestial color and moon-phase intensity curve.
+   - Water bypasses Metallum L8 waves, reflection, refraction, absorption, and caustics.
 2. **`NATURAL`**
    - Natural sunlight, moonlight, and smooth golden-hour atmospheric transitions while remaining recognizably Minecraft.
    - Visibly warm golden-orange low sun; less-blue moonlight; stronger lunar phase response.
+   - Water is the exact pre-water-reflection/GI L8 baseline: its original procedural waves,
+     Fresnel/environment response, bounded refraction and absorption, and synchronized caustics.
+     Later planar, cloud, voxel, and GI reflection paths are visually neutral in this style.
 3. **`REALISM`**
    - Physically motivated lighting curves intended for future integration with GI, PBR materials, volumetrics, and realistic celestial optics.
    - Near-neutral daylight sun; deep golden/orange horizon sun with broad atmospheric transition; subtly cool moon; zero directional moonlight at new moon without darkening ambient night.
+   - Water enables the complete L8 optical response: finer multi-scale waves, Fresnel reflection,
+     bounded refraction, Beer-Lambert absorption, transmission, and synchronized caustics.
 
 > [!IMPORTANT]
 > No fourth style (such as Cinematic or custom packs) exists in this subsystem.
@@ -41,10 +47,10 @@ All combinations (e.g. `REALISM + PERFORMANCE`, `VANILLA + ULTRA`) are valid. Se
 ---
 
 ## 4. Persistent Ownership: `RendererConfig`
-The selected `VisualStyle` is persisted in `metallum-renderer.properties` as part of `RendererConfig` (schema 4):
+The selected `VisualStyle` is persisted in `metallum-renderer.properties` as part of `RendererConfig` (schema 5):
 
 ```properties
-schemaVersion=4
+schemaVersion=5
 improvedLighting=false
 lightingPreset=balanced
 frameInterpolation=false
@@ -53,7 +59,7 @@ visualStyle=vanilla
 ```
 
 - **Default**: `vanilla`.
-- **Migration**: Old schemas (v1, v2, v3) migrate safely to schema 4 with `visualStyle = VANILLA` without resetting existing user settings.
+- **Migration**: Old schemas (v1-v4) migrate safely to schema 5 with `visualStyle = VANILLA` and `globalIllumination = OFF` without resetting existing user settings.
 - **Fail-Closed**: Unrecognized styles or malformed configurations fail closed to `VANILLA` without destructive file overwriting.
 
 ---
@@ -72,11 +78,16 @@ Style data flows hierarchically through immutable, validated records:
 ```
 VisualStyle
     └── VisualStyleProfile
-            └── CelestialLightingProfile
+            ├── CelestialLightingProfile
+            ├── AtmosphereProfile
+            └── WaterStyleProfile
 ```
 
 - `VisualStyleProfiles.profile(VisualStyle style)` authoritatively returns the immutable `VisualStyleProfile` without per-frame allocations.
 - `CelestialLightingProfile` defines typed parameters for sun color, horizon transition intervals, sun intensity, moon color, moon intensity, and moon phase response.
+- `WaterStyleProfile` defines the stable shader policy id and bounded L8 water strengths. Its
+  values are embedded in generated shaders; only the id is uploaded per frame through the existing
+  `materialContract.w` field.
 
 ---
 
@@ -119,10 +130,34 @@ Switching visual styles does **not** reconstruct GPU pipelines or renderer gener
 - **One-Shot Temporal Discontinuity**: Changing the active style signals `FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE` via `TemporalResetEvents.signal(...)`. The temporal admission logic (`FrameSynthesisContract`) rejects cross-style history blending for that single transition frame.
 - **No-Op Guard**: Re-selecting the already active style emits no reset events.
 
+### 8.1 Water Style Matrix
+
+| Water parameter | VANILLA | NATURAL | REALISM |
+| :--- | ---: | ---: | ---: |
+| Shader policy id | `0` | `1` | `2` |
+| L8 water enabled | No | Yes | Yes |
+| Wave strength | `0.00` | `1.00` | `1.00` |
+| Reflection strength | `0.00` | `1.00` | `1.00` |
+| Refraction strength | `0.00` | `0.28` | `0.55` |
+| Reflection body coupling | `0.00` | `0.00` | `0.85` |
+| Caustic strength | `0.00` | `1.00` | `1.00` |
+| Roughness | `0.075` | `0.055` | `0.065` |
+| Transmission | `0.00` | `0.30` | `0.38` |
+| Optical depth | `0.00` | `0.85` | `1.15` |
+| Absorption RGB | `(0, 0, 0)` | `(0.15, 0.040, 0.015)` | `(0.18, 0.055, 0.022)` |
+
+`NATURAL` is a compatibility baseline: it preserves the water optics from immediately before
+water-reflection and GI work began, and excludes those later reflection sources. `REALISM` uses
+the same existing reflection sources when they are admitted; selecting a style does not enable the
+default-off planar or voxel-reflection experiments. When a coarse reflection has little confidence,
+its water-body energy subtraction is weighted by that actual confidence instead of producing a dark
+shoreline halo.
+
 ---
 
 ## 9. Performance Contract
-The Visual Style foundation imposes zero steady-state GPU overhead:
+Water style selection adds only bounded scalar/profile selection arithmetic inside the existing L8
+fragment path. It adds no frame-graph or memory work:
 - 0 new render passes
 - 0 new compute passes
 - 0 new Metal command encoders

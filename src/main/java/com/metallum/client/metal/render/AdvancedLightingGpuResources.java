@@ -37,6 +37,7 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
     private static final int BUFFER_PARAMS = 3;
     private static final int BUFFER_STATISTICS = 4;
     private static final int BUFFER_SCRATCH = 5;
+    private static final int BUFFER_L6_TEMPORAL_PARAMS = 6;
 
     private static final ValueLayout.OfInt LE_INT = ValueLayout.JAVA_INT
             .withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -49,13 +50,15 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
             MemorySegment params,
             MemorySegment lights,
             MemorySegment headers,
-            MemorySegment indices
+            MemorySegment indices,
+            MemorySegment l6TemporalParams
     ) {
         Bindings {
             requireHandle(params, "lighting params");
             requireHandle(lights, "GPU lights");
             requireHandle(headers, "compact cluster headers");
             requireHandle(indices, "cluster indices");
+            requireHandle(l6TemporalParams, "L6 temporal params");
         }
     }
 
@@ -148,12 +151,19 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
             requireBuffer(context, BUFFER_STATISTICS, AdvancedLightingLayout.STATISTICS_BYTES,
                     "cluster statistics");
             requireBuffer(context, BUFFER_SCRATCH, budget.clusterScratchBytes(), "cluster scratch");
+            requireBuffer(
+                    context,
+                    BUFFER_L6_TEMPORAL_PARAMS,
+                    AdvancedLightingLayout.L6_TEMPORAL_PARAMS_RING_BYTES,
+                    "L6 temporal params ring"
+            );
 
             Bindings bindings = new Bindings(
                     buffer(context, BUFFER_PARAMS),
                     buffer(context, BUFFER_LIGHTS),
                     buffer(context, BUFFER_HEADERS),
-                    buffer(context, BUFFER_INDICES)
+                    buffer(context, BUFFER_INDICES),
+                    buffer(context, BUFFER_L6_TEMPORAL_PARAMS)
             );
             arena = Arena.ofShared();
             long packetCapacity = Math.addExact(

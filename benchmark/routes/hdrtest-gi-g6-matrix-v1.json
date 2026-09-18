@@ -1,0 +1,123 @@
+{
+  "schema_version": 5,
+  "id": "hdrtest-gi-g6-matrix-v1",
+  "fixture": {
+    "id": "hdrtest-static-v1",
+    "sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "player": {
+    "name": "MetallumBench",
+    "uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9"
+  },
+  "dimension": "minecraft:overworld",
+  "position": [
+    86.1241372798128,
+    74.0,
+    -95.57730763953901
+  ],
+  "rotation": {
+    "yaw": 155.39700317,
+    "pitch": 13.20000648
+  },
+  "camera": "FIRST_PERSON",
+  "clock": {
+    "total_ticks": 181406,
+    "paused": true
+  },
+  "weather": {
+    "mode": "clear",
+    "frozen": true,
+    "clear_duration_ticks": 6000
+  },
+  "simulation": {
+    "frozen": true
+  },
+  "readiness": {
+    "stable_frames": 120,
+    "timeout_frames": 1200,
+    "position_epsilon": 0.0001,
+    "angle_epsilon": 0.001
+  },
+  "gi_g6_matrix": {
+    "stationary_source": {
+      "held_item": "minecraft:torch",
+      "entity_item": "minecraft:torch",
+      "entity_position": [
+        83.5,
+        75.0,
+        -99.0
+      ]
+    },
+    "lava": {
+      "position": [
+        80,
+        75,
+        -112
+      ],
+      "initial_block": "minecraft:air",
+      "apply_after_measured_frames": 300,
+      "remove_after_measured_frames": 420
+    },
+    "camera_orbit": {
+      "start_after_measured_frames": 30,
+      "end_after_measured_frames": 270,
+      "yaw_amplitude_degrees": 30.0,
+      "pitch_amplitude_degrees": 10.0,
+      "period_frames": 120
+    },
+    "chunk_reload_after_measured_frames": 490,
+    "resource_reload_after_measured_frames": 760,
+    "day": {
+      "apply_after_measured_frames": 1030,
+      "total_ticks": 1000
+    },
+    "night": {
+      "apply_after_measured_frames": 1230,
+      "total_ticks": 13000
+    },
+    "rain_after_measured_frames": 1430,
+    "clear_after_measured_frames": 1630,
+    "chunk_stream": {
+      "start_after_measured_frames": 1830,
+      "step_frames": 40,
+      "offsets": [
+        8,
+        16,
+        24,
+        32,
+        24,
+        16,
+        8,
+        0
+      ],
+      "y_offsets": [
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        0,
+        1,
+        0
+      ]
+    },
+    "far_teleport": {
+      "apply_after_measured_frames": 2170,
+      "target_offset": [
+        320,
+        32,
+        0
+      ],
+      "return_after_measured_frames": 2430
+    },
+    "nether_round_trip": {
+      "enter_after_measured_frames": 2620,
+      "position": [
+        0,
+        96,
+        0
+      ],
+      "return_after_measured_frames": 3090
+    }
+  }
+}

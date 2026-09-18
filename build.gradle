@@ -9,6 +9,21 @@ def artifactProjectName = project.name
 
 loom {
 	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
+	runs {
+		client {
+			client()
+			System.getProperties().each { k, v ->
+				if (k.toString().startsWith("metallum.")) {
+					property k.toString(), v.toString()
+				}
+			}
+			System.getenv().each { k, v ->
+				if (k.toString().startsWith("METALLUM_")) {
+					environmentVariable k.toString(), v.toString()
+				}
+			}
+		}
+	}
 }
 
 repositories {
@@ -28,7 +43,10 @@ def macMetalSources = [
 	EntityMotion: layout.projectDirectory.file("src/main/metal/MetallumEntityMotion.metal"),
 	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal"),
 	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal"),
-	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal")
+	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal"),
+	GiField: layout.projectDirectory.file("src/main/metal/MetallumGiField.metal"),
+	GiTransport: layout.projectDirectory.file("src/main/metal/MetallumGiTransport.metal"),
+	RadianceClipmap: layout.projectDirectory.file("src/main/metal/MetallumRadianceClipmap.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
 	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
@@ -196,12 +214,337 @@ tasks.register("advancedDirectLightingShaderUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.shader.AdvancedDirectLightingShaderTests")
 }
 
+tasks.register("frozenReflectionFieldUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates frozen accepted-Sodium reflection field ownership and validity semantics"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.reflection.FrozenReflectionFieldControllerTests")
+}
+
+tasks.register("waterReflectionQualityConfigUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates independent, default-on water-reflection quality settings"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.reflection.WaterReflectionQualityConfigTests")
+}
+
+tasks.register("faceAwareRadianceAppearanceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates exposed TOP/SIDE/BOTTOM source appearance reduction"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.radiance.FaceAwareRadianceAppearanceTests")
+}
+
+tasks.register("realWorldVertexReflectionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates real-world reflection appearance extraction and vertex-only shader carrier"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.RealWorldVertexReflectionTests")
+}
+
+tasks.register("benchmarkLightingAdmissionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Rejects benchmark fallback/default configurations and incomplete Advanced frames"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.benchmark.BenchmarkLightingAdmissionTests")
+}
+
+tasks.register("frozenReflectionNativeValidation", JavaExec) {
+	group = "verification"
+	description = "Validates frozen reflection Java/FFM/private-3D Metal upload and compute lifecycle"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.FrozenReflectionNativeValidation")
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giFieldUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates bounded field-only G1 topology, memory and generation contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiFieldTests")
+}
+
+tasks.register("giFieldGpuValidation", JavaExec) {
+	group = "verification"
+	description = "Validates G1 Java/FFM/private-3D Metal upload, mips, capture and lifetime"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiFieldGpuValidation")
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giSemanticGpuEncoderUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates deterministic fail-closed CPU semantic truth to G2 GPU planes"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiSemanticGpuEncoderTests")
+}
+
+tasks.register("giSemanticCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates deterministic G2 palette, accepted snapshots, scrolling and bounded retirement"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.semantic.GiSemanticCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giSemanticSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the version-locked structurally-off Sodium accepted-output source chain"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.capture.GiSemanticSourceChainTests")
+}
+
+tasks.register("giSemanticFieldGpuValidationSource", JavaExec) {
+	group = "verification"
+	description = "Validates G2 semantic ABI/private textures/mips/raw slice using actual MSL source"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiSemanticFieldGpuValidation")
+	args "source"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giSemanticFieldGpuValidationBundled", JavaExec) {
+	group = "verification"
+	description = "Validates G2 semantic ABI/private textures/mips/raw slice using bundled metallib"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiSemanticFieldGpuValidation")
+	args "bundled"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giDirectSourceCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates bounded G3 source epochs, static-only admission and dirty scheduling"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giDirectSourceSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Rejects view-dependent, dynamic, bounce and image-path dependencies from G3"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceSourceChainTests")
+}
+
+tasks.register("giDirectSourceGpuValidationSource", JavaExec) {
+	group = "verification"
+	description = "Validates bounded G3 private fields and raw correctness using actual MSL source"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceGpuValidation")
+	args "source"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giDirectSourceGpuValidationBundled", JavaExec) {
+	group = "verification"
+	description = "Validates bounded G3 private fields and raw correctness using bundled metallib"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceGpuValidation")
+	args "bundled"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giTransportCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G4 fixed stencil, rho/pi, SH energy and frozen epoch contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.transport.GiTransportCpuTests")
+	jvmArgs "-ea"
+	environment "METALLUM_GI_G4_TRANSPORT", "1"
+}
+
+tasks.register("giTransportDebugSettingsUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the restart-gated G4 Sodium debug setting and HUD states"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.debug.GiTransportDebugSettingsTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giSemanticTransportFieldUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the dedicated accepted-G2 near-cascade cell ABI consumed by G4"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.semantic.GiSemanticTransportFieldViewTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giTransportSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Rejects image, receiver, view-dependent and second-bounce dependencies from G4"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.transport.GiTransportSourceChainTests")
+}
+
+tasks.register("giReceiverCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G5 arm admission, SH reconstruction, mapping and exact fallback composition"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.receiver.GiReceiverCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giReceiverSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G5 vertex-only shader placement, carrier coexistence and emitted-MSL guards"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.receiver.GiReceiverSourceChainTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giLiveReceiverSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G6 three-cascade vertex-only source and generated Sodium MSL contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.live.GiLiveReceiverSourceChainTests")
+	jvmArgs "-ea", "--enable-native-access=ALL-UNNAMED"
+}
+
+tasks.register("giDynamicSourceCollectorUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates bounded camera-independent G6 held/entity source collection and expiry"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDynamicSourceCollectorTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giDynamicSourceInjectionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates deterministic G6 dynamic-source injection and incremental invalidation"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDynamicSourceInjectionTests")
+	jvmArgs "-ea", "--enable-native-access=ALL-UNNAMED"
+}
+
+tasks.register("giLiveCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G6 live epochs, dirty scheduling, exact publication and recovery SLAs"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.live.GiLiveCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giLiveAbiUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the exact Java/Swift G6 live layout, stats ABI and bridge bounds"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.live.GiLiveAbiTests")
+	args "native"
+	jvmArgs "-ea", "--enable-native-access=ALL-UNNAMED"
+}
+
+tasks.register("giReceiverCarrierCoexistenceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the exact Sodium compact-position sideband shared by L8 and G5"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.receiver.GiReceiverCarrierCoexistenceTests")
+	environment "METALLUM_GI_G5_RECEIVER", "1"
+	environment "METALLUM_GI_G5_RECEIVER_ARM", "candidate"
+	jvmArgs "-ea"
+}
+
+tasks.register("giTransportGpuValidationSource", JavaExec) {
+	group = "verification"
+	description = "Validates complete G3 input and frozen G4 bounce/SH using actual MSL source"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiTransportGpuValidation")
+	args "source"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giTransportGpuValidationBundled", JavaExec) {
+	group = "verification"
+	description = "Validates complete G3 input and frozen G4 bounce/SH using bundled metallib"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiTransportGpuValidation")
+	args "bundled"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
 tasks.register("shadowValueValidation", JavaExec) {
 	group = "verification"
 	description = "Validates L4 environment, cascade stability, preset and shadow ABI contracts"
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.lighting.SunShadowContractTests")
+}
+
+tasks.register("godRayWorldSpaceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates GOD-RAYS-0 world-space directional god rays mathematical contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.GodRayWorldSpaceContractTests")
 }
 
 tasks.register("lightningEnvironmentUnitTest", JavaExec) {
@@ -365,6 +708,14 @@ tasks.register("visualStyleUnitTest", JavaExec) {
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.renderer.style.VisualStyleTests")
+}
+
+tasks.register("atmosphereStyleUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free ATMOSPHERE-1 style-aware aerial perspective and fog modulation tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.renderer.style.AtmosphereStyleTests")
 }
 
 tasks.register("rendererArchitectureUnitTest", JavaExec) {
@@ -1223,19 +1574,367 @@ tasks.register("forcedSourceStartupValidation", JavaExec) {
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 }
 
+tasks.register("giG0FixtureContractTest", Exec) {
+    group = "verification"
+    description = "Validates immutable GI G0 fixture sources, routes, digests and GI_OFF settings"
+    inputs.file("tools/gi_g0_contract.py")
+    inputs.file("benchmark/gi/g0-fixtures-v1.json")
+    inputs.dir("benchmark/gi/fixtures/g0-v1")
+    inputs.files(fileTree("benchmark/routes") { include "gi-g0-*.json" })
+    inputs.files(
+        "benchmark/settings/native-hdr-fancy-v1.json",
+        "benchmark/settings/native-sdr-fancy-v1.json",
+        "benchmark/settings/nether-lava-stress-v1.json"
+    )
+    commandLine "python3", "tools/gi_g0_contract.py", "--root", "."
+}
+
+tasks.register("giG1FieldContractTest", Exec) {
+    group = "verification"
+    description = "Validates G1 field evidence, fixed topology and absence of production bindings"
+    inputs.file("tools/gi_g1_contract.py")
+    inputs.file("benchmark/gi/g1-field-evidence-v1.json")
+    inputs.dir("src/main/java/com/metallum/client/gi/field")
+	inputs.file("src/main/metal/MetallumGiField.metal")
+    commandLine "python3", "tools/gi_g1_contract.py", "--root", "."
+}
+
+tasks.register("giG2SemanticContractTest", Exec) {
+	group = "verification"
+	description = "Validates G2 accepted semantic evidence, bounded memory and structural-off scope"
+	inputs.file("tools/gi_g2_contract.py")
+	inputs.file("benchmark/gi/g2-semantic-evidence-v1.json")
+	inputs.dir("src/main/java/com/metallum/client/gi/capture")
+	inputs.dir("src/main/java/com/metallum/client/gi/semantic")
+	inputs.files(
+		"src/main/java/com/metallum/client/gi/field/GiSemanticFieldGpuResources.java",
+		"src/main/java/com/metallum/client/gi/field/GiSemanticGpuEncoder.java",
+		"src/main/java/com/metallum/client/gi/field/GiSemanticGpuSnapshot.java"
+	)
+	inputs.dir("src/main/java/com/metallum/mixin/gi")
+	inputs.file("src/main/metal/MetallumGiField.metal")
+	inputs.file("src/main/native/MetallumNative.swift")
+	commandLine "python3", "tools/gi_g2_contract.py", "--root", "."
+}
+
+tasks.register("giG3SourceContractTest", Exec) {
+	group = "verification"
+	description = "Validates G3 direct-source evidence, bounded updates and absence of later-stage consumers"
+	inputs.file("tools/gi_g3_contract.py")
+	inputs.file("benchmark/gi/g3-direct-source-evidence-v1.json")
+	inputs.dir("src/main/java/com/metallum/client/gi/source")
+	inputs.files(
+		"src/main/java/com/metallum/client/gi/semantic/GiSemanticDirectFieldView.java",
+		"src/main/metal/MetallumGiField.metal",
+		"src/main/native/MetallumNative.swift"
+	)
+	commandLine "python3", "tools/gi_g3_contract.py", "--root", "."
+}
+
+tasks.register("giG4TransportContractTest", Exec) {
+	group = "verification"
+	description = "Validates G4 frozen one-bounce evidence, energy/resource gates and field-only scope"
+	inputs.file("tools/gi_g4_contract.py")
+	inputs.file("benchmark/gi/g4-transport-evidence-v1.json")
+	inputs.file("benchmark/gi/g6-topology-successor-contract-v1.json")
+	inputs.files(
+		"benchmark/routes/gi-g4-overworld-v1.json",
+		"build.gradle",
+		"docs/GI_G4.md",
+		"scripts/run_metal_benchmark.sh",
+		"tools/gi_g3_contract.py",
+		"tools/gi_g6_topology_successor_contract.py",
+		"tools/gi_release_contract_guard.sh",
+		"tools/metal_benchmark_report.py",
+		"tools/test_gi_g4_runner_contract.sh",
+		"tools/test_gi_release_contract_guard.sh",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java",
+		"src/main/java/com/metallum/client/gi/semantic/GiSemanticController.java",
+		"src/main/java/com/metallum/client/gi/semantic/GiSemanticFieldAssembler.java",
+		"src/main/java/com/metallum/client/gi/semantic/GiSemanticRuntime.java",
+		"src/main/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldView.java",
+		"src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java",
+		"src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java",
+		"src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java",
+		"src/main/java/com/metallum/client/gi/source/GiEnvironmentSource.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportEpoch.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportGpuResources.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportLayout.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportRuntime.java",
+		"src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java",
+		"src/main/java/com/metallum/client/metal/render/MetalDevice.java",
+		"src/main/java/com/metallum/client/metal/render/MetalGpuTimingStage.java",
+		"src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java",
+		"src/main/java/com/metallum/client/metal/render/framegraph/GiTransportFrameGraph.java",
+		"src/main/java/com/metallum/client/lighting/AdvancedLightRegistry.java",
+		"src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java",
+		"src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java",
+		"src/main/metal/MetallumGiTransport.metal",
+		"src/main/native/MetallumNative.swift",
+		"src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java",
+		"src/test/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldViewTests.java",
+		"src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java",
+		"src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java",
+		"src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java",
+		"src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java",
+		"src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java",
+		"src/test/java/com/metallum/client/gi/transport/GiTransportSourceChainTests.java",
+		"src/test/java/com/metallum/client/metal/render/MetalRuntimeTests.java",
+		"src/test/java/com/metallum/client/metal/render/framegraph/FrameGraphTests.java"
+	)
+	commandLine "python3", "tools/gi_g4_contract.py", "--root", "."
+}
+
+tasks.register("giReleaseContractGuardTest", Exec) {
+	group = "verification"
+	description = "Rejects every G2/G3/G4 diagnostic environment from release-profile runs"
+	inputs.files(
+		"tools/gi_release_contract_guard.sh",
+		"tools/test_gi_release_contract_guard.sh",
+		"scripts/run_metal_benchmark.sh"
+	)
+	commandLine "bash", "tools/test_gi_release_contract_guard.sh"
+}
+
+tasks.register("giG4RunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates the exact G4 route, clean preflight and transcript/admission wiring"
+	inputs.files(
+		"benchmark/routes/gi-g4-overworld-v1.json",
+		"scripts/run_metal_benchmark.sh",
+		"tools/test_gi_g4_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_g4_runner_contract.sh"
+}
+
+tasks.register("giG5ReceiverContractTest", Exec) {
+	group = "verification"
+	description = "Validates the default-off G5 vertex receiver implementation and optional Tier B receipt"
+	dependsOn(
+		tasks.named("giReceiverCpuUnitTest"),
+		tasks.named("giReceiverSourceChainUnitTest"),
+		tasks.named("giReceiverCarrierCoexistenceUnitTest"),
+		tasks.named("realWorldVertexReflectionUnitTest")
+	)
+	inputs.file("tools/gi_g5_contract.py")
+	inputs.file("docs/GI_G5.md")
+	inputs.file("benchmark/gi/g4-transport-evidence-v1.json")
+	inputs.dir("benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1")
+	inputs.dir("src/main/java/com/metallum/client/gi/receiver")
+	inputs.files(
+		"build.gradle",
+		"scripts/run_metal_benchmark.sh",
+		"tools/metal_benchmark_report.py",
+		"tools/test_gi_g5_runner_contract.sh",
+		"src/main/java/com/metallum/client/gi/GiRuntimeStages.java",
+		"src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java",
+		"src/main/java/com/metallum/client/metal/render/MetalCompiledRenderPipeline.java",
+		"src/main/java/com/metallum/client/metal/render/MetalDevice.java",
+		"src/main/java/com/metallum/client/metal/render/MetalDrawContext.java",
+		"src/main/java/com/metallum/client/metal/render/MetalRenderPass.java",
+		"src/main/java/com/metallum/client/metal/render/SodiumIndexedIndirectBatcher.java",
+		"src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java",
+		"src/main/java/com/metallum/client/hdr/SodiumHdrSemantic.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierBuilderAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierInfoAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierInfoBuilderAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierMetadata.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierUpdatedQuadsAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumIndexedIndirectBatchAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumRelightFastPath.java",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java",
+		"src/main/java/com/metallum/mixin/sodium/BSPWorkspaceG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/BuiltSectionInfoBuilderG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/BuiltSectionInfoG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/ChunkBuildBuffersG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/ChunkMeshBufferBuilderHdrMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/DefaultChunkRendererShadowMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/RenderRegionManagerG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/UpdatedQuadsListG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/VKIndirectDrawBatchMixin.java",
+		"src/main/resources/metallum.mixins.json",
+		"src/main/native/MetallumNative.swift"
+	)
+	commandLine "python3", "tools/gi_g5_contract.py", "--root", "."
+}
+
+tasks.register("giG5RunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates the exact G5 ABBA arms, route, clean preflight and admission wiring"
+	inputs.files(
+		"benchmark/routes/gi-g4-overworld-v1.json",
+		"scripts/run_metal_benchmark.sh",
+		"tools/test_gi_g5_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_g5_runner_contract.sh"
+}
+
+tasks.register("giG6RunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates persistent dynamic-GI source and recovery-matrix routes, isolation and receipts"
+	inputs.files(
+		"benchmark/routes/hdrtest-torch-toggle-v1.json",
+		"benchmark/routes/hdrtest-gi-g6-matrix-v1.json",
+		"benchmark/settings/native-hdr-fancy-gi-live-v1.json",
+		"docs/GI_G6.md",
+		"scripts/run_metal_benchmark.sh",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"tools/metal_benchmark_fixture.py",
+		"tools/metal_benchmark_report.py",
+		"tools/test_gi_g6_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_g6_runner_contract.sh"
+}
+
+tasks.register("giVisualProbeRunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates the isolated non-attested GI ON/OFF visual-probe route and capture wiring"
+	inputs.files(
+		"benchmark/routes/hdrtest-gi-visual-probe-v1.json",
+		"docs/GI_VISUAL_PROBE.md",
+		"scripts/run_metal_benchmark.sh",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"tools/metal_benchmark_fixture.py",
+		"tools/test_gi_visual_probe_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_visual_probe_runner_contract.sh"
+}
+
+tasks.register("giG6EvidenceContractTest", Exec) {
+	group = "verification"
+	description = "Verifies the immutable source-bound G6 live, matrix and static-capture evidence"
+	dependsOn(tasks.named("classes"))
+	dependsOn(tasks.named("buildMacNative"))
+	inputs.files(
+		"benchmark/gi/g6-live-evidence-v1.json",
+		"benchmark/routes/hdrtest-torch-toggle-v1.json",
+		"benchmark/routes/hdrtest-gi-g6-matrix-v1.json",
+		"benchmark/settings/native-hdr-fancy-gi-live-v1.json",
+		"tools/gi_g6_evidence_contract.py",
+		"tools/metal_benchmark_fixture.py",
+		"tools/metal_benchmark_report.py"
+	)
+	inputs.dir("benchmark/gi/evidence/gi-g6-live-2026-08-30-v1")
+	commandLine "python3", "tools/gi_g6_evidence_contract.py", "--root", "."
+}
+
+tasks.register("giG6TopologySuccessorContractTest", Exec) {
+	group = "verification"
+	description = "Separates block-scale C0 successor topology from immutable G0-G6 evidence"
+	inputs.files(
+		"benchmark/gi/g6-topology-successor-contract-v1.json",
+		"benchmark/gi/g0-acceptance-v1.json",
+		"benchmark/gi/g1-field-evidence-v1.json",
+		"benchmark/gi/g2-semantic-evidence-v1.json",
+		"benchmark/gi/g3-direct-source-evidence-v1.json",
+		"benchmark/gi/g4-transport-evidence-v1.json",
+		"benchmark/gi/g6-live-evidence-v1.json",
+		"tools/gi_g6_topology_successor_contract.py",
+		"src/main/java/com/metallum/client/gi/field/GiFieldLayout.java",
+		"src/main/java/com/metallum/client/gi/source/GiDirectSourceLayout.java",
+		"src/main/java/com/metallum/client/gi/transport/GiTransportLayout.java",
+		"src/main/java/com/metallum/client/gi/live/GiLiveLayout.java",
+		"src/main/java/com/metallum/client/gi/live/GiLiveGpuResources.java",
+		"src/main/metal/MetallumGiTransport.metal",
+		"src/main/native/MetallumNative.swift",
+		"src/test/java/com/metallum/client/gi/field/GiFieldTests.java",
+		"src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java"
+	)
+	commandLine "python3", "tools/gi_g6_topology_successor_contract.py", "--root", "."
+}
+
+tasks.register("giStageGateContractTest", Exec) {
+	group = "verification"
+	description = "Validates current G0 recovery, G1 revalidation and G2 completion evidence"
+	inputs.file("tools/gi_stage_gate_contract.py")
+	inputs.file("benchmark/gi/gi-stage-gates-2026-08-26-v1.json")
+	inputs.dir("benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1")
+	inputs.files(fileTree("benchmark/routes") { include "gi-g0-*.json" })
+	inputs.file("benchmark/settings/native-hdr-fancy-v1.json")
+	inputs.files(
+		"benchmark/gi/g0-acceptance-v1.json",
+		"benchmark/gi/g1-field-evidence-v1.json",
+		"benchmark/gi/g2-semantic-evidence-v1.json"
+	)
+	commandLine "python3", "tools/gi_stage_gate_contract.py", "--root", "."
+}
+
+tasks.register("benchmarkFixtureContractTest", Exec) {
+    group = "verification"
+    description = "Runs immutable fixture/settings digest parser self-tests"
+    inputs.file("tools/metal_benchmark_fixture.py")
+    commandLine "python3", "tools/metal_benchmark_fixture.py", "self-test"
+}
+
+tasks.register("benchmarkReportContractTest", Exec) {
+    group = "verification"
+    description = "Runs timing parser, 300-frame alignment and GI telemetry self-tests"
+    inputs.file("tools/metal_benchmark_report.py")
+    commandLine "python3", "tools/metal_benchmark_report.py", "self-test"
+}
+
 tasks.named("test", Test) {
 	// HDR tests use a dependency-free Java entry point instead of a JUnit engine.
 	failOnNoDiscoveredTests = false
 }
 
 tasks.named("check") {
+    dependsOn(tasks.named("giG0FixtureContractTest"))
+    dependsOn(tasks.named("giG1FieldContractTest"))
+	dependsOn(tasks.named("giG2SemanticContractTest"))
+	dependsOn(tasks.named("giG3SourceContractTest"))
+	dependsOn(tasks.named("giG4TransportContractTest"))
+	dependsOn(tasks.named("giG4RunnerContractTest"))
+	dependsOn(tasks.named("giG5ReceiverContractTest"))
+	dependsOn(tasks.named("giG5RunnerContractTest"))
+	dependsOn(tasks.named("giG6RunnerContractTest"))
+	dependsOn(tasks.named("giVisualProbeRunnerContractTest"))
+	dependsOn(tasks.named("giG6EvidenceContractTest"))
+	dependsOn(tasks.named("giG6TopologySuccessorContractTest"))
+	dependsOn(tasks.named("giReleaseContractGuardTest"))
+	dependsOn(tasks.named("giStageGateContractTest"))
+    dependsOn(tasks.named("benchmarkFixtureContractTest"))
+	dependsOn(tasks.named("benchmarkReportContractTest"))
+	dependsOn(tasks.named("giTransportCpuUnitTest"))
+	dependsOn(tasks.named("giTransportDebugSettingsUnitTest"))
+	dependsOn(tasks.named("giSemanticTransportFieldUnitTest"))
+	dependsOn(tasks.named("giTransportSourceChainUnitTest"))
+	dependsOn(tasks.named("giReceiverCpuUnitTest"))
+	dependsOn(tasks.named("giReceiverSourceChainUnitTest"))
+	dependsOn(tasks.named("giLiveReceiverSourceChainUnitTest"))
+	dependsOn(tasks.named("giDynamicSourceCollectorUnitTest"))
+	dependsOn(tasks.named("giDynamicSourceInjectionUnitTest"))
+	dependsOn(tasks.named("giLiveCpuUnitTest"))
+	dependsOn(tasks.named("giLiveAbiUnitTest"))
+	dependsOn(tasks.named("giReceiverCarrierCoexistenceUnitTest"))
+	dependsOn(tasks.named("giTransportGpuValidationSource"))
+	dependsOn(tasks.named("giTransportGpuValidationBundled"))
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("emissiveTextureUnitTest"))
 	dependsOn(tasks.named("materialContractUnitTest"))
 	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
 	dependsOn(tasks.named("surfaceMaterialUnitTest"))
 	dependsOn(tasks.named("advancedDirectLightingShaderUnitTest"))
+	dependsOn(tasks.named("frozenReflectionFieldUnitTest"))
+	dependsOn(tasks.named("realWorldVertexReflectionUnitTest"))
+	dependsOn(tasks.named("benchmarkLightingAdmissionUnitTest"))
+	dependsOn(tasks.named("frozenReflectionNativeValidation"))
+	dependsOn(tasks.named("giFieldUnitTest"))
+	dependsOn(tasks.named("giFieldGpuValidation"))
+	dependsOn(tasks.named("giSemanticCpuUnitTest"))
+	dependsOn(tasks.named("giSemanticSourceChainUnitTest"))
+	dependsOn(tasks.named("giSemanticGpuEncoderUnitTest"))
+	dependsOn(tasks.named("giSemanticFieldGpuValidationSource"))
+	dependsOn(tasks.named("giSemanticFieldGpuValidationBundled"))
+	dependsOn(tasks.named("giDirectSourceCpuUnitTest"))
+	dependsOn(tasks.named("giDirectSourceSourceChainUnitTest"))
+	dependsOn(tasks.named("giDirectSourceGpuValidationSource"))
+	dependsOn(tasks.named("giDirectSourceGpuValidationBundled"))
 	dependsOn(tasks.named("shadowValueValidation"))
+	dependsOn(tasks.named("godRayWorldSpaceUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))
 	dependsOn(tasks.named("localVoxelShadowUnitTest"))
 	dependsOn(tasks.named("localShadowAtlasUnitTest"))
@@ -1255,6 +1954,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("visualStyleUnitTest"))
+	dependsOn(tasks.named("atmosphereStyleUnitTest"))
 	dependsOn(tasks.named("rendererArchitectureUnitTest"))
 	dependsOn(tasks.named("sodiumConfigUnitTest"))
 	dependsOn(tasks.named("temporalContractValidation"))

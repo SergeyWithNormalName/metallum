@@ -5,10 +5,12 @@ import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.SunShadowCache;
 import com.metallum.client.lighting.SunShadowFrame;
 import com.metallum.client.lighting.SunShadowStabilizer;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.renderer.SunShadowLayout;
+import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.mojang.blaze3d.GpuFormat;
@@ -38,6 +40,7 @@ final class SunShadowGpuResources implements AutoCloseable {
     private final TextureTarget[] workingCascades;
     private final ProjectionMatrixBuffer projectionBuffer;
     private final MetalGpuSampler comparisonSampler;
+    private final MetalGpuSampler godRayComparisonSampler;
     private final SunShadowStabilizer stabilizer;
     private final SunShadowCache cache;
     private SunShadowFrame frame;
@@ -66,7 +69,8 @@ final class SunShadowGpuResources implements AutoCloseable {
             final TextureTarget[] staticCascades,
             final TextureTarget[] workingCascades,
             final ProjectionMatrixBuffer projectionBuffer,
-            final MetalGpuSampler comparisonSampler
+            final MetalGpuSampler comparisonSampler,
+            final MetalGpuSampler godRayComparisonSampler
     ) {
         this.generation = generation;
         this.budget = budget;
@@ -75,6 +79,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         this.workingCascades = workingCascades;
         this.projectionBuffer = projectionBuffer;
         this.comparisonSampler = comparisonSampler;
+        this.godRayComparisonSampler = godRayComparisonSampler;
         this.stabilizer = new SunShadowStabilizer();
         this.cache = new SunShadowCache(budget.totalBytes());
     }
@@ -94,6 +99,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         TextureTarget[] workingCascades = new TextureTarget[budget.cascadeCount()];
         ProjectionMatrixBuffer projection = null;
         MetalGpuSampler comparisonSampler = null;
+        MetalGpuSampler godRayComparisonSampler = null;
         try {
             params = new MetalGpuBuffer(
                     device,
@@ -132,6 +138,16 @@ final class SunShadowGpuResources implements AutoCloseable {
                     OptionalDouble.of(0.0),
                     MTLCompareFunction.GreaterEqual
             );
+            godRayComparisonSampler = new MetalGpuSampler(
+                    device,
+                    AddressMode.CLAMP_TO_EDGE,
+                    AddressMode.CLAMP_TO_EDGE,
+                    FilterMode.NEAREST,
+                    FilterMode.NEAREST,
+                    1,
+                    OptionalDouble.of(0.0),
+                    MTLCompareFunction.GreaterEqual
+            );
             return new SunShadowGpuResources(
                     generation,
                     budget,
@@ -139,9 +155,13 @@ final class SunShadowGpuResources implements AutoCloseable {
                     staticCascades,
                     workingCascades,
                     projection,
-                    comparisonSampler
+                    comparisonSampler,
+                    godRayComparisonSampler
             );
         } catch (RuntimeException | Error failure) {
+            if (godRayComparisonSampler != null) {
+                godRayComparisonSampler.close();
+            }
             if (comparisonSampler != null) {
                 comparisonSampler.close();
             }
@@ -257,7 +277,7 @@ final class SunShadowGpuResources implements AutoCloseable {
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),
                 environment.medium().ordinal(),
-                0);
+                VisualStyleRuntime.activeWater().shaderPolicyId());
         return encode(environment, frameState, com.metallum.client.lighting.cloud.CloudShadowFrameState.disabled());
     }
 
@@ -347,25 +367,31 @@ final class SunShadowGpuResources implements AutoCloseable {
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),
                 environment.medium().ordinal(),
-                0);
+                VisualStyleRuntime.activeWater().shaderPolicyId());
         putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET,
                 cloudShadow.cloudOffsetX(), cloudShadow.cloudOffsetZ(),
                 cloudShadow.gridWidth(), cloudShadow.gridHeight());
         putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET,
                 cloudShadow.cloudHeight(), cloudShadow.cloudThickness(),
-                cloudShadow.cloudOpacity(), (float) cloudShadow.mode().id());
-        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET,
-                cloudShadow.shadowStrength(),
-                com.metallum.client.lighting.cloud.CloudShadowPolicy.HORIZON_LOW_ELEVATION,
-                com.metallum.client.lighting.cloud.CloudShadowPolicy.HORIZON_STABLE_ELEVATION,
-                0.0f);
+                cloudShadow.cloudOpacity(), cloudShadow.cloudFogEnd());
+        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET,
+                cloudShadow.cloudRed(), cloudShadow.cloudGreen(), cloudShadow.cloudBlue(),
+                com.metallum.client.lighting.cloud.CloudShadowPolicy.WATER_REFLECTION_STRENGTH);
         int cloudFlags = (cloudShadow.enabled() ? 1 : 0)
-                | (cloudShadow.mode() == com.metallum.client.lighting.cloud.CloudShadowMode.VOLUMETRIC ? 2 : 0);
+                | (cloudShadow.mode() == com.metallum.client.lighting.cloud.CloudShadowMode.VOLUMETRIC ? 2 : 0)
+                | (cloudShadow.directShadowEnabled() ? 4 : 0)
+                | (cloudShadow.skyReflectionEnabled() ? 8 : 0);
         putInt4(packet, EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET,
                 EnvironmentShadowBindingAbi.CLOUD_CONTRACT_VERSION,
                 cloudShadow.mode().id(),
                 (int) cloudShadow.patternGeneration(),
                 cloudFlags);
+        putVec4(packet, EnvironmentShadowBindingAbi.SKY_REFLECTION_COLOR_AND_HORIZON_STRENGTH_OFFSET,
+                cloudShadow.skyRed(), cloudShadow.skyGreen(), cloudShadow.skyBlue(),
+                cloudShadow.horizonStrength());
+        putVec4(packet, EnvironmentShadowBindingAbi.HORIZON_REFLECTION_COLOR_AND_CLOUD_FOG_END_OFFSET,
+                cloudShadow.horizonRed(), cloudShadow.horizonGreen(), cloudShadow.horizonBlue(),
+                cloudShadow.cloudFogEnd());
         this.frame = selected;
         this.renderedSubmitIndex = selected.needsShadowPass()
                 ? Long.MIN_VALUE
@@ -481,7 +507,7 @@ final class SunShadowGpuResources implements AutoCloseable {
                 this.paramsRing.nativeHandle(),
                 paramsOffset,
                 EnvironmentShadowBindingAbi.PARAMS_SLOT,
-                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                materialEnvironmentStageMask(VertexReflectionExperiment.isLayoutEnabled())
         );
         int[] slots = EnvironmentShadowBindingAbi.shadowTextureSlots();
         for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
@@ -498,6 +524,43 @@ final class SunShadowGpuResources implements AutoCloseable {
         }
     }
 
+    static int materialEnvironmentStageMask(final boolean vertexReflectionRuntimeEnabled) {
+        return MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                | (vertexReflectionRuntimeEnabled ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0);
+    }
+
+    MetalGpuSampler godRayComparisonSampler() {
+        ensureOpen();
+        return this.godRayComparisonSampler;
+    }
+
+    void bindGodRayVisibility(final MTLRenderCommandEncoder encoder, final int inFlightSlot) {
+        ensureOpen();
+        if (this.frame == null || !isReady(this.frame.submitIndex())) {
+            throw new IllegalStateException("Sun-shadow bindings are not ready for God-Ray visibility");
+        }
+        long paramsOffset = (long) inFlightSlot * SunShadowLayout.PARAMS_BYTES;
+        encoder.setBuffer(
+                this.paramsRing.nativeHandle(),
+                paramsOffset,
+                EnvironmentShadowBindingAbi.PARAMS_SLOT,
+                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+        );
+        int[] slots = EnvironmentShadowBindingAbi.shadowTextureSlots();
+        for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
+            TextureTarget target = this.workingCascades[Math.min(
+                    cascade, this.workingCascades.length - 1
+            )];
+            MetalGpuTexture depth = (MetalGpuTexture) target.getDepthTexture();
+            encoder.setTextureAndSampler(
+                    depth.nativeHandle(),
+                    this.godRayComparisonSampler.nativeHandle(),
+                    slots[cascade],
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+        }
+    }
+
     @Override
     public void close() {
         if (this.closed) {
@@ -506,6 +569,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         this.closed = true;
         this.frame = null;
         this.cacheDecision = null;
+        this.godRayComparisonSampler.close();
         this.comparisonSampler.close();
         this.projectionBuffer.close();
         for (TextureTarget target : this.staticCascades) {

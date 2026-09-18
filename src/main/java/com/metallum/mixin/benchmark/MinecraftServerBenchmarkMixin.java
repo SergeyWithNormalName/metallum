@@ -1,6 +1,5 @@
 package com.metallum.mixin.benchmark;
 
-import com.metallum.Metallum;
 import net.minecraft.server.MinecraftServer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -32,7 +31,6 @@ abstract class MinecraftServerBenchmarkMixin {
         }
         server.tickRateManager().setFrozen(true);
         this.metallum$simulationFrozen = true;
-        Metallum.LOGGER.info("METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN");
     }
 
     @Inject(method = "shouldRun(Lnet/minecraft/server/TickTask;)Z", at = @At("HEAD"), cancellable = true)

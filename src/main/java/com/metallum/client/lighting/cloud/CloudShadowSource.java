@@ -15,7 +15,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Immutable CPU source pattern and periodic 2D prefiltered coverage for Metallum Cloud Shadows.
+ * Immutable CPU source pattern with separate shadow-filtered and visual cloud coverage.
  *
  * <p>Derives directly from the actual vanilla cloud pattern (textures/environment/clouds.png)
  * or mirrors the runtime {@link CloudRenderer.TextureData}. Recomputed safely on resource reload.</p>
@@ -27,21 +27,31 @@ public final class CloudShadowSource {
     private final int width;
     private final int height;
     private final float[] baseCoverage;
+    private final float[] visualCoverage;
     private final long generation;
     private final boolean available;
 
-    private static final CloudShadowSource EMPTY = new CloudShadowSource(1, 1, new float[]{0.0f}, 0L, false);
+    private static final CloudShadowSource EMPTY = new CloudShadowSource(
+            1,
+            1,
+            new float[]{0.0f},
+            new float[]{0.0f},
+            0L,
+            false
+    );
 
     private CloudShadowSource(
             final int width,
             final int height,
             final float[] baseCoverage,
+            final float[] visualCoverage,
             final long generation,
             final boolean available
     ) {
         this.width = width;
         this.height = height;
         this.baseCoverage = baseCoverage;
+        this.visualCoverage = visualCoverage;
         this.generation = generation;
         this.available = available;
     }
@@ -111,16 +121,18 @@ public final class CloudShadowSource {
     }
 
     /**
-     * Populates a contiguous R8_UNORM byte buffer representing one periodic transmittance tile.
+     * Populates a contiguous RG8_UNORM tile. R stores sun-direction transmittance generated from
+     * softly prefiltered density. G stores the raw vanilla occupied-cell mask so reflected cloud
+     * silhouettes retain the same 12-block shape as the visible CloudRenderer mesh.
      *
      * @param mode active cloud shadow mode (FLAT or VOLUMETRIC)
      * @param toLightX celestial ray direction X
      * @param toLightY celestial ray direction Y
      * @param toLightZ celestial ray direction Z
      * @param cloudOpacity resolved cloud visual opacity [0..1]
-     * @param output destination byte buffer with capacity >= width * height
+     * @param output destination byte buffer with capacity >= width * height * 2
      */
-    public void generateTransmittanceBytes(
+    public void generateTextureBytes(
             final CloudShadowMode mode,
             final float toLightX,
             final float toLightY,
@@ -131,14 +143,15 @@ public final class CloudShadowSource {
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(output, "output");
         int totalPixels = this.width * this.height;
-        if (output.remaining() < totalPixels) {
-            throw new IllegalArgumentException("Destination buffer is too small for transmittance tile");
+        if (output.remaining() < totalPixels * 2) {
+            throw new IllegalArgumentException("Destination buffer is too small for cloud data tile");
         }
 
         if (mode == CloudShadowMode.NONE || !this.available || cloudOpacity <= 0.005f) {
-            // Unshadowed: all 255 (1.0)
+            // Unshadowed and no visible cloud coverage.
             for (int index = 0; index < totalPixels; index++) {
                 output.put((byte) 0xFF);
+                output.put((byte) 0x00);
             }
             return;
         }
@@ -149,6 +162,8 @@ public final class CloudShadowSource {
                 float trans = CloudShadowPolicy.flatTransmittance(cov, cloudOpacity);
                 int byteVal = Math.clamp(Math.round(trans * 255.0f), 0, 255);
                 output.put((byte) byteVal);
+                output.put((byte) Math.clamp(
+                        Math.round(this.visualCoverage[index] * 255.0f), 0, 255));
             }
             return;
         }
@@ -179,6 +194,8 @@ public final class CloudShadowSource {
                 float trans = CloudShadowPolicy.volumetricTransmittance(opticalDensity, cloudOpacity);
                 int byteVal = Math.clamp(Math.round(trans * 255.0f), 0, 255);
                 output.put((byte) byteVal);
+                float visual = this.visualCoverage[z * this.width + x];
+                output.put((byte) Math.clamp(Math.round(visual * 255.0f), 0, 255));
             }
         }
     }
@@ -200,7 +217,14 @@ public final class CloudShadowSource {
             }
         } catch (Exception exception) {
             LOGGER.warn("Failed to load vanilla cloud texture for Cloud Shadows; failing open", exception);
-            return new CloudShadowSource(256, 256, new float[256 * 256], generation, false);
+            return new CloudShadowSource(
+                    256,
+                    256,
+                    new float[256 * 256],
+                    new float[256 * 256],
+                    generation,
+                    false
+            );
         }
     }
 
@@ -226,7 +250,14 @@ public final class CloudShadowSource {
             }
         }
         float[] prefiltered = prefilterCoverage(rawOccupied, width, height);
-        return new CloudShadowSource(width, height, prefiltered, generation, true);
+        return new CloudShadowSource(
+                width,
+                height,
+                prefiltered,
+                visualCoverage(rawOccupied),
+                generation,
+                true
+        );
     }
 
     /**
@@ -253,7 +284,14 @@ public final class CloudShadowSource {
             rawOccupied[index] = alpha >= 10;
         }
         float[] prefiltered = prefilterCoverage(rawOccupied, width, height);
-        return new CloudShadowSource(width, height, prefiltered, generation, true);
+        return new CloudShadowSource(
+                width,
+                height,
+                prefiltered,
+                visualCoverage(rawOccupied),
+                generation,
+                true
+        );
     }
 
     /**
@@ -273,7 +311,22 @@ public final class CloudShadowSource {
             }
         }
         float[] prefiltered = prefilterCoverage(rawOccupied, width, height);
-        return new CloudShadowSource(width, height, prefiltered, generation, true);
+        return new CloudShadowSource(
+                width,
+                height,
+                prefiltered,
+                visualCoverage(rawOccupied),
+                generation,
+                true
+        );
+    }
+
+    private static float[] visualCoverage(final boolean[] rawOccupied) {
+        float[] result = new float[rawOccupied.length];
+        for (int index = 0; index < rawOccupied.length; index++) {
+            result[index] = rawOccupied[index] ? 1.0f : 0.0f;
+        }
+        return result;
     }
 
     /**

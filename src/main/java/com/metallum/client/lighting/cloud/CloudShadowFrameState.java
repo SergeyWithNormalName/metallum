@@ -1,9 +1,9 @@
 package com.metallum.client.lighting.cloud;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.renderer.style.LinearColor;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.util.ARGB;
-import net.minecraft.world.phys.Vec3;
 
 import java.util.Objects;
 
@@ -15,6 +15,7 @@ public record CloudShadowFrameState(
         float cloudHeight,
         float cloudThickness,
         float cloudOpacity,
+        float cloudFogEnd,
         float cloudOffsetX,
         float cloudOffsetZ,
         float gridWidth,
@@ -22,8 +23,19 @@ public record CloudShadowFrameState(
         float toLightX,
         float toLightY,
         float toLightZ,
-        float shadowStrength,
+        float cloudRed,
+        float cloudGreen,
+        float cloudBlue,
+        float skyRed,
+        float skyGreen,
+        float skyBlue,
+        float horizonRed,
+        float horizonGreen,
+        float horizonBlue,
+        float horizonStrength,
         long patternGeneration,
+        boolean directShadowEnabled,
+        boolean skyReflectionEnabled,
         boolean enabled
 ) {
     public static final CloudShadowFrameState DISABLED = new CloudShadowFrameState(
@@ -33,13 +45,25 @@ public record CloudShadowFrameState(
             0.0f,
             0.0f,
             0.0f,
+            0.0f,
             3072.0f,
             3072.0f,
             0.0f,
             1.0f,
             0.0f,
             0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
             0L,
+            false,
+            false,
             false
     );
 
@@ -58,36 +82,52 @@ public record CloudShadowFrameState(
             final CloudStatus cloudStatus,
             final float cloudHeight,
             final int cloudColorArgb,
+            final int skyColorArgb,
+            final int horizonColorArgb,
+            final int cloudRangeChunks,
             final long gameTime,
             final float partialTick,
             final EnvironmentDescriptor environment,
             final CloudShadowSource source
     ) {
-        float opacity = ARGB.alpha(cloudColorArgb) / 255.0f;
-        boolean sourceAvailable = source != null && source.isAvailable();
-        CloudShadowMode mode = CloudShadowMode.fromMinecraft(cloudStatus, cloudHeight, opacity, sourceAvailable);
-
-        if (mode == CloudShadowMode.NONE || environment == null || !environment.sunShadowEligible()) {
+        if (environment == null || environment.profile() != EnvironmentDescriptor.Profile.CELESTIAL) {
             return DISABLED;
         }
 
-        int width = source.width();
-        int height = source.height();
-        float gridW = source.gridWidthBlocks();
-        float gridH = source.gridHeightBlocks();
+        float opacity = ARGB.alpha(cloudColorArgb) / 255.0f;
+        boolean sourceAvailable = source != null && source.isAvailable();
+        CloudShadowMode mode = CloudShadowMode.fromMinecraft(cloudStatus, cloudHeight, opacity, sourceAvailable);
+        boolean cloudsEnabled = mode != CloudShadowMode.NONE;
+
+        LinearColor cloudColor = LinearColor.fromSrgb(
+                ARGB.red(cloudColorArgb) / 255.0f,
+                ARGB.green(cloudColorArgb) / 255.0f,
+                ARGB.blue(cloudColorArgb) / 255.0f
+        );
+        LinearColor skyColor = LinearColor.fromSrgb(
+                ARGB.red(skyColorArgb) / 255.0f,
+                ARGB.green(skyColorArgb) / 255.0f,
+                ARGB.blue(skyColorArgb) / 255.0f
+        );
+        LinearColor horizonColor = LinearColor.fromSrgb(
+                ARGB.red(horizonColorArgb) / 255.0f,
+                ARGB.green(horizonColorArgb) / 255.0f,
+                ARGB.blue(horizonColorArgb) / 255.0f
+        );
+
+        int width = sourceAvailable ? source.width() : 256;
+        float gridW = sourceAvailable ? source.gridWidthBlocks() : 3072.0f;
+        float gridH = sourceAvailable ? source.gridHeightBlocks() : 3072.0f;
 
         float offsetX = CloudShadowPolicy.computeCloudOffsetX(gameTime, partialTick, width);
         float offsetZ = CloudShadowPolicy.computeCloudOffsetZ();
 
-        float strength = (mode == CloudShadowMode.VOLUMETRIC)
-                ? CloudShadowPolicy.VOLUMETRIC_SHADOW_MAX_ATTENUATION
-                : CloudShadowPolicy.FLAT_SHADOW_MAX_ATTENUATION;
-
         return new CloudShadowFrameState(
                 mode,
-                cloudHeight,
+                Float.isFinite(cloudHeight) ? cloudHeight : 0.0f,
                 CloudShadowPolicy.CLOUD_THICKNESS_BLOCKS,
-                opacity,
+                cloudsEnabled ? opacity : 0.0f,
+                Math.max(cloudRangeChunks * 16.0f, 16.0f),
                 offsetX,
                 offsetZ,
                 gridW,
@@ -95,9 +135,20 @@ public record CloudShadowFrameState(
                 environment.toLightX(),
                 environment.toLightY(),
                 environment.toLightZ(),
-                strength,
-                source.generation(),
-                true
+                cloudColor.red(),
+                cloudColor.green(),
+                cloudColor.blue(),
+                skyColor.red(),
+                skyColor.green(),
+                skyColor.blue(),
+                horizonColor.red(),
+                horizonColor.green(),
+                horizonColor.blue(),
+                ARGB.alpha(horizonColorArgb) / 255.0f,
+                sourceAvailable ? source.generation() : 0L,
+                cloudsEnabled && environment.sunShadowEligible(),
+                true,
+                cloudsEnabled
         );
     }
 }

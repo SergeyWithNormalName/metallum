@@ -1,0 +1,425 @@
+Metallum benchmark preflight passed
+  display: Built-in Retina Display, 3024x1964@120, exclusive fullscreen
+  pacing: VSync off, maxFps=260
+  scene: output=scene, source=sRGB, lighting=advanced (true/balanced), renderer-schema=5, bloom=0.18, strength=1.0
+GI_G6_REQUEST mode=g6_live persistent=true dynamic=true receiver=true diagnostic_flags=false route=hdrtest-torch-toggle-v1 status=REQUESTED
+  settings: native-hdr-fancy-gi-live-v1 (46bda4e1537db4ce145d4322ec985a034a30dd3b371dc918e6f4d60b36960c6c; spec 8bf845b207048cc442620b2ef0e8bc05e6ca6721bc27018ab6121eba8ebd1817)
+  workload: preset=fancy, render/simulation=16/12, entities=1.0, particles=0, mipmaps=4
+  runtime contract: GUI scale=auto, Sodium workers=4, packs=vanilla,fabric-api-base,fabric-block-getter-api-v2,fabric-lifecycle-events-v1,fabric-renderer-api-v1,fabric-rendering-fluids-v1,fabric-rendering-v1,fabric-resource-loader-v0,fabric-resource-loader-v1,fabric-transitive-access-wideners-v1,fabricloader,metallum,sodium
+  MetalFX: OFF (persistent config remains off)
+  route: hdrtest-torch-toggle-v1 (7f0a03058371964e81ef95002644a1744793def24958ccebb8c808fb91e46cc8)
+  torch toggle epoch: position=[80,75,-112], initial=minecraft:air, support=minecraft:grass_block, apply=300, remove=450, observe=300
+  fixture: hdrtest-static-v1 (a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5, read-only)
+  player: MetallumBench / b07a402a-d8ea-354f-9398-aaf208a798b9
+  pose: minecraft:overworld [86.1241372798128, 74.0, -95.57730763953901] yaw=155.39700317 pitch=13.20000648
+  clock/weather/simulation: tick=181406 paused, clear=6000 ticks, frozen
+  frames: 1800 warmup + 3000 measurement
+  commit: 9862da8f4ce6 (dirty worktree state)
+  source: 10f157bef162025e874219b53a9574d572329408e31201490374359995b55092
+  raw report: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.raw.jsonl
+  transcript: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.transcript.log
+  reference capture: enabled (performance result will not be attested)
+Building the exact Java, resource, and native benchmark artifacts
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+Fabric Loom: 1.16.3
+
+> Task :compileJava UP-TO-DATE
+> Task :buildMacNative UP-TO-DATE
+> Task :compileClearMetal UP-TO-DATE
+> Task :compileClusterBuildMetal UP-TO-DATE
+> Task :compileDynamicVoxelShadowMetal UP-TO-DATE
+> Task :compileEntityMotionMetal UP-TO-DATE
+> Task :compileGiFieldMetal UP-TO-DATE
+> Task :compileGiTransportMetal UP-TO-DATE
+> Task :compileHdrEffectsMetal UP-TO-DATE
+> Task :compilePresentMetal UP-TO-DATE
+> Task :compileRadianceClipmapMetal UP-TO-DATE
+> Task :compileSodiumLightPatchMetal UP-TO-DATE
+> Task :compileTemporalDiagnosticsMetal UP-TO-DATE
+> Task :compileVoxelOccupancyMetal UP-TO-DATE
+> Task :linkMacBuiltinMetallib UP-TO-DATE
+> Task :processResources UP-TO-DATE
+> Task :classes UP-TO-DATE
+
+BUILD SUCCESSFUL in 6s
+16 actionable tasks: 16 up-to-date
+  artifact: 2dae57f64db16658d10326b3ad5ed21a95f8759d789b7e203a96dcbc64bd8bbb
+  temporary world: MetallumBenchmark-20260831T104317Z.yLxCD3 (strict APFS CoW clone)
+Running Minecraft benchmark quietly (live output would perturb frame pacing)
+  console log: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.console.log
+Picked up JAVA_TOOL_OPTIONS: 
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+Fabric Loom: 1.16.3
+
+> Task :compileJava UP-TO-DATE
+> Task :buildMacNative UP-TO-DATE
+> Task :compileClearMetal UP-TO-DATE
+> Task :compileClusterBuildMetal UP-TO-DATE
+> Task :compileDynamicVoxelShadowMetal UP-TO-DATE
+> Task :compileEntityMotionMetal UP-TO-DATE
+> Task :compileGiFieldMetal UP-TO-DATE
+> Task :compileGiTransportMetal UP-TO-DATE
+> Task :compileHdrEffectsMetal UP-TO-DATE
+> Task :compilePresentMetal UP-TO-DATE
+> Task :compileRadianceClipmapMetal UP-TO-DATE
+> Task :compileSodiumLightPatchMetal UP-TO-DATE
+> Task :compileTemporalDiagnosticsMetal UP-TO-DATE
+> Task :compileVoxelOccupancyMetal UP-TO-DATE
+> Task :linkMacBuiltinMetallib UP-TO-DATE
+> Task :processResources UP-TO-DATE
+> Task :classes UP-TO-DATE
+> Task :generateLog4jConfig UP-TO-DATE
+> Task :generateDLIConfig UP-TO-DATE
+> Task :configureLaunch UP-TO-DATE
+> Task :downloadAssets UP-TO-DATE
+> Task :configureClientLaunch UP-TO-DATE
+
+> Task :runClient
+Picked up JAVA_TOOL_OPTIONS: 
+[17:43:31] [main/INFO] (FabricLoader/GameProvider) Loading Minecraft 26.2 with Fabric Loader 0.19.3
+[17:43:31] [main/INFO] (FabricLoader/Mappings) Mappings not present!
+[17:43:31] [main/INFO] (FabricLoader) Loading 15 mods:
+	- fabricloader 0.19.3
+	- java 25
+	- metallum 0.0.21
+	- minecraft 26.2
+	- mixinextras 0.5.4
+	- sodium 0.9.1+mc26.2
+	   |-- fabric-api-base 2.0.4+ece063239c
+	   |-- fabric-block-getter-api-v2 2.0.7+ec56b6019c
+	   |-- fabric-lifecycle-events-v1 4.1.3+4575b05f9c
+	   |-- fabric-renderer-api-v1 14.0.1+eec4cc519c
+	   |-- fabric-rendering-fluids-v1 6.0.4+06488ac19c
+	   |-- fabric-rendering-v1 25.1.6+46a6d00c9c
+	   |-- fabric-resource-loader-v0 3.3.20+4fc5413f9c
+	   |-- fabric-resource-loader-v1 2.0.13+9edec1269c
+	   \-- fabric-transitive-access-wideners-v1 8.1.3+e098252d9c
+[17:43:31] [main/INFO] (FabricLoader/Mixin) SpongePowered MIXIN Subsystem Version=0.8.7 Source=file:/Users/sergejgenerozov/.gradle/caches/modules-2/files-2.1/net.fabricmc/sponge-mixin/0.17.3+mixin.0.8.7/41c4a3984a80f4679e759fb9f495587acc5cdac7/sponge-mixin-0.17.3+mixin.0.8.7.jar Service=Knot/Fabric Env=CLIENT
+[17:43:31] [main/INFO] (FabricLoader/Mixin) Compatibility level set to JAVA_25
+[17:43:32] [main/INFO] (Sodium) Loaded configuration file for Sodium: 36 options available, 0 override(s) found
+[17:43:32] [main/INFO] (metallum) [GI_G2] mixin gate requested=true exact_versions=true enabled=true
+[17:43:32] [main/INFO] (Sodium-GraphicsAdapterProbe) Searching for graphics cards...
+[17:43:32] [main/INFO] (FabricLoader/MixinExtras|Service) Initializing MixinExtras via com.llamalad7.mixinextras.service.MixinExtrasServiceImpl(version=0.5.4).
+[17:43:33] [Datafixer Bootstrap #0/INFO] (Minecraft) 295 Datafixer optimizations took 232 milliseconds
+[17:43:34] [main/WARN] (MacOperatingSystem) Unable to parse version 27.0 to a codename.
+[17:43:37] [Render thread/INFO] (Minecraft) Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]
+[17:43:37] [Render thread/INFO] (Minecraft) Setting user: MetallumBench
+[17:43:38] [Render thread/INFO] (Minecraft) Backend library: LWJGL version 3.4.1-snapshot
+[17:43:38] [Render thread/INFO] (metallum) Metal device: Apple M1 Pro
+2026-08-31 17:43:39.135 java[49165:2631095] [metallum] Precompiled Metal library ready in 0.237 ms (34 functions)
+2026-08-31 17:43:39.135 java[49165:2631095] [metallum] Built-in Metal pipeline warmup: mode PRECOMPILED, library 0.237 ms, pipelines 0.854 ms, PSOs 5, cache 5 hit / 5 miss, source compiles 0 (0.000 ms), failures 0
+[17:43:39] [Render thread/INFO] (metallum) Semantic HDR shaders: enabled (configured mode SCENE, potential EDR headroom 16.0)
+[17:43:39] [Render thread/INFO] (metallum) Configured HDR mode: SCENE, FP16 scene path: enabled
+[17:43:39] [Render thread/INFO] (metallum) MetalFX spatial scaling support: available
+[17:43:39] [Render thread/INFO] (metallum) MetalFX temporal scaling support: available
+[17:43:39] [Render thread/INFO] (metallum) Temporal camera-motion diagnostics: disabled
+[17:43:39] [Render thread/INFO] (metallum) Renderer generation request: contract=METALLUM, lighting=ADVANCED, preset=BALANCED, frameInterpolation=false (production executor Metal 3)
+[17:43:39] [Render thread/INFO] (Minecraft) Using graphics backend Metal, using drivers: macOS 27.0
+[17:43:39] [Render thread/INFO] (Minecraft) Using graphics device: Apple M1 Pro (Apple)
+[17:43:39] [Render thread/INFO] (Minecraft) Using graphics device extensions: MTLDevice, CAMetalLayer
+[17:43:39] [Render thread/INFO] (metallum) MainTarget scene contract: METALLUM_HDR_ACTUAL_RADIANCE, format: RGBA16_FLOAT
+[17:43:40] [Render thread/INFO] (Minecraft) Reloading ResourceManager: vanilla, fabric-api-base, fabric-block-getter-api-v2, fabric-lifecycle-events-v1, fabric-renderer-api-v1, fabric-rendering-fluids-v1, fabric-rendering-v1, fabric-resource-loader-v0, fabric-resource-loader-v1, fabric-transitive-access-wideners-v1, fabricloader, metallum, sodium
+[17:43:41] [Render thread/INFO] (metallum) Semantic HDR enhancement is active with current EDR headroom 1.2
+[17:43:41] [Render thread/INFO] (metallum) Metal output: ENHANCED (current EDR headroom 1.2, potential 16.0)
+[17:43:41] [Download-1/INFO] (Minecraft) Could not authorize you against Realms server: java.lang.RuntimeException: Failed to parse into SignedJWT: FabricMC
+[17:43:41] [Render thread/WARN] (metallum) Renderer generation request resolved with fallback [MATERIAL_CONTRACT_UNAVAILABLE]: contract=LEGACY, lighting=VANILLA, output=HDR, upscale=NATIVE, interpolation=OFF
+[17:43:41] [Render thread/INFO] (metallum) Seeded SDR GUI target is active (RGBA8_UNORM)
+[17:43:41] [Worker-Main-5/INFO] (Minecraft) Found unifont_all_no_pua-17.0.01.hex, loading
+[17:43:41] [Worker-Main-2/INFO] (Minecraft) Found unifont_pua-17.0.01.hex, loading
+[17:43:42] [Worker-Main-8/INFO] (Minecraft) Found unifont_jp_patch-17.0.01.hex, loading
+[17:43:51] [Render thread/INFO] (metallum) Linear scene shader preflight active: all required Minecraft 26.2 and Sodium scene shaders passed preflight
+[17:43:51] [Render thread/INFO] (metallum) METALLUM material contract active: all Minecraft 26.2 and Sodium material roles passed source and PSO preflight
+[17:43:51] [Render thread/INFO] (metallum) Advanced shader generation active: Minecraft 26.2 and Sodium 0.9.1 Advanced terrain/entity/end-portal sources passed preflight
+[17:43:54] [Render thread/INFO] (Minecraft) OpenAL initialized on device Динамики MacBook Pro
+[17:43:54] [Render thread/INFO] (Minecraft) Sound engine started
+[17:43:54] [Render thread/INFO] (Minecraft) Created: 512x256x0 minecraft:textures/atlas/particles.png-atlas
+[17:43:54] [Render thread/INFO] (Minecraft) Created: 128x128x0 minecraft:textures/atlas/decorated_pot.png-atlas
+[17:43:54] [Render thread/INFO] (Minecraft) Created: 2048x1024x0 minecraft:textures/atlas/armor_trims.png-atlas
+[17:43:54] [Render thread/INFO] (Minecraft) Created: 512x256x0 minecraft:textures/atlas/paintings.png-atlas
+[17:43:54] [Render thread/INFO] (Minecraft) Created: 1024x512x0 minecraft:textures/atlas/shield_patterns.png-atlas
+[17:43:54] [Render thread/INFO] (Minecraft) Created: 4096x2048x4 minecraft:textures/atlas/blocks.png-atlas
+[17:43:55] [Render thread/INFO] (metallum) Loaded 1269 partial emissive terrain texture overlays
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 512x512x0 minecraft:textures/atlas/chest.png-atlas
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 256x128x0 minecraft:textures/atlas/celestials.png-atlas
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 1024x512x0 minecraft:textures/atlas/banner_patterns.png-atlas
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 1024x512x0 minecraft:textures/atlas/items.png-atlas
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 1024x1024x0 minecraft:textures/atlas/gui.png-atlas
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 128x64x0 minecraft:textures/atlas/map_decorations.png-atlas
+[17:43:55] [Render thread/INFO] (Minecraft) Created: 512x512x0 minecraft:textures/atlas/shulker_boxes.png-atlas
+[17:43:55] [Render thread/INFO] (metallum) Built face-aware water-reflection appearance for 30989 block states (0 fallbacks)
+[17:43:55] [Render thread/INFO] (metallum) Renderer generation admitted: contract=METALLUM, lighting=ADVANCED, output=HDR, upscale=NATIVE, interpolation=OFF
+[17:43:57] [Render thread/INFO] (Minecraft) Loaded 1585 recipes
+[17:43:57] [Render thread/INFO] (Minecraft) Loaded 1688 advancements
+[17:43:57] [Server thread/INFO] (Minecraft) Starting integrated minecraft server version 26.2
+[17:43:57] [Server thread/INFO] (Minecraft) Generating keypair
+[17:43:58] [Server thread/INFO] (Minecraft) Loading 0 persistent chunks...
+[17:43:58] [Server thread/INFO] (Minecraft) Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[17:43:58] [Server thread/INFO] (Minecraft) Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[17:43:58] [Server thread/INFO] (Minecraft) Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[17:43:58] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage (world): All chunks are saved
+[17:43:58] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[17:43:58] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[17:43:58] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage: All dimensions are saved
+[17:43:59] [Server thread/INFO] (Minecraft) Loading 49 chunks for player spawn...
+[17:43:59] [Server thread/INFO] (Minecraft) Preparing spawn area: 16%
+[17:43:59] [Server thread/INFO] (Minecraft) Preparing spawn area: 16%
+[17:43:59] [Server thread/INFO] (Minecraft) Preparing spawn area: 59%
+[17:43:59] [Server thread/INFO] (Minecraft) Time elapsed: 1109 ms
+[17:43:59] [Server thread/INFO] (Minecraft) MetallumBench[local:E:6e06ad4f] logged in with entity id 101 at (86.1241372798128, 74.0, -95.57730763953901)
+[17:43:59] [Server thread/INFO] (Minecraft) MetallumBench joined the game
+[17:43:59] [Server thread/INFO] (Minecraft) Changing view distance to 16, from 10
+[17:43:59] [Server thread/INFO] (Minecraft) Changing simulation distance to 12, from 0
+[17:43:59] [Render thread/INFO] (ChunkBuilder) Started 4 worker threads
+[17:43:59] [Render thread/INFO] (metallum) [GI_G2] accepted-output semantic capture active for minecraft:overworld
+[17:43:59] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=ARMED scope=Built-in Retina Display target=3024x1964 warmup=1800 measure=3000 sequence=[OFF] route=hdrtest-torch-toggle-v1
+[17:43:59] [Render thread/INFO] (Minecraft) Loaded 2 advancements
+[17:43:59] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=MONITOR handle=536415247104 name=Built-in Retina Display modes=[1920x1200@48, 1920x1200@50, 1920x1200@60, 1920x1200@120, 2048x1280@48, 2048x1280@50, 2048x1280@60, 2048x1280@120, 2048x1330@48, 2048x1330@50, 2048x1330@60, 2048x1330@120, 2294x1432@48, 2294x1432@50, 2294x1432@60, 2294x1432@120, 2294x1490@48, 2294x1490@50, 2294x1490@60, 2294x1490@120, 2560x1600@48, 2560x1600@50, 2560x1600@60, 2560x1600@120, 2704x1690@48, 2704x1690@50, 2704x1690@60, 2704x1690@120, 2704x1756@48, 2704x1756@50, 2704x1756@60, 2704x1756@120, 3024x1890@48, 3024x1890@50, 3024x1890@60, 3024x1890@120, 3024x1964@48, 3024x1964@50, 3024x1964@60, 3024x1964@120]
+[17:43:59] [Render thread/INFO] (metallum) [GI_G2] accepted=0 stale=0 outside=0 capacityRejected=0 discarded=0 residentTags=0 activeCandidates=0 peakCandidates=0 peakCandidateBytes=0
+[17:43:59] [Render thread/INFO] (ChunkBuilder) Stopping worker threads
+[17:43:59] [Server thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=SURVIVAL_GUARD_APPLIED player=b07a402a-d8ea-354f-9398-aaf208a798b9 original_health=20.0
+[17:43:59] [Render thread/INFO] (ChunkBuilder) Started 4 worker threads
+[17:43:59] [Render thread/INFO] (metallum) [GI_G2] accepted-output semantic capture active for minecraft:overworld
+[17:44:00] [Render thread/INFO] (Minecraft) Resizing Dynamic Transforms UBO, capacity limit of 2 reached during a single frame. New capacity will be 4.
+[17:44:00] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=MOVE_WINDOW monitor=3024x1964@120 (24bit) workarea=0,33 1512x949
+[17:44:00] [Render thread/INFO] (Minecraft) Resizing Dynamic Transforms UBO, capacity limit of 4 reached during a single frame. New capacity will be 8.
+[17:44:00] [Render thread/INFO] (Minecraft) Resizing Dynamic Transforms UBO, capacity limit of 8 reached during a single frame. New capacity will be 16.
+[17:44:00] [Chunk Render Task Executor #2/INFO] (metallum) Sodium semantic HDR emission tagging is active (strength 15, exact true)
+[17:44:00] [Download-1/ERROR] (Minecraft) Failed to retrieve profile key pair
+
+MinecraftClientHttpException[type=HTTP_ERROR, status=401, response=ErrorResponse[path=/player/certificates, error=null, errorMessage=null, details=null]]
+	at knot//com.mojang.authlib.minecraft.client.MinecraftClient.buildHttpException(MinecraftClient.java:170)
+	at knot//com.mojang.authlib.minecraft.client.MinecraftClient.readServiceResponse(MinecraftClient.java:147)
+	at knot//com.mojang.authlib.minecraft.client.MinecraftClient.post(MinecraftClient.java:89)
+	at knot//com.mojang.authlib.yggdrasil.YggdrasilUserApiService.getKeyPair(YggdrasilUserApiService.java:62)
+	at knot//net.minecraft.client.multiplayer.AccountProfileKeyPairManager.fetchProfileKeyPair(AccountProfileKeyPairManager.java:144)
+	at knot//net.minecraft.client.multiplayer.AccountProfileKeyPairManager.lambda$readOrFetchProfileKeyPair$0(AccountProfileKeyPairManager.java:75)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1789)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+[17:44:01] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=WINDOW_READY monitor=Built-in Retina Display video_mode=3024x1964@120 (24bit) framebuffer=3024x1964 window=3024x1964 screen=3024x1964
+[17:44:01] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=36 stageFrames=1 server_frozen=true client_ready=true
+[17:44:01] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG before_teleport player_dim=minecraft:overworld
+[17:44:01] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG after_teleport player_dim=minecraft:overworld teleported=true
+[17:44:02] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=ROUTE_APPLY route=hdrtest-torch-toggle-v1 fixture=hdrtest-static-v1 player=MetallumBench/b07a402a-d8ea-354f-9398-aaf208a798b9 dimension=minecraft:overworld
+[17:44:02] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN
+[17:44:02] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=68 stageFrames=2 server_frozen=true client_ready=true
+[17:44:03] [Render thread/INFO] (metallum) Native-resolution HDR fast path is active: fused HDR reconstruction and SDR UI seed, lightweight final composite
+[17:44:04] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=95 stageFrames=33 server_frozen=true client_ready=true
+[17:44:04] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=103 stageFrames=64 server_frozen=true client_ready=true
+[17:44:05] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=114 stageFrames=95 server_frozen=true client_ready=true
+[17:44:05] [Render thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG waiting_for_route mismatch client=null server=null stable_frames=37 target_stable_frames=120
+[17:44:05] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=127 stageFrames=126 server_frozen=true client_ready=true
+[17:44:05] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=33/snapshot=33, READY=24, STALE=0, APPROXIMATE=9, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:7/16:2/32:4/64:11, cacheCovered=33, coverageLimited=0, residents=24, pendingBuilds=6, pendingUploads=0 (847872 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:05] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:44:06.203 java[49165:2632530] [metallum] GPU timing (startup segment -1, 300 presented frames, 12.2 FPS): presenting command buffer 11.280 ms avg / 5.278 p50 / 26.798 p95 / 43.414 p99 / 106.971 max
+  present pacing: 46.419 ms p95 / 889.781 ms p99, 0.2 FPS 1% low / 0.1 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.383 ms/frame avg, 38.284 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 2.852 ms/frame avg, 19.480 ms max interval (3982 waits)
+  command completion wait (CPU): n/a
+[17:44:06] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=142 stageFrames=157 server_frozen=true client_ready=true
+[17:44:07] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=159 stageFrames=188 server_frozen=true client_ready=true
+[17:44:07] [Render thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG waiting_for_route mismatch client=null server=null stable_frames=67 target_stable_frames=120
+[17:44:08] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=174 stageFrames=219 server_frozen=true client_ready=true
+[17:44:08] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=190 stageFrames=250 server_frozen=true client_ready=true
+[17:44:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=advanced schema=5 defaults_used=false requested=advanced resolved=advanced l3=true l5=true l6=true status=PASS generation=6 shader_epoch=5 reason=none
+[17:44:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=ROUTE_READY route=hdrtest-torch-toggle-v1 stable_frames=120 pose=[86.1241372798128,74.0,-95.57730763953901;155.397,13.2000065] max_fps=260 resolved_gui_scale=8 resource_packs=vanilla,fabric-api-base,fabric-block-getter-api-v2,fabric-lifecycle-events-v1,fabric-renderer-api-v1,fabric-rendering-fluids-v1,fabric-rendering-v1,fabric-resource-loader-v0,fabric-resource-loader-v1,fabric-transitive-access-wideners-v1,fabricloader,metallum,sodium
+[17:44:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=SEGMENT_START index=1 total=1 mode=OFF warmup=1800 measure=3000
+[17:44:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=GI_G6_ADMISSION requested=g6_live resolved=g6_live contract=6 state=READY device_generation=1 presented_frame=427 ready_mask=7 field_generation=249 source_tick=427 transport_dispatches=101 cascade_builds=18/45/38 invalidations=249 bindings=5411 zero_bindings=1990 field_bindings=3421 resident_bytes=3276800 staging_bytes=524896 java_packet_bytes=1573656 combined_accounted_bytes=24637728 cap_bytes=25165824 dynamic=true vertex_only=true fragment_texture3d=0 stale=0 rejected=0 status=PASS
+[17:44:13] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=207/snapshot=207, READY=38, STALE=0, APPROXIMATE=169, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=169, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:13] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:44:16.813 java[49165:2632529] [metallum] GPU timing (warmup segment 0, 300 presented frames, 38.6 FPS): presenting command buffer 29.598 ms avg / 28.087 p50 / 44.010 p95 / 46.354 p99 / 49.239 max
+  present pacing: 29.853 ms p95 / 33.175 ms p99, 28.7 FPS 1% low / 26.5 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.359 ms/frame avg, 8.713 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 18.731 ms/frame avg, 23.468 ms max interval (7067 waits)
+  command completion wait (CPU): n/a
+[17:44:21] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:21] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:44:24.380 java[49165:2632530] [metallum] GPU timing (warmup segment 0, 300 presented frames, 39.7 FPS): presenting command buffer 27.737 ms avg / 27.455 p50 / 29.491 p95 / 30.545 p99 / 32.522 max
+  present pacing: 27.301 ms p95 / 30.371 ms p99, 31.2 FPS 1% low / 30.7 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.250 ms/frame avg, 7.089 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.052 ms/frame avg, 23.630 ms max interval (6686 waits)
+  command completion wait (CPU): n/a
+[17:44:28] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:28] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:44:31.950 java[49165:2632529] [metallum] GPU timing (warmup segment 0, 300 presented frames, 39.6 FPS): presenting command buffer 27.836 ms avg / 27.479 p50 / 29.591 p95 / 31.559 p99 / 34.563 max
+  present pacing: 27.641 ms p95 / 30.257 ms p99, 30.4 FPS 1% low / 27.2 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.290 ms/frame avg, 6.941 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 20.003 ms/frame avg, 26.386 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:44:36] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:36] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:44:39.492 java[49165:2631110] [metallum] GPU timing (warmup segment 0, 300 presented frames, 39.8 FPS): presenting command buffer 27.715 ms avg / 27.446 p50 / 29.350 p95 / 29.919 p99 / 31.455 max
+  present pacing: 27.620 ms p95 / 33.044 ms p99, 29.4 FPS 1% low / 29.2 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.363 ms/frame avg, 7.852 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.899 ms/frame avg, 23.475 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:44:43] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:43] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:44:47.026 java[49165:2631110] [metallum] GPU timing (warmup segment 0, 300 presented frames, 39.8 FPS): presenting command buffer 27.633 ms avg / 27.394 p50 / 29.380 p95 / 29.899 p99 / 31.176 max
+  present pacing: 27.090 ms p95 / 28.446 ms p99, 32.2 FPS 1% low / 30.4 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.324 ms/frame avg, 6.867 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.964 ms/frame avg, 23.571 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:44:51] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:51] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+[17:44:54] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=1100 stageFrames=252 server_frozen=true client_ready=true
+[17:44:54] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=ROUTE_CHECK event=MEASURE_START route=hdrtest-torch-toggle-v1 status=ready
+[17:44:54] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled=false state=OFF ready=false generation=3/0 origin=[0,0,0] sections=0/0/0 expected=0 invalidation=null quality_face_aware=true quality_first_surface=true quality_confidence=true
+[17:44:54] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=MEASURE_START index=1 mode=OFF presented_frame=1800
+2026-08-31 17:44:54.544 java[49165:2631110] [metallum] GPU timing (warmup segment 0, 300 presented frames, 39.9 FPS): presenting command buffer 27.602 ms avg / 27.406 p50 / 29.408 p95 / 30.475 p99 / 31.573 max
+  present pacing: 28.259 ms p95 / 33.450 ms p99, 29.0 FPS 1% low / 28.2 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.306 ms/frame avg, 10.184 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.777 ms/frame avg, 29.906 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:44:59] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:44:59] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+[17:45:02] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_BEGIN route=hdrtest-torch-toggle-v1 position=80,75,-112 measured_frame=300 observation_frames=300
+[17:45:02] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_APPLIED route=hdrtest-torch-toggle-v1 position=80,75,-112 measured_frame=301 requested_frame=300
+2026-08-31 17:45:02.079 java[49165:2631110] [metallum] GPU timing (measure segment 0, 300 presented frames, 39.9 FPS): presenting command buffer 26.551 ms avg / 25.921 p50 / 29.412 p95 / 32.713 p99 / 64.009 max
+  present pacing: 27.993 ms p95 / 33.164 ms p99, 21.5 FPS 1% low / 18.5 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.401 ms/frame avg, 10.314 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 20.088 ms/frame avg, 47.757 ms max interval (5699 waits)
+  command completion wait (CPU): n/a
+[17:45:04] [Render thread/WARN] (metallum) F2 spatial composite was unavailable; using the seeded SDR GUI target
+[17:45:04] [Render thread/INFO] (metallum) F2 screenshot source: full-resolution SDR GUI composite
+[17:45:04] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index=1 mode=OFF phase=TORCH_ON measured_frame=400
+[17:45:05] [Render thread/INFO] (Minecraft) [System] [CHAT] Saved screenshot as 2026-08-31_17.45.04.png
+[17:45:06] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_REMOVED route=hdrtest-torch-toggle-v1 position=80,75,-112 measured_frame=451 requested_frame=450
+[17:45:06] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:06] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+[17:45:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_COUNTERS epoch=1 requests=34/8 light_requests=24 geometry_or_unknown_requests=10 unique_light_sections=8 unique_geometry_or_unknown_sections=4 light_only_sections=4 mixed_cause_sections=4 light_scope_mismatches=0 light_scope_failures=0 tasks=14/7 outputs=16/8 accepted_mesh_payload_bytes=1101760 queue=3/0 busy=4/0 pending_results=7/0 max_pending_age_ns=74405458 errors=0 overflow=0
+[17:45:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_SIDECAR epoch=1 configured=false active=false accepted_geometry_payload_bytes=1101760 in_place_outputs=0 unique_in_place_sections=0 in_place_geometry_bytes=0 in_place_mesh_commands=0 full_upload_geometry_bytes=1101760 target_section_output=true target_section_in_place=false produced_bytes=0 uploaded_bytes=0 upload_commands=0 resize_copy_bytes=0 resize_copy_commands=0 telemetry_fallbacks=0 companions=0 live_geometry_bytes=0 live_sidecar_bytes=0 peak_sidecar_bytes=0 patched_pipelines=0 runtime_fallbacks=0
+[17:45:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_LIGHT_PATCH epoch=1 configured=false active=false compact_outputs=0 unique_compact_sections=0 geometry_bytes_elided=0 geometry_mesh_commands_elided=0 submitted_geometry_bytes=1101760 native_dispatches=0 native_mesh_commands=0 local_fallbacks=0 runtime_fallbacks=0 target_section_compact=false shadow_capacity_bytes=33554432 shadow_live_bytes=0 shadow_peak_bytes=0 resident_shadows=0 shadow_evictions=0 shadow_rejected_captures=0
+[17:45:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_RELIGHT_ORACLE epoch=1 configured=false active=false tasks=0 light_only_tasks=0 captured_plans=0 captured_quads=0 replay_attempts=0 replay_matches=0 mismatched_tasks=0 byte_mismatches=0 static_shadow_mismatches=0 static_shadow_rejections=0 rejected_tasks=0 scope_failures=0 stale_candidates=0 discarded_candidates=0 published_candidates=0 errors=0 skipped_full_remeshes=0 cache_capacity_bytes=33554432 cache_live_bytes=0 cache_peak_bytes=0 resident_plans=0 pinned_leases=0 cache_evictions=0 oversized_rejections=0 pinned_pressure_rejections=0
+[17:45:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_RELIGHT_FAST epoch=1 configured=false active=false decisions=0 created_outputs=0 fallback_to_original=0 cancelled=0 original_calls=0 accepted_outputs=0 stale_or_disposed=0 compact_commits=0 full_upload_commits=0 forced_rebuilds=0 generation_mismatches=0 topology_fallbacks=0 replay_fallbacks=0 reconstruction_fallbacks=0 created_geometry_bytes=0 errors=0
+[17:45:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=TORCH_EPOCH_END route=hdrtest-torch-toggle-v1 position=80,75,-112 measured_frame=600 rebuild_requests=34 unique_requested_sections=8 meshing_tasks=14 unique_meshed_sections=7 mesh_outputs=16 unique_uploaded_sections=8 accepted_mesh_payload_bytes=1101760 in_place_outputs=0 unique_in_place_sections=0 in_place_geometry_bytes=0 full_upload_geometry_bytes=1101760 target_section_output=true target_section_in_place=false max_builder_queue_depth=3 final_builder_queue_depth=0 max_busy_workers=4 final_busy_workers=0 max_pending_results=7 final_pending_results=0 max_pending_age_ns=74405458 telemetry_errors=0 telemetry_overflow=0
+2026-08-31 17:45:09.858 java[49165:2632530] [metallum] GPU timing (measure segment 0, 300 presented frames, 38.6 FPS): presenting command buffer 28.229 ms avg / 28.275 p50 / 31.331 p95 / 34.495 p99 / 38.226 max
+  present pacing: 30.394 ms p95 / 35.427 ms p99, 26.0 FPS 1% low / 23.5 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.386 ms/frame avg, 8.744 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 20.525 ms/frame avg, 27.709 ms max interval (5704 waits)
+  command completion wait (CPU): n/a
+[17:45:14] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:14] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:45:17.287 java[49165:2632528] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.4 FPS): presenting command buffer 27.018 ms avg / 26.795 p50 / 28.555 p95 / 29.048 p99 / 30.083 max
+  present pacing: 26.849 ms p95 / 30.265 ms p99, 31.8 FPS 1% low / 31.1 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.394 ms/frame avg, 7.794 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.726 ms/frame avg, 23.416 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:45:21] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:21] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:45:24.720 java[49165:2632528] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.4 FPS): presenting command buffer 27.035 ms avg / 26.838 p50 / 28.487 p95 / 29.045 p99 / 32.341 max
+  present pacing: 29.741 ms p95 / 32.285 ms p99, 29.5 FPS 1% low / 28.8 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.391 ms/frame avg, 8.742 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.208 ms/frame avg, 26.313 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:45:29] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:29] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:45:32.157 java[49165:2632528] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.4 FPS): presenting command buffer 27.090 ms avg / 26.852 p50 / 28.569 p95 / 29.164 p99 / 30.513 max
+  present pacing: 26.884 ms p95 / 30.668 ms p99, 31.4 FPS 1% low / 31.1 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.338 ms/frame avg, 6.895 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.786 ms/frame avg, 22.426 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:45:36] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:36] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:45:39.600 java[49165:2632529] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.3 FPS): presenting command buffer 27.070 ms avg / 26.837 p50 / 28.717 p95 / 30.038 p99 / 31.651 max
+  present pacing: 27.430 ms p95 / 29.654 ms p99, 30.6 FPS 1% low / 28.8 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.312 ms/frame avg, 7.176 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.681 ms/frame avg, 24.212 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:45:43] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:43] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:45:47.017 java[49165:2632530] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.4 FPS): presenting command buffer 27.008 ms avg / 26.817 p50 / 28.665 p95 / 29.182 p99 / 31.222 max
+  present pacing: 29.059 ms p95 / 32.788 ms p99, 28.2 FPS 1% low / 27.1 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.348 ms/frame avg, 9.087 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.403 ms/frame avg, 31.539 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:45:51] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:51] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:45:54.438 java[49165:2632530] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.5 FPS): presenting command buffer 26.941 ms avg / 26.782 p50 / 28.487 p95 / 29.739 p99 / 39.703 max
+  present pacing: 27.796 ms p95 / 32.681 ms p99, 23.2 FPS 1% low / 18.9 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.438 ms/frame avg, 11.215 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.529 ms/frame avg, 35.254 ms max interval (5692 waits)
+  command completion wait (CPU): n/a
+[17:45:58] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:45:58] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+2026-08-31 17:46:01.894 java[49165:2632528] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.2 FPS): presenting command buffer 27.018 ms avg / 26.760 p50 / 28.944 p95 / 29.987 p99 / 31.722 max
+  present pacing: 28.642 ms p95 / 32.051 ms p99, 21.3 FPS 1% low / 13.9 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.471 ms/frame avg, 49.051 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.500 ms/frame avg, 23.818 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:46:06] [Render thread/INFO] (metallum) L6 local shadows: active=true, descriptors=565/snapshot=565, READY=38, STALE=0, APPROXIMATE=527, BUILDING=0, FAIL_CLOSED=0, cachedEdges=8:20/16:2/32:4/64:12, cacheCovered=38, coverageLimited=527, residents=38, pendingBuilds=0, pendingUploads=0 (0 bytes), capacityBlocked=0, capacityWaitSkips=0, retryBackoff=0, uploads=0 (0 bytes), proxies=16/16, maxSteps=96, dynamic=0/0/0 candidates/selected/dropped, held=false, dispatches=0, rays=0, ready=0, fallback=0, coverageMiss=0, transitions=0->0, failures=0, pages=0 bytes
+[17:46:06] [Render thread/INFO] (metallum) METALLUM_L6_DYNAMIC candidates=0 selected=0 dropped=0 held=false dispatches=0 rays=0 ready=0 fallback=0 coverage_miss=0 static_to_dynamic=0 dynamic_to_static=0 failures=0 pages_bytes=0
+[17:46:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=MEASURE_END index=1 mode=OFF presented_frame=4800
+[17:46:09] [Server thread/INFO] (metallum) METALLUM_BENCHMARK_DEBUG at=start level_exists=true player_exists=true server_dim=minecraft:overworld server_paused=false ticks=2596 stageFrames=252 server_frozen=true client_ready=true
+[17:46:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=ROUTE_CHECK event=MEASURE_END route=hdrtest-torch-toggle-v1 status=ready
+[17:46:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=GI_G6_FINAL state=READY device_generation=1 admission_emitted=true admission_device_generation=1 ready_mask=7 build_in_flight=false field_generation=763 source_tick=2676 stale=0 rejected=0 latest_terrain_device_generation=1 latest_terrain_submit=5222 latest_bind_status=1 latest_carrier_safe=true latest_frame_compatible=true latest_ready_mask=7 latest_exact_mask_nonzero=true latest_field_generation=763 latest_source_tick=2676 combined_accounted_bytes=24637728 cap_bytes=25165824 block_samples=83 block_p95_submits=1 block_p99_submits=1 block_sla=true static_samples=260 static_p95_submits=1 static_p99_submits=2 static_sla=true scroll_samples=0 scroll_p95_submits=-1 scroll_p99_submits=-1 scroll_sla=false reset_samples=2 reset_p95_submits=17 reset_p99_submits=17 reset_sla=true queue_queued=5682 queue_completed=1879 queue_discarded=3803 queue_pending=0 queue_in_flight=0 queue_algebra=true measurement_start_bytes=24637728 accounted_delta=0 readback_bytes=0 status=PASS contract=6
+[17:46:09] [Render thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=3000 framebuffer=3024x1964
+[17:46:09] [Server thread/INFO] (metallum) METALLUM_BENCHMARK EVENT=SURVIVAL_GUARD_RESTORED player=b07a402a-d8ea-354f-9398-aaf208a798b9 health=20.0
+[17:46:09] [Render thread/INFO] (Minecraft) Stopping!
+2026-08-31 17:46:09.305 java[49165:2631110] [metallum] GPU timing (measure segment 0, 300 presented frames, 40.5 FPS): presenting command buffer 26.946 ms avg / 26.731 p50 / 28.536 p95 / 29.295 p99 / 30.548 max
+  present pacing: 27.718 ms p95 / 34.920 ms p99, 27.2 FPS 1% low / 26.9 FPS 0.1% low
+  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)
+  nextDrawable wait (CPU): 0.443 ms/frame avg, 11.626 ms max interval (300 waits)
+  in-flight semaphore wait (CPU): 19.469 ms/frame avg, 23.234 ms max interval (5700 waits)
+  command completion wait (CPU): n/a
+[17:46:09] [Server thread/INFO] (Minecraft) Stopping server
+[17:46:09] [Server thread/INFO] (Minecraft) Saving players
+[17:46:09] [Server thread/INFO] (Minecraft) MetallumBench lost connection: Disconnected
+[17:46:09] [Server thread/INFO] (Minecraft) MetallumBench left the game
+[17:46:09] [Server thread/INFO] (Minecraft) Stopping singleplayer server as player logged out
+[17:46:09] [Server thread/INFO] (Minecraft) Saving worlds
+[17:46:09] [Server thread/INFO] (Minecraft) Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[17:46:09] [Server thread/INFO] (Minecraft) Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[17:46:09] [Server thread/INFO] (Minecraft) Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[17:46:09] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage (world): All chunks are saved
+[17:46:09] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage (DIM1): All chunks are saved
+[17:46:09] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage (DIM-1): All chunks are saved
+[17:46:09] [Server thread/INFO] (Minecraft) ThreadedAnvilChunkStorage: All dimensions are saved
+[17:46:09] [Render thread/INFO] (metallum) [GI_G2] accepted=795 stale=0 outside=0 capacityRejected=0 discarded=0 residentTags=780 activeCandidates=0 peakCandidates=20 peakCandidateBytes=315360
+[17:46:09] [Render thread/INFO] (ChunkBuilder) Stopping worker threads
+
+BUILD SUCCESSFUL in 2m 44s
+20 actionable tasks: 1 executed, 19 up-to-date
+report: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.raw.jsonl
+selection: schema-v2+ phase=measure segment=0 scaler=OFF generation=2
+frames/windows: 3000/10
+FPS elapsed-weighted/min-window: 40.140/38.574
+presenting CB GPU ms (window-weighted p50/p95/p99, worst): 26.8608/28.9703/30.2707, 64.0094
+FPS lows (window-weighted 1%/0.1%): 27.072/24.863
+workload/frame (command buffers; render/compute/blit passes): 1.000; 12.588/2.021/10.129
+copy bytes total (CPU->shared/shared->private/GPU->CPU/GPU internal/unclassified): 84557040/737901088/23756544/0/0; unknown-byte commands 18000; direct write True (instrumented paths only)
+resource allocations total (count/bytes, buffers; textures): 33/44728320; 1/24641536
+transient high-water bytes (requested/reserved, CPU; GPU shared): 0/0; 1755248/2097152
+private geometry heap (enabled; current/peak pages; backing allocations at last window): False; 0/0; 0
+workload coverage: GPU copy counters cover instrumented Metal encoder wrappers. CPU-to-shared bytes cover known upload/multiUpload paths and dynamic orphan writes including preserved ranges; generic externally mapped writes are excluded, so zero does not prove absence. Resource allocation counters cover successful exported metallum_create_buffer/metallum_create_texture_2d calls only; internal workspace, telemetry, and view allocations are outside coverage.
+note: Percentiles and lows are summaries of independent complete report windows; raw samples are not available for an exact merged percentile.
+Reference capture validated (not performance-attested): /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/lighting-reference/l0/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.png
+  sha256: 1a505700cfe0cd1edb30363812ebb4cda866a5533c82bbd5df588794a3b564f3
+  raw: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.raw.jsonl
+  summary: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.summary.json
+  Minecraft log: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.minecraft.log
+  console log: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.console.log
+  transcript: /Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/run/logs/metallum-benchmarks/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.transcript.log

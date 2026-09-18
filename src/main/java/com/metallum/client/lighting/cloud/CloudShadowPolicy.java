@@ -38,6 +38,9 @@ public final class CloudShadowPolicy {
     /** Number of density samples along the celestial ray during volumetric precomputation. */
     public static final int VOLUMETRIC_PREINTEGRATION_SAMPLES = 8;
 
+    /** Bounded artistic weight for the rough, water-only cloud reflection layer. */
+    public static final float WATER_REFLECTION_STRENGTH = 1.0f;
+
     private CloudShadowPolicy() {
     }
 

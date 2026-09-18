@@ -4,7 +4,9 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.hdr.EmissiveTextureRegistry;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
 import com.metallum.client.sodium.SodiumRainExposureSnapshotAccess;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildBuffers;
@@ -254,30 +256,9 @@ abstract class BlockRendererHdrMixin {
         ).kind();
         boolean upwardFace = quad.faceNormal().y() > SurfaceMaterialPolicy.RAIN_FACING_START;
         boolean rainExposed = upwardFace && this.metallum$blockRainExposed;
-        int surfaceClass = switch (surfaceKind) {
-            // Preserve intrinsic optics on vertical faces. Upward sheltered faces are left on the
-            // legacy path because the compact byte has no independent precipitation bit.
-            case METAL -> !upwardFace || rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_METAL
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case SMOOTH_DIELECTRIC -> !upwardFace || rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case GLASS -> SodiumHdrSemantic.SURFACE_CLASS_GLASS;
-            case STONE -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_STONE
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case WOOD -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_WOOD
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case POROUS -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_POROUS
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case DIELECTRIC -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_DIELECTRIC
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;
-        };
+        int surfaceClass = SodiumHdrSemantic.terrainSurfaceClass(
+                surfaceKind, upwardFace, rainExposed
+        );
         boolean submerged = this.metallum$blockSubmerged;
         int submergedDepth = this.metallum$blockSubmergedDepth;
         if (!submerged && this.metallum$slice != null && this.metallum$blockPos != null) {
@@ -301,7 +282,29 @@ abstract class BlockRendererHdrMixin {
                 }
             }
         }
-        SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass, submerged, submergedDepth);
+        int reflectionFace = metallum$reflectionFace(quad);
+        int giAxisFace = GiReceiverRuntime.isRequested() ? metallum$giAxisFace(quad) : 0;
+        SodiumHdrSemantic.tagQuad(
+                this.vertices, emission, exact, surfaceClass, submerged, submergedDepth,
+                reflectionFace, giAxisFace
+        );
+    }
+
+    @Unique
+    private static int metallum$reflectionFace(final MutableQuadViewImpl quad) {
+        var normal = quad.faceNormal();
+        float x = normal.x();
+        float y = normal.y();
+        float z = normal.z();
+        return VoxelReflectionFace.forNormal(x, y, z);
+    }
+
+    @Unique
+    private static int metallum$giAxisFace(final MutableQuadViewImpl quad) {
+        var normal = quad.faceNormal();
+        return VoxelReflectionFace.forAxisAlignedUnitNormal(
+                normal.x(), normal.y(), normal.z()
+        );
     }
 
     @Unique

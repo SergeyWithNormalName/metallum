@@ -1,9 +1,11 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
@@ -96,6 +98,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private long scenePostColorFormatsLogged;
     private long materialColorFormatsLogged;
     private long advancedMaterialColorFormatsLogged;
+    private long temporalL6MaterialColorFormatsLogged;
     private long advancedAmbientMaterialColorFormatsLogged;
     private long reactiveMaterialColorFormatsLogged;
     private long reactiveAmbientMaterialColorFormatsLogged;
@@ -345,6 +348,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         }
         for (HdrShaderFlavor flavor : List.of(
                 HdrShaderFlavor.METALLUM_ADVANCED,
+                HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL,
                 HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY,
                 HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE,
                 HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY
@@ -354,10 +358,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 continue;
             }
             boolean expectedOutput = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
-                    || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+                    || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY
+                    || flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL;
             if (!advancedFunctions.isValid() || advancedFunctions.semanticOutput() != expectedOutput) {
                 AdvancedLightingPreflightGate.rejectAdvancedVariant(
-                        flavor + " functions violate their reactive output contract for "
+                        flavor + " functions violate their auxiliary output contract for "
                                 + this.info.getLocation()
                 );
                 return false;
@@ -395,15 +400,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         boolean reactive = key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+        boolean temporalL6 = key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL;
+        MTLPixelFormat auxiliaryFormat = functions.semanticOutput()
+                ? reactive ? MTLPixelFormat.R8Unorm
+                : temporalL6 ? MTLPixelFormat.RGBA16Float
+                : MTLPixelFormat.RGBA8Unorm
+                : MTLPixelFormat.Invalid;
         int compileId = compilationCounter.incrementAndGet();
         com.metallum.Metallum.LOGGER.debug(
                 "Pipeline compile call: name={}, compilationId={}, key=(flavor={}, color={}, depth={}, stencil={}), semanticAttachmentFormat={}",
                 this.info.getLocation(), compileId, key.flavor(), key.colorFormat(), key.depthFormat(), key.stencilFormat(),
-                functions.semanticOutput()
-                        ? reactive
-                                ? "R8Unorm"
-                                : "RGBA8Unorm"
-                        : "Invalid"
+                auxiliaryFormat
         );
 
         MemorySegment pipeline = createPipeline(
@@ -415,7 +422,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 key.colorFormat(),
                 key.depthFormat(),
                 key.stencilFormat(),
-                functions.semanticOutput(),
+                auxiliaryFormat,
                 reactive,
                 key.flavor() == HdrShaderFlavor.SUN_SHADOW
         );
@@ -443,7 +450,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat colorFormat,
             final MTLPixelFormat depthFormat,
             final MTLPixelFormat stencilFormat,
-            final boolean semanticOutput,
+            final MTLPixelFormat auxiliaryFormat,
             final boolean reactiveOutput,
             final boolean shadowDepthOnly
     ) {
@@ -470,9 +477,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
             pipelineDesc.setAttachmentFormats(
                     colorFormat,
-                    semanticOutput
-                            ? reactiveOutput ? MTLPixelFormat.R8Unorm : MTLPixelFormat.RGBA8Unorm
-                            : MTLPixelFormat.Invalid,
+                    auxiliaryFormat,
                     depthFormat,
                     stencilFormat
             );
@@ -492,7 +497,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             } else {
                 pipelineDesc.disableBlending(0, writeMask);
             }
-            if (semanticOutput) {
+            if (auxiliaryFormat != MTLPixelFormat.Invalid) {
                 if (reactiveOutput) {
                     // The depth-tested opaque surface or the final back-to-front translucent
                     // surface owns the per-pixel material weight. Diagnostic composition later
@@ -594,6 +599,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             throw new IllegalStateException("Pipeline has been closed: " + this.info.getLocation());
         }
         HdrShaderFlavor flavor = selectFlavor(colorFormat, materialSceneAttachment);
+        validateG5TerrainDraw(flavor, materialSceneAttachment);
         ShaderFunctions functions = this.shaderFunctions.get(flavor);
         if (functions == null || !functions.isValid()) {
             throw new IllegalStateException(
@@ -622,6 +628,81 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return pipeline;
     }
 
+    /**
+     * G5 installs a version-locked compact-position carrier before pipeline selection. The main
+     * material terrain draw must select an Advanced receiver flavor; SUN_SHADOW ignores the spare
+     * bits safely, while fallback/foreign color flavors and reflected replays are rejected.
+     */
+    private void validateG5TerrainDraw(
+            final HdrShaderFlavor flavor,
+            final boolean materialSceneAttachment
+    ) {
+        if (!GiReceiverRuntime.isRequested()
+                || !SodiumLightSidecarMslPatcher.isTarget(this.info)) {
+            return;
+        }
+        // The depth-only L4 caster consumes neither compact light nor authored alpha and has
+        // no color fallback to restore.  It must remain available while the same shared Sodium
+        // geometry is replayed into cascades.
+        if (flavor == HdrShaderFlavor.SUN_SHADOW) {
+            return;
+        }
+        GiReceiverRuntime.Admission admission = GiReceiverRuntime.admission();
+        if (PlanarReflectionRenderer.isRendering()) {
+            admission.reportInvalid("G5 reflected terrain draw is outside the receiver workload");
+            throw new IllegalStateException("G5 rejected a reflected terrain draw");
+        }
+        boolean mainMaterialTerrain = materialSceneAttachment
+                && this.device.isMaterialWorldPassActive();
+        if (mainMaterialTerrain && !isG5CompatibleFlavor(flavor)) {
+            admission.reportInvalid("G5 terrain selected an incompatible shader flavor " + flavor);
+            return;
+        }
+    }
+
+    static boolean isG5CompatibleFlavor(final HdrShaderFlavor flavor) {
+        return flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+    }
+
+    boolean selectsG5TerrainReceiver(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        if (!GiReceiverRuntime.isRequested()
+                || !materialSceneAttachment
+                || !this.device.isMaterialWorldPassActive()
+                || !SodiumLightSidecarMslPatcher.isTarget(this.info)
+                || SunShadowRenderer.isRendering()
+                || PlanarReflectionRenderer.isRendering()) {
+            return false;
+        }
+        return isG5CompatibleFlavor(selectFlavor(colorFormat, true));
+    }
+
+    /**
+     * Identifies the pinned main-terrain draw whose vertex function may consume either shared
+     * compact-position carrier. This is a stable layout predicate: a terminal runtime safety
+     * transition disables parameters but must not change the selected shader or resource ABI.
+     */
+    boolean selectsCompactPositionCarrierConsumer(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        if ((!GiReceiverRuntime.isRequested() && !VertexReflectionExperiment.isLayoutEnabled())
+                || !materialSceneAttachment
+                || !this.device.isMaterialWorldPassActive()
+                || !SodiumLightSidecarMslPatcher.isTarget(this.info)
+                || SunShadowRenderer.isRendering()
+                || PlanarReflectionRenderer.isRendering()) {
+            return false;
+        }
+        return isG5CompatibleFlavor(selectFlavor(colorFormat, true));
+    }
+
     private HdrShaderFlavor selectFlavor(
             final MTLPixelFormat colorFormat,
             final boolean materialSceneAttachment
@@ -637,6 +718,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM_ADVANCED),
                         this.device.isAmbientOnlyTerrainSpecializationActive(),
                         this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY),
+                        this.device.isL6TemporalWorldPassActive(),
+                        this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL),
                         this.device.isL8ReactiveWorldPassActive(),
                         this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE),
                         this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY)
@@ -669,7 +752,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final boolean advancedVariantAvailable
     ) {
         return selectMaterialWorldFlavor(
-                advancedFrameActive, advancedVariantAvailable, false, false, false, false, false
+                advancedFrameActive, advancedVariantAvailable, false, false, false, false, false, false, false
         );
     }
 
@@ -682,6 +765,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return selectMaterialWorldFlavor(
                 advancedFrameActive,
                 advancedVariantAvailable,
+                false,
+                false,
                 false,
                 false,
                 reactiveFrameActive,
@@ -699,7 +784,34 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final boolean reactiveVariantAvailable,
             final boolean reactiveAmbientVariantAvailable
     ) {
+        return selectMaterialWorldFlavor(
+                advancedFrameActive,
+                advancedVariantAvailable,
+                ambientSpecializationActive,
+                ambientVariantAvailable,
+                false,
+                false,
+                reactiveFrameActive,
+                reactiveVariantAvailable,
+                reactiveAmbientVariantAvailable
+        );
+    }
+
+    static HdrShaderFlavor selectMaterialWorldFlavor(
+            final boolean advancedFrameActive,
+            final boolean advancedVariantAvailable,
+            final boolean ambientSpecializationActive,
+            final boolean ambientVariantAvailable,
+            final boolean temporalFrameActive,
+            final boolean temporalVariantAvailable,
+            final boolean reactiveFrameActive,
+            final boolean reactiveVariantAvailable,
+            final boolean reactiveAmbientVariantAvailable
+    ) {
         if (advancedFrameActive && advancedVariantAvailable) {
+            if (temporalFrameActive && temporalVariantAvailable) {
+                return HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL;
+            }
             if (reactiveFrameActive && reactiveVariantAvailable) {
                 if (ambientSpecializationActive && reactiveAmbientVariantAvailable) {
                     return HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
@@ -720,6 +832,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     ) {
         HdrShaderFlavor flavor = selectFlavor(colorFormat, materialSceneAttachment);
         return flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
@@ -761,6 +874,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged;
             case METALLUM -> this.materialColorFormatsLogged;
             case METALLUM_ADVANCED -> this.advancedMaterialColorFormatsLogged;
+            case METALLUM_ADVANCED_L6_TEMPORAL -> this.temporalL6MaterialColorFormatsLogged;
             case METALLUM_ADVANCED_AMBIENT_ONLY -> this.advancedAmbientMaterialColorFormatsLogged;
             case METALLUM_ADVANCED_REACTIVE -> this.reactiveMaterialColorFormatsLogged;
             case METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY -> this.reactiveAmbientMaterialColorFormatsLogged;
@@ -777,6 +891,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged |= colorFormatBit;
             case METALLUM -> this.materialColorFormatsLogged |= colorFormatBit;
             case METALLUM_ADVANCED -> this.advancedMaterialColorFormatsLogged |= colorFormatBit;
+            case METALLUM_ADVANCED_L6_TEMPORAL -> this.temporalL6MaterialColorFormatsLogged |= colorFormatBit;
             case METALLUM_ADVANCED_AMBIENT_ONLY -> this.advancedAmbientMaterialColorFormatsLogged |= colorFormatBit;
             case METALLUM_ADVANCED_REACTIVE -> this.reactiveMaterialColorFormatsLogged |= colorFormatBit;
             case METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY -> this.reactiveAmbientMaterialColorFormatsLogged |= colorFormatBit;
@@ -819,6 +934,14 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         HdrShaderFlavor flavor = selectFlavor(colorFormat, materialSceneAttachment);
         return flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+    }
+
+    boolean l6TemporalOutput(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        return selectFlavor(colorFormat, materialSceneAttachment)
+                == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL;
     }
 
     boolean sceneColorRole() {

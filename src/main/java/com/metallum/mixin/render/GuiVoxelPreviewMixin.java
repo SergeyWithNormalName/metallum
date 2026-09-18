@@ -1,5 +1,6 @@
 package com.metallum.mixin.render;
 
+import com.metallum.client.gi.debug.GiTransportDebugHud;
 import com.metallum.client.voxel.VoxelPreviewHud;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -18,5 +19,6 @@ public abstract class GuiVoxelPreviewMixin {
             final CallbackInfo callback
     ) {
         VoxelPreviewHud.render(graphics);
+        GiTransportDebugHud.render(graphics);
     }
 }

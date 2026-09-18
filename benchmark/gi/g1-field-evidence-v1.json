@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "id": "gi-g1-field-evidence-v1",
+  "stage": "G1",
+  "decision": "SUPPORTED_PENDING_ABSOLUTE_FLOOR",
+  "g2_allowed": false,
+  "implementation": {
+    "commit": "88f9ddac1e9efc5341f75773aef7f1f08b7e1d11",
+    "source_sha256": "9ff4d6c8b6454b3faf86246fdc70283bd257c184850375e219ed02ec02fafa79",
+    "artifact_sha256": "778fd6c9c436f6e6ebfaac54cf6417c9bae44191dc3eb0d80a0e9b937599f905"
+  },
+  "scope": {
+    "mode": "field_infrastructure_only",
+    "production_receiver_bindings": 0,
+    "production_frame_graph_passes": 0,
+    "production_runtime_allocations": 0,
+    "material_or_emission_semantics": false,
+    "transport_or_bounce": false
+  },
+  "topology": {
+    "cascade_count": 3,
+    "cells_per_axis": 32,
+    "cell_sizes_blocks": [2, 4, 8],
+    "spans_blocks": [64, 128, 256],
+    "mip_levels": 6,
+    "field_format": "RGBA16Float",
+    "coverage_format": "R8Unorm",
+    "storage_mode": "Private"
+  },
+  "memory": {
+    "arithmetic_bytes": 1011123,
+    "actual_metal_allocated_bytes": 1277952,
+    "diffuse_gi_budget_bytes": 25165824,
+    "within_budget": true
+  },
+  "mechanical_verification": {
+    "gradle_check": "PASS_98_TASKS",
+    "java_contracts": "PASS",
+    "java_ffm_swift_metal_abi": "PASS",
+    "forced_source_metal_validation": "PASS",
+    "coverage_aware_mips": "PASS",
+    "generation_reset_and_stale_reject": "PASS",
+    "bounded_candidate_accounting": "PASS",
+    "release_while_upload_in_flight": "PASS",
+    "one_shot_capture": "PASS",
+    "ordinary_advanced_shader_audit": "PASS_NO_G1_SYMBOLS"
+  },
+  "contemporaneous_runtime_ab": {
+    "classification": "TIER_B_SCREENING",
+    "control_commit": "c94ae9a987643b13e8482cc77950ce1c5e88304a",
+    "control_average_fps": 27.390459816176556,
+    "control_one_percent_low_fps": 21.704597278358214,
+    "control_gpu_p95_ms": 40.44456250267103,
+    "candidate_average_fps": 27.336531235659262,
+    "candidate_one_percent_low_fps": 20.74947944898665,
+    "candidate_gpu_p95_ms": 40.03347916295752,
+    "fps_delta_percent": -0.19688818982674938,
+    "one_percent_low_delta_percent": -4.400532371655275,
+    "gpu_p95_delta_percent": -1.0164118840112701,
+    "relative_gate": "PASS",
+    "absolute_28_fps_gate": "FAIL_BOTH_CONTROL_AND_CANDIDATE",
+    "control_summary": "run/logs/metallum-benchmarks/20260825T102733Z-gc94ae9a98764-clean-gi-g1-contemporaneous-control-c94ae9a-off.summary.json",
+    "control_summary_sha256": "75a4829efa2fadddabd01dcf1f0ef3787aa82053050961256868fb3d8f587c44",
+    "candidate_summary": "run/logs/metallum-benchmarks/20260825T102448Z-g88f9ddac1e9e-clean-gi-g1-field-only-structural-off-repeat2-off.summary.json",
+    "candidate_summary_sha256": "6b5568ea854a277bf6a95f400cefe55907fd318ae1b3c2a0c4cd10fce6d3565d"
+  },
+  "tier_c_overworld": {
+    "classification": "VALID_ATTESTATION_PRODUCT_FLOOR_FAIL",
+    "receipt": "run/logs/metallum-benchmarks/20260825T103101Z-g88f9ddac1e9e-clean-gi-g1-tier-c-overworld-1-off.accepted.json",
+    "receipt_sha256": "53d53c4d60c50ce218b248708661ceb745ddffc508f1506c2db385488f663b38",
+    "summary": "run/logs/metallum-benchmarks/20260825T103101Z-g88f9ddac1e9e-clean-gi-g1-tier-c-overworld-1-off.summary.json",
+    "summary_sha256": "3b2c164d76209d3d53f37213f42cbb567d971a8cb0188c7b7d2dc80eec80b696",
+    "presented_frames": 3000,
+    "windows": 10,
+    "average_fps": 27.430403172444464,
+    "one_percent_low_fps": 22.47285931076813,
+    "zero_point_one_percent_low_fps": 21.580353963569944,
+    "gpu_p95_ms": 39.482508320361376,
+    "thermal_state": "nominal",
+    "dropped_timing_events": 0,
+    "advanced_admission": "PASS",
+    "gi_off_admission": "PASS",
+    "conditional_floor": [28.0, 20.0],
+    "floor_decision": "FAIL_AVERAGE_ONLY"
+  },
+  "next_gate": "Repeat Tier C only after the baseline environment again demonstrates at least 28 FPS, or obtain a new explicit user decision. Do not start G2 meanwhile."
+}

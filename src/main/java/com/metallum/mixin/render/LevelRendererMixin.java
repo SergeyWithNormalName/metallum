@@ -4,6 +4,8 @@ import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metal.render.MetalGpuTimingStage;
+import com.metallum.client.metal.render.PlanarReflectionRenderer;
+import com.metallum.client.metal.render.ScreenSpaceReflectionRenderer;
 import com.metallum.client.metal.render.SunShadowRenderer;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -28,6 +30,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class LevelRendererMixin {
     @Unique
     private FramePass metallum$pendingSunShadowPass;
+    @Unique
+    private FramePass metallum$pendingPlanarReflectionPass;
 
     @Inject(method = "addMainPass", at = @At("HEAD"))
     private void metallum$registerSunShadowPass(
@@ -39,10 +43,17 @@ abstract class LevelRendererMixin {
             final ChunkSectionsToRender chunkSectionsToRender,
             final CallbackInfo ci
     ) {
+        ScreenSpaceReflectionRenderer.beginFrame();
         this.metallum$pendingSunShadowPass = SunShadowRenderer.addFramePass(
                 frame,
                 featureFrame,
                 chunkSectionsToRender
+        );
+        this.metallum$pendingPlanarReflectionPass = PlanarReflectionRenderer.addFramePass(
+                frame,
+                chunkSectionsToRender,
+                levelRenderState,
+                terrainFog
         );
     }
 
@@ -60,9 +71,14 @@ abstract class LevelRendererMixin {
     ) {
         FramePass main = frame.addPass(name);
         FramePass shadow = this.metallum$pendingSunShadowPass;
+        FramePass reflection = this.metallum$pendingPlanarReflectionPass;
         this.metallum$pendingSunShadowPass = null;
+        this.metallum$pendingPlanarReflectionPass = null;
         if (shadow != null) {
             main.requires(shadow);
+        }
+        if (reflection != null) {
+            main.requires(reflection);
         }
         return main;
     }
@@ -96,6 +112,14 @@ abstract class LevelRendererMixin {
             final ChunkSectionLayerGroup group,
             final GpuSampler sampler
     ) {
+        if (group == ChunkSectionLayerGroup.TRANSLUCENT) {
+            net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getInstance();
+            if (minecraft.gameRenderer != null) {
+                ScreenSpaceReflectionRenderer.captureOpaqueScene(
+                        minecraft.gameRenderer.mainRenderTarget()
+                );
+            }
+        }
         MetalGpuTimingStage stage = group == ChunkSectionLayerGroup.TRANSLUCENT
                 ? MetalGpuTimingStage.TRANSLUCENT
                 : MetalGpuTimingStage.WORLD_OPAQUE;

@@ -15,13 +15,19 @@ public record FrameCapture(
         long worldIdentity,
         long dimensionIdentity,
         EnvironmentDescriptor environment,
-        CloudShadowFrameState cloudShadow
+        CloudShadowFrameState cloudShadow,
+        EnvironmentDescriptor giEnvironment,
+        boolean giEnvironmentReady
 ) {
     public FrameCapture {
         Objects.requireNonNull(transforms, "transforms");
         Objects.requireNonNull(cameraPosition, "cameraPosition");
         Objects.requireNonNull(environment, "environment");
         Objects.requireNonNull(cloudShadow, "cloudShadow");
+        Objects.requireNonNull(giEnvironment, "giEnvironment");
+        if (giEnvironment.medium() != EnvironmentDescriptor.Medium.AIR) {
+            throw new IllegalArgumentException("G3 environment must remain camera-medium independent");
+        }
         if (deltaSeconds < 0.0 || !Double.isFinite(deltaSeconds)) {
             throw new IllegalArgumentException("Frame delta must be non-negative and finite");
         }
@@ -32,6 +38,34 @@ public record FrameCapture(
         if (worldIdentity < 0L || dimensionIdentity < 0L) {
             throw new IllegalArgumentException("World identities must be non-negative");
         }
+    }
+
+    public FrameCapture(
+            final FrameState.Transforms transforms,
+            final FrameState.CameraPosition cameraPosition,
+            final double deltaSeconds,
+            final double nearPlane,
+            final double farPlane,
+            final long worldIdentity,
+            final long dimensionIdentity,
+            final EnvironmentDescriptor environment,
+            final CloudShadowFrameState cloudShadow
+    ) {
+        this(
+                transforms,
+                cameraPosition,
+                deltaSeconds,
+                nearPlane,
+                farPlane,
+                worldIdentity,
+                dimensionIdentity,
+                environment,
+                cloudShadow,
+                environment.medium() == EnvironmentDescriptor.Medium.AIR
+                        ? environment
+                        : EnvironmentDescriptor.NONE,
+                true
+        );
     }
 
     public FrameCapture(
@@ -53,7 +87,11 @@ public record FrameCapture(
                 worldIdentity,
                 dimensionIdentity,
                 environment,
-                CloudShadowFrameState.disabled()
+                CloudShadowFrameState.disabled(),
+                environment.medium() == EnvironmentDescriptor.Medium.AIR
+                        ? environment
+                        : EnvironmentDescriptor.NONE,
+                true
         );
     }
 
@@ -75,7 +113,9 @@ public record FrameCapture(
                 worldIdentity,
                 dimensionIdentity,
                 EnvironmentDescriptor.NONE,
-                CloudShadowFrameState.disabled()
+                CloudShadowFrameState.disabled(),
+                EnvironmentDescriptor.NONE,
+                true
         );
     }
 }

@@ -3,6 +3,7 @@ package com.metallum.client.renderer.style;
 import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
+import com.metallum.client.renderer.GlobalIlluminationMode;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 
@@ -67,14 +68,29 @@ public final class VisualStyleTests {
             VisualStyleProfile profile = VisualStyleProfiles.profile(style);
             require(profile != null, "Profile for " + style + " must not be null");
             require(profile.celestialLighting() != null, "CelestialLightingProfile for " + style + " must not be null");
+            require(profile.atmosphere() != null, "AtmosphereProfile for " + style + " must not be null");
+            require(profile.water() != null, "WaterStyleProfile for " + style + " must not be null");
         }
         require(VisualStyleProfiles.profile(null) != null, "Null style must resolve to safe fallback profile");
+        require(VisualStyleProfiles.profile(VisualStyle.VANILLA).water().shaderPolicyId() == 0,
+                "Vanilla water shader policy id changed");
+        require(VisualStyleProfiles.profile(VisualStyle.NATURAL).water().shaderPolicyId() == 1,
+                "Natural water shader policy id changed");
+        require(VisualStyleProfiles.profile(VisualStyle.REALISM).water().shaderPolicyId() == 2,
+                "Realism water shader policy id changed");
     }
 
     private static void testConfiguredStyleProfiles() {
         CelestialLightingProfile vanilla = VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting();
         CelestialLightingProfile natural = VisualStyleProfiles.profile(VisualStyle.NATURAL).celestialLighting();
         CelestialLightingProfile realism = VisualStyleProfiles.profile(VisualStyle.REALISM).celestialLighting();
+
+        AtmosphereProfile vanillaAtmo = VisualStyleProfiles.profile(VisualStyle.VANILLA).atmosphere();
+        AtmosphereProfile naturalAtmo = VisualStyleProfiles.profile(VisualStyle.NATURAL).atmosphere();
+        AtmosphereProfile realismAtmo = VisualStyleProfiles.profile(VisualStyle.REALISM).atmosphere();
+        WaterStyleProfile vanillaWater = VisualStyleProfiles.profile(VisualStyle.VANILLA).water();
+        WaterStyleProfile naturalWater = VisualStyleProfiles.profile(VisualStyle.NATURAL).water();
+        WaterStyleProfile realismWater = VisualStyleProfiles.profile(VisualStyle.REALISM).water();
 
         // 1. VANILLA exact reference values
         require(vanilla.normalSunColor().equals(new LinearColor(1.00f, 0.93f, 0.78f)), "Vanilla sun mismatch");
@@ -87,6 +103,24 @@ public final class VisualStyleTests {
         require(Math.abs(vanilla.moonPhaseFloor() - 0.18f) < EPSILON, "Vanilla moon phase floor mismatch");
         require(Math.abs(vanilla.moonPhaseResponse() - 0.82f) < EPSILON, "Vanilla moon phase response mismatch");
 
+        require(vanillaAtmo.isVanillaIdentity(), "Vanilla atmosphere must be vanilla identity");
+        require(Math.abs(vanillaAtmo.fogDistanceStartRatio() - 1.00f) < EPSILON, "Vanilla start ratio mismatch");
+        require(vanillaAtmo.sunsetAtmosphereWeight() == 0.0f, "Vanilla sunset weight must be 0");
+        require(vanillaAtmo.nightCoolWeight() == 0.0f, "Vanilla night cool weight must be 0");
+        require(vanillaAtmo.rainDistanceScale() == 0.0f, "Vanilla rain distance scale must be 0");
+        require(vanillaAtmo.thunderDistanceScale() == 0.0f, "Vanilla thunder distance scale must be 0");
+        require(vanillaAtmo.weatherDarkeningScale() == 0.0f, "Vanilla weather darkening must be 0");
+        require(vanillaWater.isVanillaIdentity(), "Vanilla water must bypass all L8 water effects");
+        require(vanillaWater.waveStrength() == 0.0f
+                        && vanillaWater.reflectionStrength() == 0.0f
+                        && vanillaWater.refractionStrength() == 0.0f
+                        && vanillaWater.reflectionBodyStrength() == 0.0f
+                        && vanillaWater.causticStrength() == 0.0f
+                        && vanillaWater.transmission() == 0.0f
+                        && vanillaWater.opticalDepth() == 0.0f
+                        && vanillaWater.absorption().equals(LinearColor.BLACK),
+                "Vanilla water is not an exact L8 optical identity");
+
         // 2. NATURAL target values
         require(natural.normalSunColor().equals(new LinearColor(1.00f, 0.98f, 0.92f)), "Natural sun mismatch");
         require(natural.horizonSunColor().equals(new LinearColor(1.00f, 0.50f, 0.18f)), "Natural horizon sun mismatch");
@@ -98,6 +132,27 @@ public final class VisualStyleTests {
         require(Math.abs(natural.moonPhaseFloor() - 0.06f) < EPSILON, "Natural moon phase floor mismatch");
         require(Math.abs(natural.moonPhaseResponse() - 0.94f) < EPSILON, "Natural moon phase response mismatch");
 
+        require(!naturalAtmo.isVanillaIdentity(), "Natural atmosphere must not be vanilla identity");
+        require(Math.abs(naturalAtmo.fogDistanceStartRatio() - 0.75f) < EPSILON, "Natural start ratio mismatch");
+        require(Math.abs(naturalAtmo.sunsetAtmosphereWeight() - 0.28f) < EPSILON, "Natural sunset weight mismatch");
+        require(Math.abs(naturalAtmo.nightCoolWeight() - 0.12f) < EPSILON, "Natural night cool mismatch");
+        require(Math.abs(naturalAtmo.rainDistanceScale() - 0.15f) < EPSILON, "Natural rain distance scale mismatch");
+        require(Math.abs(naturalAtmo.thunderDistanceScale() - 0.15f) < EPSILON, "Natural thunder distance scale mismatch");
+        require(Math.abs(naturalAtmo.weatherDarkeningScale() - 0.10f) < EPSILON, "Natural weather darkening mismatch");
+        require(!naturalWater.isVanillaIdentity(), "Natural water must retain light enhancements");
+        require(naturalWater.preservesPreReflectionAppearance(),
+                "Natural water must preserve the pre-reflection appearance");
+        require(naturalWater.waveStrength() == 1.0f
+                        && naturalWater.reflectionStrength() == 1.0f
+                        && naturalWater.refractionStrength() == 0.28f
+                        && naturalWater.reflectionBodyStrength() == 0.0f
+                        && naturalWater.causticStrength() == 1.0f
+                        && naturalWater.roughness() == 0.055f
+                        && naturalWater.transmission() == 0.30f
+                        && naturalWater.opticalDepth() == 0.85f
+                        && naturalWater.absorption().equals(new LinearColor(0.15f, 0.040f, 0.015f)),
+                "Natural water must match the pre-reflection L8 optical baseline");
+
         // 3. REALISM target values
         require(realism.normalSunColor().equals(new LinearColor(1.00f, 0.995f, 0.97f)), "Realism sun mismatch");
         require(realism.horizonSunColor().equals(new LinearColor(1.00f, 0.32f, 0.07f)), "Realism horizon sun mismatch");
@@ -108,11 +163,32 @@ public final class VisualStyleTests {
         require(Math.abs(realism.moonIntensityScale() - 0.085f) < EPSILON, "Realism moon intensity scale mismatch");
         require(Math.abs(realism.moonPhaseFloor() - 0.00f) < EPSILON, "Realism moon phase floor mismatch");
         require(Math.abs(realism.moonPhaseResponse() - 1.00f) < EPSILON, "Realism moon phase response mismatch");
+
+        require(!realismAtmo.isVanillaIdentity(), "Realism atmosphere must not be vanilla identity");
+        require(Math.abs(realismAtmo.fogDistanceStartRatio() - 0.55f) < EPSILON, "Realism start ratio mismatch");
+        require(Math.abs(realismAtmo.sunsetAtmosphereWeight() - 0.45f) < EPSILON, "Realism sunset weight mismatch");
+        require(Math.abs(realismAtmo.nightCoolWeight() - 0.22f) < EPSILON, "Realism night cool mismatch");
+        require(Math.abs(realismAtmo.rainDistanceScale() - 0.25f) < EPSILON, "Realism rain distance scale mismatch");
+        require(Math.abs(realismAtmo.thunderDistanceScale() - 0.20f) < EPSILON, "Realism thunder distance scale mismatch");
+        require(Math.abs(realismAtmo.weatherDarkeningScale() - 0.20f) < EPSILON, "Realism weather darkening mismatch");
+        require(realismWater.waveStrength() == naturalWater.waveStrength()
+                        && realismWater.reflectionStrength() == naturalWater.reflectionStrength(),
+                "Natural and Realism must retain the full historical L8 wave/reflection strength");
+        require(!realismWater.preservesPreReflectionAppearance(),
+                "Realism must not opt into the pre-reflection baseline");
+        require(realismWater.refractionStrength() > 0.0f
+                        && realismWater.reflectionBodyStrength() > 0.0f
+                        && realismWater.causticStrength() > 0.0f
+                        && realismWater.transmission() > 0.0f
+                        && realismWater.opticalDepth() > 0.0f
+                        && !realismWater.absorption().equals(LinearColor.BLACK),
+                "Realism water must enable the complete L8 optical model");
     }
 
     private static void testProfileValidation() {
         LinearColor sun = new LinearColor(1.00f, 0.93f, 0.78f);
         LinearColor moon = new LinearColor(0.50f, 0.62f, 0.90f);
+        AtmosphereProfile atmo = new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f);
 
         // LinearColor validation
         expectIllegalArgument(() -> new LinearColor(Float.NaN, 1.0f, 1.0f));
@@ -123,6 +199,32 @@ public final class VisualStyleTests {
         expectNullPointer(() -> LinearColor.lerp(null, moon, 0.5f));
         expectNullPointer(() -> LinearColor.lerp(sun, null, 0.5f));
         expectIllegalArgument(() -> LinearColor.lerp(sun, moon, Float.NaN));
+
+        // LinearColor sRGB conversions
+        expectIllegalArgument(() -> LinearColor.fromSrgb(Float.NaN, 0.5f, 0.5f));
+        expectIllegalArgument(() -> LinearColor.fromSrgb(0.5f, Float.POSITIVE_INFINITY, 0.5f));
+        LinearColor black = LinearColor.fromSrgb(0.0f, 0.0f, 0.0f);
+        require(black.red() == 0.0f && black.green() == 0.0f && black.blue() == 0.0f, "Black sRGB to linear mismatch");
+        require(black.toSrgbRed() == 0.0f && black.toSrgbGreen() == 0.0f && black.toSrgbBlue() == 0.0f, "Black linear to sRGB mismatch");
+        LinearColor white = LinearColor.fromSrgb(1.0f, 1.0f, 1.0f);
+        require(Math.abs(white.red() - 1.0f) < EPSILON, "White sRGB to linear mismatch");
+        require(Math.abs(white.toSrgbRed() - 1.0f) < EPSILON, "White linear to sRGB mismatch");
+
+        // AtmosphereProfile validation
+        expectIllegalArgument(() -> new AtmosphereProfile(0.0f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(-0.1f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(1.5f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(Float.NaN, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, -0.01f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 1.05f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, -0.1f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 1.1f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, -0.1f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 1.1f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, -0.1f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 1.1f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 0.15f, -0.1f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 0.15f, 1.1f));
 
         // CelestialLightingProfile validation
         expectNullPointer(() -> new CelestialLightingProfile(
@@ -167,20 +269,59 @@ public final class VisualStyleTests {
         ));
 
         // VisualStyleProfile validation
-        expectNullPointer(() -> new VisualStyleProfile(null));
+        CelestialLightingProfile cel = VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting();
+        WaterStyleProfile water = VisualStyleProfiles.profile(VisualStyle.VANILLA).water();
+        expectNullPointer(() -> new VisualStyleProfile(null, atmo, water));
+        expectNullPointer(() -> new VisualStyleProfile(cel, null, water));
+        expectNullPointer(() -> new VisualStyleProfile(cel, atmo, null));
+
+        // WaterStyleProfile validation
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                -1, false, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                3, true, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, true, false, Float.NaN, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, true, false, 0.0f, 1.1f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, true, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, -0.1f, LinearColor.BLACK));
+        expectNullPointer(() -> new WaterStyleProfile(
+                1, true, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, null));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, false, false, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                0, false, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
     }
 
     private static void testRendererConfigDefaults() {
         RendererConfig defaults = RendererConfig.defaults();
-        require(RendererConfig.SCHEMA_VERSION == 4, "SCHEMA_VERSION must be 4");
+        require(RendererConfig.SCHEMA_VERSION == 5, "SCHEMA_VERSION must be 5");
         require(!defaults.improvedLighting(), "improvedLighting default must be false");
         require(defaults.lightingPreset() == LightingPreset.BALANCED, "lightingPreset default must be BALANCED");
         require(!defaults.frameInterpolation(), "frameInterpolation default must be false");
         require(!defaults.voxelDebugChecksum(), "voxelDebugChecksum default must be false");
         require(defaults.visualStyle() == VisualStyle.VANILLA, "visualStyle default must be VANILLA");
+        require(defaults.globalIllumination() == GlobalIlluminationMode.OFF,
+                "globalIllumination default must be OFF");
 
-        expectNullPointer(() -> new RendererConfig(false, null, false, false, VisualStyle.VANILLA));
-        expectNullPointer(() -> new RendererConfig(false, LightingPreset.BALANCED, false, false, null));
+        expectNullPointer(() -> new RendererConfig(
+                false, null, false, false, VisualStyle.VANILLA, GlobalIlluminationMode.OFF
+        ));
+        expectNullPointer(() -> new RendererConfig(
+                false, LightingPreset.BALANCED, false, false, null, GlobalIlluminationMode.OFF
+        ));
+        expectNullPointer(() -> new RendererConfig(
+                false, LightingPreset.BALANCED, false, false, VisualStyle.VANILLA, null
+        ));
 
         RendererConfig withStyle = defaults.withVisualStyle(VisualStyle.NATURAL);
         require(withStyle.visualStyle() == VisualStyle.NATURAL, "withVisualStyle failed to update style");
@@ -190,6 +331,14 @@ public final class VisualStyleTests {
         RendererConfig withLight = withStyle.withImprovedLighting(true);
         require(withLight.improvedLighting() && withLight.visualStyle() == VisualStyle.NATURAL,
                 "withImprovedLighting lost visualStyle");
+
+        RendererConfig withGi = withLight.withGlobalIllumination(GlobalIlluminationMode.DYNAMIC);
+        require(withGi.globalIllumination() == GlobalIlluminationMode.DYNAMIC
+                        && withGi.improvedLighting()
+                        && withGi.visualStyle() == VisualStyle.NATURAL,
+                "withGlobalIllumination lost another renderer axis");
+        require("dynamic".equals(GlobalIlluminationMode.DYNAMIC.persistentName()),
+                "dynamic GI persistent name changed");
     }
 
     private static void testLiveRuntimeSwitching() {
@@ -211,6 +360,8 @@ public final class VisualStyleTests {
         require(VisualStyleRuntime.activeStyle() == VisualStyle.NATURAL, "Active style must be NATURAL");
         require(VisualStyleRuntime.activeProfile().equals(VisualStyleProfiles.profile(VisualStyle.NATURAL)),
                 "Active profile must be NATURAL profile");
+        require(VisualStyleRuntime.activeWater().shaderPolicyId() == 1,
+                "Live Natural water profile was not selected");
         Set<FrameState.HistoryResetReason> resets = TemporalResetEvents.consume();
         require(resets.equals(Set.of(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE)),
                 "Style change must emit VISUAL_STYLE_CHANGE");
@@ -227,6 +378,8 @@ public final class VisualStyleTests {
         require(VisualStyleRuntime.activeStyle() == VisualStyle.REALISM, "Active style must be REALISM");
         require(VisualStyleRuntime.activeProfile().equals(VisualStyleProfiles.profile(VisualStyle.REALISM)),
                 "Active profile must be REALISM profile");
+        require(VisualStyleRuntime.activeWater().shaderPolicyId() == 2,
+                "Live Realism water profile was not selected");
         require(TemporalResetEvents.consume().equals(Set.of(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE)),
                 "Switch to REALISM must emit VISUAL_STYLE_CHANGE");
         require(TemporalResetEvents.consume().isEmpty(), "Reset event must be consumed");

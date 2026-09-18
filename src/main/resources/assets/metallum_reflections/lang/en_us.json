@@ -1,0 +1,6 @@
+{
+  "metallum.options.reflections.page": "Reflections",
+  "metallum.options.group.reflection_composition": "Reflection Composition",
+  "metallum.options.cloud_reflections.name": "Cloud Reflections",
+  "metallum.options.cloud_reflections.tooltip": "Includes Minecraft clouds in water reflections. Disabling this also removes the separate cloud-only reflected capture used by voxel reflections. Applies immediately."
+}

@@ -20,7 +20,6 @@
   только метод, результат и мой вывод.
 
 ---
-
 ## 2026-07-17 — аудит просадки после L4
 
 ### Контекст и стенд
@@ -2109,4 +2108,2278 @@ if (sunShadowActive && directionalWeight > 0.0 && (hasDirectionalLight || hasSky
 
 Кандидат `OPT-AMBIENT-PSO-1` уверенно проходит Performance Gate по независимому same-artifact раунду B3/A3/A4/B4 (GPU p95 `-2.01 ms` / `-4.08%`, FPS `+4.00%`, улучшение низких квантилей 1% и 0.1% на `+4.00%..+4.26%` при нулевых аллокациях по отслеживаемым категориям). Специализация утверждена и сохранена в основном коде.
 
+## 2026-08-24 — G0 Overworld baseline recovery audit (no-win)
 
+**Статус:** `REJECTED_NO_QUALITY_PRESERVING_CANDIDATE`; production-код не изменён.
+
+G0 зафиксировал воспроизводимый Tier C baseline около `20.07 FPS`, 1% low
+`16.90 FPS` и whole-GPU p95 `53.22 ms` на маршруте
+`gi-g0-overworld-v1`. Это ниже утверждённого абсолютного floor `30/20 FPS`.
+Floor, native resolution, Advanced Balanced lighting, CSM filtering и другие
+параметры качества не ослаблялись.
+
+Tier B detailed-прогон на том же маршруте и артефакте показал единственный
+доминирующий hot path: `world opaque` `42.227 ms` average / `42.971 ms` p95.
+Остальные измеренные стадии существенно меньше: actual-radiance HDR mapping
+`3.264 ms`, HDR extract + histogram `2.854 ms`, cluster build `0.814 ms`, sun
+shadow `0.170 ms`, translucent `0.579 ms`. Эти stage timings являются только
+атрибуцией и не заменяют Tier C acceptance.
+
+После этого выполнена последовательная compile-time receiver-абляция
+`600+600` кадров с единым commit/source/artifact и nominal thermal state:
+
+| Режим | FPS | 1% low | GPU p95 | Delta GPU p95 к FULL |
+| --- | ---: | ---: | ---: | ---: |
+| `FULL_ADVANCED` | 20.201 | 17.520 | 52.516 ms | — |
+| `NO_L3_RECEIVER` | 20.019 | 17.314 | 53.940 ms | +1.424 ms |
+| `NO_L4_RECEIVER` | 20.030 | 16.699 | 53.833 ms | +1.317 ms |
+| `NO_L6_RECEIVER` | 20.096 | 17.468 | 52.715 ms | +0.199 ms |
+
+Абляции маржинальны и неаддитивны, но ни одна не поддержала гипотезу о
+receiver-подсистеме с резервом порядка `20 ms`. GI_OFF telemetry во всех окнах
+осталась строго нулевой; отдельный vertex-reflection experiment был OFF.
+Статические geometry heaps, L4 runtime guard, lazy L6 shortcuts, упрощение PCF,
+снижение cascade quality/resolution и MetalFX уже исключены историей либо меняют
+утверждённый image/benchmark contract.
+
+Итог: локального quality-preserving кандидата, способного восстановить G0 floor,
+не найдено. Следующая обоснованная работа — отдельный GPU frame capture с
+разбиением `world opaque` по pipeline/draw/material category. До появления такого
+доказательства G0 остаётся `REJECTED_BASELINE_FLOOR`, а G1 не допускается.
+
+---
+
+### [2026-08-20] GOD-RAYS-2.5: Volumetric Shaft Isolation & Physical Atmospheric Single Scattering Model
+
+#### 1. Context & Root Cause
+- **Problem**: Предыдущая интеграция объёмного света формировала равномерную дымку/туман по всей сцене ($L = \text{vis} \times \text{const}$). В результате помещения и лес заполнялись белесым свечением без ощущения направленных солнечных столбов.
+- **Physical Defect**:
+  1. Отсутствовала фазовая анизотропия рассеяния ($p(\theta)$): боковое рассеяние света воздухом имело ту же интенсивность, что и рассеяние прямо по направлению к источнику света.
+  2. Отсутствовало физическое затухание по закону Бера-Ламберта ($T = \exp(-\sigma_t \cdot t)$).
+  3. Отсутствовало разделение диагностических компонентов для аудита засветки.
+
+#### 2. Physical Scattering Implementation
+- Интегрирована модель однократного атмосферного рассеяния:
+  $$S(t) = \text{vis}(\mathbf{x}(t)) \cdot \sigma_s \cdot p(\cos\theta, g) \cdot \mathbf{L}_{\text{sun}} \cdot \exp(-\sigma_t \cdot t)$$
+  - $\sigma_s = 0.02\,\text{m}^{-1}$ (коэффициент рассеяния);
+  - $\sigma_t = 0.03\,\text{m}^{-1}$ (коэффициент экстинкции);
+  - $p(\cos\theta, g) = \frac{1}{4\pi} \frac{1 - g^2}{(1 + g^2 - 2g \cos\theta)^{3/2}}$ (фазовая функция Хеньи-Гринштейна с прямым пиком $g = 0.60$, дающая отношение яркости луча $\approx 25:1$ по сравнению с боковым воздухом).
+- Добавлены 5 режимов покомпонентной диагностики (`GOD_RAY_COMPONENT_DEBUG`):
+  - **Mode 14 (`RAW_VISIBILITY`)**: $\frac{\text{accumulatedLit}}{\text{rayLength}}$ (чистая геометрическая видимость CSM);
+  - **Mode 15 (`SCATTERING_ONLY`)**: нефазовая плотность рассеяния;
+  - **Mode 16 (`PHASE_FUNCTION_ONLY`)**: тепловая карта фазовой анизотропии $p(\theta, g)$;
+  - **Mode 17 (`EXTINCTION_ONLY`)**: оптическое пропускание по глубине $T = \exp(-\sigma_t \cdot d)$;
+  - **Mode 18 / Mode 13 (`FINAL_RADIANCE` / `HDR_PREVIEW`)**: итоговый физический аддитивный композит.
+- Унифицирован размер буфера `GodRayVisibilityUniforms` до 320 байт (16-байтовое выравнивание Metal).
+
+#### 3. Verification & Metrics
+- Unit-тесты `godRayWorldSpaceUnitTest` и `sodiumConfigUnitTest` успешно пройдены (контракты `GR-0` through `GR-2.5 F`).
+- Строго сохранена пространственная стабильность, инвариантность к перемещению/прыжку и привязка к мировым вокселям.
+
+---
+
+## 2026-08-22 — Goal 45: Nether WORLD_OPAQUE / L6 soft-shadow sprint
+
+### Статус и строгий контракт
+
+Работа ещё не завершена: цель `>=45 FPS` в production пока **не достигнута**.
+Все сравнимые прогоны используют `nether-lava-stress-v1`, встроенный Retina
+`3024x1964@120`, exclusive fullscreen, native HDR scene output, Advanced/Balanced,
+Fancy `16/12`, MetalFX OFF, VSync OFF, frozen simulation. Перед прогонами закрывались
+Minecraft/launchers, BetterDisplay/ElyPrism/Steam UI и Gradle daemons; thermal state
+во всех приведённых валидных измерениях был `nominal`.
+
+Detailed timing остаётся Tier B-атрибуцией. Production-решение требует отдельного
+Tier C `2x baseline + 2x candidate` и live-проверки изображения/ощущения frame pacing.
+Поэтому оставленные ниже изменения до такого A/B имеют статус **retained candidate**,
+а не окончательно принятой оптимизации.
+
+### Подтверждённая потеря времени кадра
+
+Исходный повтор full-detail дал `17.288 FPS`, GPU p95 `62.314 ms`, lows
+`16.177/16.017`. Диагностическое выключение planar capture подняло результат до
+`21.897 FPS / 49.157 ms p95`, но это не production-вариант. Последующие валидные
+ablation-прогоны после устранения submission overhead показали:
+
+- production full с L6: около `23.5-26.1 FPS` до следующих shader-кандидатов;
+- `NO_L6_VISIBILITY`: `53.693 FPS / 21.268 ms GPU p95`;
+- nearest-only L6 после последних безопасных изменений: `49.777 FPS / 22.790 ms`,
+  lows `44.136/40.687`;
+- полный четырёхtapовый L6 перед all-visible fast path: `28.910 FPS / 37.952 ms`,
+  lows `25.991/25.062`.
+
+Stage timestamps устойчиво помещают основной выигрыш/регрессию в `WORLD_OPAQUE`.
+Это доказывает конкретный дорогой участок — L6 soft-shadow receiver filter в terrain
+fragment shader, особенно три дополнительных cache taps. Timestamp-профиль не
+доказывает микроархитектурную причину (bandwidth/cache/register occupancy), поэтому
+такие объяснения остаются гипотезами.
+
+### Оставлено как полезные кандидаты
+
+#### Indirect-command preupload для Sodium
+
+Новый `SodiumIndexedIndirectBatcher` и узкие mixin/accessor hooks переносят upload
+immutable indexed-indirect snapshot из hot render submission. В steady state topology
+снизилась примерно с `100 render / 95 blit` до `14 / 9` encoders на кадр. Full-detail
+изменился с `17.288 FPS / 62.314 ms p95` до `20.234 FPS / 52.499 ms`; planar-off
+control дал `21.897 FPS / 49.157 ms`. Consume/retirement сохраняют in-flight ownership;
+немедленного освобождения GPU resources нет.
+
+#### L6 proxy broadphase, mask и sparse iteration
+
+Оставлены три последовательных lossless изменения:
+
+1. exact segment-AABB broadphase перед дорогим voxel proxy intersection;
+2. CPU-built conservative proxy mask для каждого light descriptor с ABI-synced
+   fixed proxy records/masks и сохранённым stable-entity exclusion;
+3. sparse set-bit iteration вместо полного обхода заведомо отсутствующих proxy bits.
+
+На nearest диагностике proxy-mask поднял результат до `37.485 FPS / 30.023 ms p95`,
+а sparse iteration — до `38.206 FPS / 29.832 ms`. Полный soft path соответственно
+дал `23.294` и `23.525 FPS`. Это cumulative Tier B evidence; снижение качества,
+числа proxies или shadow coverage не применялось.
+
+#### Cluster depth D10 — откат
+
+Кандидат с `D10` дал положительный Tier B signal против D8, но после него live
+Advanced Lighting перестал работать корректно. Поэтому D10 не считается принятой
+оптимизацией и согласованно удалён из Java/Swift/native validation; текущий
+проверенный baseline снова использует `D6`. Исторический измеренный результат не
+является основанием оставлять регрессионный runtime-контракт.
+
+#### Exact skip мёртвого planar pass
+
+`PlanarReflectionRenderer.addFramePass` теперь не планирует reflection capture, если
+terrain specialization строго `AMBIENT_ONLY` и debug visualization выключена. В этом
+режиме отражение не имеет ни одного downstream consumer, поэтому это удаление
+семантически мёртвой работы, а не выключение видимого эффекта. Debug и будущие
+не-ambient профили сохраняют pass. Проверяется `PlanarReflectionMatrixTests`.
+
+Результат после D10: `28.910 FPS`, GPU p50/p95/p99
+`36.688/37.952/38.460 ms`, lows `25.991/25.062`; `WORLD_OPAQUE` около
+`18.26/19.04 ms avg/p95`.
+
+#### Exact all-visible layer-0 witness
+
+В soft filter nearest tap вычисляется прежним полным helper. Только если его результат
+точно `vec3(1)`, три дополнительные taps последовательно проверяют валидный layer 0.
+Если все три имеют `+inf` либо receiver находится не дальше first hit с прежним
+`0.002` coincidence tolerance, старое weighted expression вычисляется в прежнем
+порядке с тремя `vec3(1)`. При любом miss вызывается буквально прежний fallback;
+prefetch в него не переиспользуется, поэтому register lifetime не расширяется.
+
+Warmed Tier B `1800+900`:
+
+- `32.192 FPS`, min window `32.145`;
+- GPU p50/p95/p99 `33.154/34.403/34.949 ms`;
+- lows `27.528/26.367`;
+- `WORLD_OPAQUE` около `15.01/15.73 ms avg/p95`;
+- `READY=87`, `STALE=0`, `dirty bricks=0`, zero measured resource allocations.
+
+Первый production Tier C `1800+3000` подтвердил устойчивость, но ещё не закрывает
+обязательный `2x2` gate: `32.489 FPS`, min window `32.389`, GPU p95/p99
+`35.493/36.091 ms`, lows `28.298/26.987`, zero timing drops/allocations. До цели
+остаются примерно `12.5 FPS`, поэтому нельзя объявлять задачу завершённой.
+
+#### Exact interior fast path L6 soft filter
+
+После GPU-counter атрибуции добавлен отдельный ALU-кандидат только для внутренней
+области cubemap face. При `faceEdgeDistanceTexels >= 1.5` старый `smoothstep`
+гарантированно равен единице, `lowerTexel` лежит в `[1, edge-2]`, а все четыре taps
+остаются на исходной face. Поэтому этот coherent path строит те же четыре прямых
+taps и bilinear weights, но не выполняет seam resolve, четыре tap-ID, deterministic
+diagonal и triangle math. Полоса `<1.5` выполняет старый код буквально.
+
+Число visibility taps, выбор nearest при tie `.5`, порядок трёх extra reads,
+all-visible witness, left-associated weighted accumulation и final finite/clamp
+guards не менялись. Новый CPU oracle перебирает faces, edge `8/16/32/64`, четыре
+nearest quadrants и значения `nextDown/.5/nextUp`; direct taps, nearest ID, coverage
+и weights совпадают со старым resolve-path. Actual GLSL→SPIR-V compilation и
+`metalRuntimeUnitTest` прошли; обновлены четыре source goldens.
+
+Warmed detailed Tier B `1800+900`:
+`20260822T084623Z-ge343bd0a5d9f-dirty-goal45-l6-interior-exact-warm-off`:
+
+- `35.071 FPS`, min window `35.056` против retained `32.192/32.145`;
+- GPU p50/p95/p99 `31.841/32.893/33.359 ms` против
+  `33.154/34.403/34.949 ms`;
+- lows `32.033/31.152` против `27.528/26.367`;
+- `WORLD_OPAQUE` около `14.17/14.87 ms avg/p95` против `15.01/15.73 ms`;
+- `READY=87`, `STALE=0`, `APPROXIMATE=1961`, zero measured allocations;
+  `dirty_bricks_remaining=5`, поэтому receipt немного тяжелее идеального frozen
+  reference, а не легче.
+
+Это около `+8.9%` whole-frame и согласованное улучшение tails/stage, поэтому кандидат
+оставлен. Он ещё не принят окончательно: это один instrumented Tier B run, не
+production `2x2`, и до цели `45 FPS` остаётся почти `10 FPS`.
+
+#### Per-face all-visible L6 census и отклонённый descriptor bypass
+
+Перед изменением GPU path выполнен отдельный opt-in census полного resident payload,
+а не оценка по `raysWithHits`. Строгий классификатор принимал face только для
+`complete` page и только если все `edge² * 4` hits имели non-NaN non-negative
+distance (`+inf` и `-0` допустимы) и точный `VISIBLE_PACKED_RGB`; incomplete,
+`NaN`, отрицательные, `-inf` и любой не-white packed RGB отклонялись.
+
+Диагностический run
+`20260822T090228Z-ge343bd0a5d9f-dirty-goal45-l6-visible-face-census-off`
+дал 116 upload events и 87 финальных unique residents. В финальной residency:
+
+- 28/87 pages имели ровно одну полностью прозрачную face, остальные 59 — ни одной;
+- это 28/522 faces (`5.36%`), все 28 были edge `64`, face mask `0x04` (`+Y`);
+- ранние заменяемые pages давали 60 прозрачных faces в 49/116 events, но transient
+  статистика не использовалась как production coverage.
+
+После GO-stop-gate был проверен точный production bypass. Шесть face bits временно
+упаковывались в старшие биты descriptor state и переносились вместе с конкретной
+READY/STALE resident page; dynamic/fallback states всегда имели нулевую маску.
+Маска вычислялась на builder worker, не на render thread. Shader декодировал state,
+а white bypass срабатывал только после прежних finite/edge/atlas-range/faceUv guards
+и только при `faceEdgeDistanceTexels >= 1.5`. Это важная seam-граница: при меньшем
+значении soft taps могут перейти на соседнюю cubemap face, поэтому там выполнялся
+старый resolver и все visibility reads буквально. Java descriptor contracts,
+classifier tests, diagnostic patch contract и actual GLSL -> SPIR-V прошли.
+
+Warmed detailed Tier B `1800+900`
+`20260822T091316Z-ge343bd0a5d9f-dirty-goal45-l6-visible-face-bypass-warm-off`
+не прошёл whole-frame gate против retained interior-fast-path run:
+
+- FPS `35.071 -> 34.518`, min window `35.056 -> 34.480`;
+- GPU p50/p95/p99 `31.841/32.893/33.359 -> 32.359/33.576/34.077 ms`;
+- lows `32.033/31.152 -> 29.940/27.114`;
+- `world opaque` локально улучшился примерно
+  `14.168/14.759 -> 13.588/14.059 ms` avg/p95, но whole presenting command buffer
+  и tails стали хуже; thermal state оставался nominal, READY/STALE были те же
+  `87/0`, timing drops и measured allocations — zero.
+
+Локального stage win недостаточно: дополнительный raw-state decode, branch и
+`out bool` изменили codegen общего fragment helper и дали итоговую регрессию,
+вероятно в другом terrain pass. Production bypass, descriptor packing, census env,
+classifier и связанные goldens/tests полностью удалены; retained interior fast path
+снова проходит исходные contracts. **DO NOT RETRY** per-face descriptor bypass в
+этой форме без нового receiver-direction evidence и способа не менять codegen
+непокрытых fragment paths.
+
+### Отклонено и полностью удалено — DO NOT RETRY без новых данных
+
+| Кандидат | Результат | Решение |
+|---|---|---|
+| Global cluster tile `32x32` | `19.657 FPS / 55.461 ms p95` | Регрессия; reverted. |
+| Opaque static first-layer specialization | `23.169 FPS / 46.835 ms` | Не быстрее полного path; reverted. |
+| Conservative first-hit min-mip | `24.276 FPS / 45.001 ms`, WORLD около `22.16/22.73 ms` | Регрессия; reverted. |
+| MSL `noinline` для soft filter | `24.705 FPS / 44.034 ms`, WORLD около `21.24/21.90 ms` | Регрессия; reverted. |
+| Cluster depth `D12` | `25.156 FPS / 44.591 ms`, cluster build хуже | Возврат к D10. |
+| Quad ballot + четыре address broadcast на cache load | `26.889 FPS / 40.822 ms`, lows `23.805/23.333` | WORLD стал быстрее, но полный кадр и lows хуже; reverted. |
+| Сокращённый quad clustered min/max | `25.388 FPS / 43.039 ms`, lows `22.189/21.780` | Регрессия; reverted. |
+| Terminal-opaque first-hit texture/gather architecture | Только `6/87` steady READY pages (`6.9%`) прошли строгий terminal gate | Не окупает ресурс/ABI; telemetry и код удалены. |
+| Перенос layer-0 load перед direction/plane внутри каждого tap вместо group witness | `27.508 FPS / 39.762 ms`, lows `24.526/23.656`, WORLD около `20.23/21.02 ms` против `32.192 / 34.403` и `15.01/15.73` | Математически exact, но shader execution существенно хуже; полностью reverted. |
+| Exact Sodium depth prepass | warmed `32.211 FPS / 35.819 ms p95`, WORLD около `14.70/15.06 ms`; activation-proof `32.334 FPS / 34.193 ms`, WORLD около `14.48/14.86 ms` | Сэкономил менее `0.75 ms` WORLD p95 и не дал `5%` whole-frame; дополнительный pass полностью удалён. |
+| Отдельный exact 2x2/layer-0 proof atlas | Не запускался: минимум `+10.4–12.1%` к page payload, около `8–9 MiB` в Balanced либо потеря residency при полном 64 MiB atlas | Hard reject до кода: повтор min-mip/texture family, ABI/resource expansion и риск видимых approximate shadows. |
+| Lazy RGB decode после early-visible guards | `31.772 FPS`, GPU p95 `34.875 ms`, lows `28.316/27.098`, WORLD `15.282/15.992 ms` против retained `32.192 / 34.403` и `15.01/15.73` | Exact source reorder не дал выигрыша; Metal compiler, вероятно, уже делает code motion. Полностью reverted. |
+| Per-face all-visible descriptor bypass | `34.518 FPS / 33.576 ms GPU p95`, lows `29.940/27.114`; локальный `world opaque` win не пережил whole-frame gate | Полностью removed; не повторять shared-helper `out bool`/state-branch вариант. |
+| Удаление недостижимой finite/length guard для L6 cube direction | Adjacent screening: `35.893` против control `35.712 FPS`, но WORLD `14.025` против `13.653 ms` avg; GPU-разница совпала с дрейфом cluster/clipmap workload | Нет причинного WORLD-выигрыша; guard, tests и goldens восстановлены. |
+| Global shaderc `optimization_level_performance` для Metal GLSL corpus | Фальшивые `183.056 FPS / 4.701 ms GPU p95`: Advanced отключён, clustered/voxel telemetry inactive | Performance DCE удалил один external sampler (`4` вместо `5`), сработал fail-closed Vanilla fallback. Код и тест полностью removed. |
+
+Layer0-first прогон имел `READY=87/STALE=0` и стабильную регрессию во всех трёх
+окнах; его `dirty_bricks_remaining=6` делает workload receipt несовершенным, но
+`WORLD_OPAQUE` ухудшился примерно на `5.2 ms` и был стабилен около `20.2 ms` во всех
+окнах. Этого достаточно для hard reject, но не для каких-либо claims о размере
+регрессии в идеально равном A/B.
+
+Depth-prepass эксперимент использовал тот же Sodium vertex path, ту же RGSS/nearest
+alpha-проверку, `colorWriteMask=none`, исходный depth compare и повторное использование
+immutable indirect snapshot. Runtime log отдельно подтвердил, что экспериментальный
+pass был активен. Несмотря на небольшой сдвиг самой terrain-stage, целый кадр остался
+на уровне шума, а warmed GPU p95 ухудшился; Java/Swift/Metal hooks и тесты кандидата
+полностью удалены, исходный одноразовый prepared indirect path восстановлен.
+
+Для 2x2 proof-atlas единственным точным payload был бы conservative minimum первого
+валидного layer-0 hit для каждого внутреннего footprint с fallback на текущий SSBO
+path на seams/invalid/NaN. Текущие page allocations не имеют свободного места, а
+Balanced atlas уже capacity-bound (`READY` порядка `87`, `APPROXIMATE` порядка
+`1961`). Поэтому вариант либо вытесняет качественные resident shadows, либо добавляет
+новый ресурс, offset/retirement и ABI; это противоречит текущему quality/future gate.
+
+Lazy-RGB прогон был nominal thermal и COMPLETE, но workload receipt оказался даже
+слегка легче retained reference (`READY=85, STALE=1`, `dirty_bricks_remaining=9`).
+Даже в этих условиях не появилось ни whole-frame, ни WORLD_OPAQUE улучшения. Артефакт:
+`20260822T080256Z-ge343bd0a5d9f-dirty-lazy-rgb-decode-warm-off` (`1800+900`, detailed).
+
+Для direction-guard кандидата исходная guard действительно была избыточна для
+всех допустимых face/texel/edge: cube direction конечно и имеет length-squared
+в `[1,3)`. Но измерение не показало экономии именно в дорогом terrain fragment
+path. В кандидате clipmap остался недостроенным (`dirty=7`), cluster build был
+`1.344/2.066 ms avg/p95`; в контроле clipmap достроился (`dirty=0`), а cluster build
+стал `1.932/2.776 ms`. При этом сам WORLD был быстрее в исходном control. Артефакты:
+`20260822T092619Z-ge343bd0a5d9f-dirty-goal45-l6-direction-guard-screen-off` и
+`20260822T092844Z-ge343bd0a5d9f-dirty-goal45-l6-direction-guard-control-off`.
+
+Global shaderc experiment повторил Mojang front-end settings (Vulkan 1.2,
+auto-bind/locations, debug info и `gl_VertexID/gl_InstanceID` aliases) и менял только
+optimization level `zero -> performance`. Synthetic interface test прошёл, но actual
+runtime preflight сразу отверг `minecraft:pipeline/armor_cutout_no_cull`:
+`Advanced fragment must expose exactly five external L4/cloud/planar shadow samplers
+(removed 4, expected 5)`. После этого renderer честно перешёл на
+`lighting=VANILLA`; clustered lighting и voxel clipmaps были inactive. Поэтому
+числа прогона не являются performance evidence и не приближают цель.
+Артефакт: `20260822T093803Z-ge343bd0a5d9f-dirty-goal45-shaderc-performance-screen-off`.
+Не повторять global optimization без dual-profile semantic/resource/MSL parity harness;
+даже с таким harness Apple Metal compiler уже оптимизирует финальный MSL,
+поэтому нужен отдельный emitted-MSL/counter мотив до нового кода.
+
+Также не повторялись и не комбинировались старые отклонённые families из этого
+журнала: prepared-context/common-arguments, FP16 soft weights, `uvec4` mechanical
+packing и row-major texture variants. Fused four-tap proposal отклонён до кода как
+повтор этих уже измеренных идей без сокращения 16 potential reads.
+
+### Metal System Trace: второй крупный fragment bottleneck вне WORLD_OPAQUE
+
+После отката всех невыигравших кандидатов снят короткий production-structure trace,
+привязанный к JVM только после начала measured-фазы:
+`20260822T0814Z-nether-production-structure.trace`. Запуск был без detailed markers,
+Metal Validation и debug labels; полный companion report завершился `COMPLETE` без
+`FAIL` и dropped timing events:
+`20260822T081248Z-ge343bd0a5d9f-dirty-xctrace-production-structure-off`.
+Его `32.516 FPS / 35.192 ms GPU p95` нельзя использовать как acceptance evidence:
+5-секундная trace-запись намеренно вмешивалась в measured window, что также ухудшило
+lows до `27.148/25.093` и добавило диагностические resource allocations.
+
+Структурный результат trace:
+
+- fragment channel: около `5228.7 ms` суммарных active intervals за окно;
+- compute: около `393.0 ms`; vertex: около `120.0 ms`;
+- основной terrain-like encoder (`Render Command 4/3`) имеет fragment interval
+  около `13.8 ms` на кадр;
+- второй terrain-like encoder (`Render Command 8/7`) имеет ещё около `11.7 ms` на
+  кадр; по строгому порядку vanilla `LevelRenderer.addMainPass` он следует после
+  translucent features и соответствует `ChunkSectionLayerGroup.TRANSLUCENT`;
+- остальные render encoders в этом участке находятся примерно в диапазоне
+  `0.4–1.0 ms`.
+
+Следовательно, кадр не является только `WORLD_OPAQUE`-bound: большая lava/translucent
+terrain fragment-stage раньше не отображалась в основной WORLD сводке и сопоставима
+с opaque terrain по стоимости. Первый trace не содержит shader-profiler samples и GPU
+counter values, поэтому не доказывает occupancy/cache/bandwidth причину и сам по себе
+не разрешает менять качество translucent shadows, blending, sorting или L8 optics.
+Production pass/attachment аудит также не нашёл лишнего clear/store, reactive MRT,
+duplicate draw или безопасно удаляемого attachment; диагностическое дробление
+encoder'ов существует только при detailed timing и не является production-кандидатом.
+
+### Metal GPU Counters: opaque и translucent terrain ALU-bound
+
+После структурной записи отдельно снят screening trace с инструментом
+`Metal GPU Counters`:
+`20260822T0830Z-nether-gpu-counters.trace`. Его production companion
+`20260822T082837Z-ge343bd0a5d9f-dirty-xctrace-gpu-counters-off` завершился
+`COMPLETE`: `32.544 FPS`, GPU p95 `35.460 ms`, lows `28.674/26.911`, zero
+measured allocations. Эти числа не являются acceptance evidence: инструмент был
+подключён внутри measured-фазы, а JVM завершилась примерно через `1.55 s` после
+начала capture вместо запрошенных пяти секунд. Запись годится только для
+микроархитектурной атрибуции.
+
+В fragment-active samples (`133211` из `154962`, около `86%`) агрегаты составили:
+
+- ALU Limiter: mean `52.47%`, p50 `48.65%`, p95 `94.18%`;
+- ALU utilization: mean `44.75%`;
+- Texture Sample Limiter: mean `7.92%`;
+- Texture Cache Limiter: mean `4.12%`;
+- Buffer Read Limiter: mean `2.48%`;
+- GPU LLC Limiter: mean `8.57%`;
+- GPU Read Bandwidth: mean `6.76%`.
+
+Корреляция global counter samples с encoder intervals показывает ту же картину для
+обоих дорогих terrain passes. У opaque-like `Render Command 4/3` ALU Limiter mean
+около `47-48%`, Texture Sample около `3.6%`, Buffer Read около `3.5%`, LLC около
+`3.1-3.3%`. У translucent-like `Render Command 8/7` ALU Limiter ещё выше — около
+`54-55%`, тогда как Texture Sample около `3.1-3.5%`, Buffer Read около `1.1%`, LLC
+около `6.5%`. Названия pass выводятся из порядка encoders, а counters глобальны,
+поэтому это сильная относительная атрибуция, но не shader-level sample proof.
+
+Практический вывод: следующий кандидат должен сокращать точную ALU-работу L6 soft
+filter одновременно в opaque и translucent terrain shader. Повторять resource
+packing, row-major/texture atlas, bandwidth или cache-only варианты без новых данных
+нельзя: counters прямо показывают, что они атакуют вторичный limiter. Малые
+post-process passes могут быть bandwidth-heavy, но занимают лишь доли миллисекунды и
+не способны закрыть разрыв до `45 FPS`.
+
+### Незакрытая граница доказательства
+
+Static tests и golden shader hashes доказывают ABI/source/output contracts, но не
+FPS и не приятность игры. Перед окончательным принятием retained set обязательны:
+
+1. same-code Tier C `2x2` A/B без detailed markers;
+2. визуальная проверка Nether и другой сложной сцены с множеством источников;
+3. проверка движения камеры, coloured/translucent shadows, seams, held/dynamic light,
+   chunk streaming и frame pacing;
+4. полный `clean check` и возврат временных benchmark/display настроек.
+
+### Диагностика exact +inf-footprint proof (telemetry удалена)
+
+Перед production-кодом отдельно измерен строгий верхний предел покрытия компактного
+bitset, который мог бы доказывать, что все четыре layer-0 texel выбранного interior
+`2x2` footprint имеют distance `+inf`. Диагностический run
+`20260822T094449Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-footprint-census-off`
+завершился `COMPLETE`: `35.807 FPS`, GPU p50/p95/p99
+`31.225/32.452/33.152 ms`, lows `30.728/28.939`, zero measured allocations.
+
+Для последних версий 92 unique pages строгая доля составила `249713/2059488`
+interior footprints (`12.13%`). У edge `64` — `249426/2052696` (`12.15%`),
+причём face `+Y` имела `42.31%`, а остальные face примерно `5.6-6.2%`.
+Это только page-space census: он не измеряет экранную частоту обращений и сам по
+себе не доказывает FPS. Временные record/helper, env
+`METALLUM_L6_INFINITE_FOOTPRINT_CENSUS` и upload logging полностью удалены до
+production-кандидата.
+
+#### Compact one-bit +inf proof tail — отклонён и полностью удалён
+
+После census отдельно проверен exact production-вариант: один bit на visibility
+texel (`staticAtlasBytes / 256`, для Balanced ровно `256 KiB`). Bit выставлялся на
+builder worker только для complete page и только если все четыре layer-0 записи
+interior `2x2` имели valid marker и точный `+inf`. При hit shader возвращал то же
+left-associated all-visible выражение; при miss, seam или dynamic page буквально
+сохранялся прежний трёхtapовый witness/fallback. Visibility payload, четыре слоя,
+soft weights и shadow result не менялись.
+
+Из-за исчерпанных fragment buffer slots proof временно размещался хвостом того же
+private visibility buffer. Java packet ABI v6 передавал точную static boundary,
+debug flag занимал старший bit, а Swift требовал exact buffer length
+`static + dynamic + static/256`; CPU oracle, actual GLSL -> SPIR-V -> MSL и runtime
+contracts прошли. Несмотря на малый объём metadata, screening
+`20260822T100502Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-proof-screen-off`
+устойчиво проиграл соседнему census/control
+`20260822T094449Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-footprint-census-off`:
+
+- FPS `35.807 -> 32.243` (`-9.96%`), min window `32.239`;
+- GPU p50/p95/p99 `31.225/32.452/33.152 -> 33.112/34.308/34.874 ms`;
+- lows `30.728/28.939 -> 28.846/27.536`;
+- cluster build дрейфовал в более лёгкую сторону (`1.904/2.757 -> 1.327/2.142 ms`),
+  поэтому он не объясняет ухудшение кадра;
+- `READY/STALE` совпали (`87/0`), Advanced shaders были active, timing drops и
+  measured allocations — zero.
+
+Кроме performance-регрессии Java exact layout guard обнаружил расширенный atlas и
+fail-closed отключил optional dynamic L6 backend (`bound to a different atlas
+layout`). В статичной benchmark-сцене dynamic candidates были нулевыми, поэтому это
+не объясняет измеренный проигрыш, но само по себе является недопустимой
+функциональной регрессией. Proof tail, ABI v6, Swift guard, builder payload и все
+tests/goldens полностью удалены; ABI v5 и исходный dynamic atlas contract
+восстановлены. **DO NOT RETRY** metadata proof (tail, отдельный buffer/texture либо
+старый 4-byte atlas) без принципиально новых per-fragment coverage и codegen данных:
+даже `12.13%` page-space coverage не окупило обязательную проверку на каждом
+interior nearest-white fragment.
+
+#### Exact trusted-address microkernel — отклонён и полностью удалён
+
+Следующий узкий кандидат затрагивал только уже доказанную interior-ветку L6 soft
+filter и не менял ни одного результата. После miss существующего all-visible
+witness он один раз строил точные row-major адреса `hit00/hit10/hit01/hit11`, а
+три fallback taps вызывали копию старого cached-texel helper без повторных
+face/texel bounds checks и адресной арифметики. Четыре ordered cache layers,
+direction/receiver-plane math, RGB decode, early returns, веса, seam fallback,
+ресурсы и ABI оставались прежними. Exhaustive CPU oracle проверял все допустимые
+edge `8/16/32/64`, faces, interior cells и границы bilinear quadrant; actual
+GLSL -> SPIR-V -> MSL, runtime и golden contracts прошли. Независимый Terra-аудит
+также подтвердил семантическую эквивалентность и указал только ожидаемый codegen/
+register-pressure риск.
+
+Comparable screening
+`20260822T101621Z-ge343bd0a5d9f-dirty-goal45-l6-trusted-address-screen-off`
+этот риск реализовал и проиграл соседнему control/census
+`20260822T094449Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-footprint-census-off`:
+
+- FPS `35.807 -> 32.577` (`-9.02%`), min window `32.577`;
+- GPU p50/p95/p99 `31.225/32.452/33.152 -> 32.748/34.064/34.480 ms`, worst
+  `35.117 ms`;
+- lows `30.728/28.939 -> 29.847/28.868`;
+- cluster build снова был существенно легче (`1.904/2.757 -> 1.348/2.144 ms`
+  avg/p95), поэтому не объясняет ухудшение whole frame;
+- `READY/STALE` совпали (`87/0`), Advanced shaders были active, run завершился
+  `COMPLETE`, timing drops и measured allocations — zero;
+- исходный atlas/ABI был сохранён: dynamic L6 не получил layout failure и реально
+  выполнил один ранний dispatch до стабилизации статичной сцены.
+
+Helper, точные адреса, повторная quadrant selection и тестовые goldens полностью
+удалены; retained interior/seam filter и исходный dynamic backend восстановлены,
+targeted CPU/shader/runtime tests снова проходят. **DO NOT RETRY** duplicated
+trusted-address helper. Также не переходить к более широкой face-frame/shared-ray
+форме без принципиально нового emitted-MSL или occupancy proof: она увеличивает
+живой ALU state и code size в том же дорогом fallback-домене, где меньший кандидат
+уже ухудшил GPU p95 на `1.612 ms`.
+
+#### Conservative 32x32 microtile mask в compact indices — отклонён и удалён
+
+Отдельно проверен новый cluster/fragment-кандидат, не повторяющий global tile `32`
+и post-L6 shadow tagging. Сетка headers/scratch/prefix оставалась прежней
+`64x64 x D10`; low 12 bits каждого `uint16` compact index сохраняли исходный
+light index и его порядок, а свободный high nibble передавал conservative overlap
+mask четырёх `32x32` microtiles. Prepare квантизовал уже существующий projected
+view-space light AABB в half-tile ranges; старые macro bounds восстанавливались
+точно как `lower >> 1` и `(upper + 1) >> 1`. Bounds расширялись наружу на один
+pixel внутри прежнего macro range, invalid/near-camera случай оставался full-screen,
+а нулевая маска превращалась в `0xF` fail-open. Fragment direct и dominant-specular
+loops проверяли bit до чтения light record, range/normal и L6.
+
+Новых buffers, passes, encoders, allocations либо перестановки/cap lights не было.
+Совместимый старый batch flag включал интерпретацию; raw high-zero index оставался
+legacy/fail-open для mixed old/new code. Native CPU/GPU oracle проверял неизменные
+headers/stats/order, P/B/U caps, Retina partial tile, SDR/HDR, empty/overflow/OOB,
+`#4095` и точное соответствие packed mask подготовленным bounds. Metal API + GPU
+Validation, actual GLSL -> SPIR-V -> MSL и runtime contracts прошли.
+
+Screening
+`20260822T104001Z-ge343bd0a5d9f-dirty-goal45-cluster-microtile-screen-off`
+решительно проиграл тому же retained control/census
+`20260822T094449Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-footprint-census-off`:
+
+- FPS `35.807 -> 30.278` (`-15.44%`), min window `30.248`;
+- GPU p50/p95/p99 `31.225/32.452/33.152 -> 35.139/36.263/36.800 ms`, worst
+  `37.284 ms`;
+- lows `30.728/28.939 -> 26.626/25.661`;
+- cluster build был даже легче (`1.904/2.757 -> 1.613/2.452 ms` avg/p95), поэтому
+  не объясняет fragment/whole-frame проигрыш;
+- macro workload остался в том же классе: `2048` lights, `14880` clusters,
+  occupancy `32/80/256`, `499723` accepted indices, `68` overflow clusters;
+- `READY/STALE=87/0`, Advanced active, `COMPLETE`, zero timing drops и measured
+  resource allocations; clipmap ещё имел `dirty=6`, но это не может объяснить
+  стабильный GPU-регресс порядка `3.8 ms`.
+
+Production flag, metadata interpretation, packed indices, fragment decode, native
+binding и tests/goldens полностью удалены; прежние raw indices и contracts снова
+проходят. **DO NOT RETRY** per-index microtile/quadrant sideband в текущем forward
+shader: даже точное culling metadata расширяет hot loop/codegen и ухудшает оба
+дорогих terrain passes сильнее, чем экономит skipped lights. Возвращаться можно
+только с прямым shader/ISA proof, позволяющим применить cull без per-candidate
+decode/branch в fragment path; более мелкие bins либо новые sideband resources сами
+по себе таким proof не являются.
+
+#### Direction-free all-black witness — отклонён до реализации
+
+Рассмотрен симметричный all-visible witness exact-кандидат: если nearest tap уже
+вернул точный `vec3(0)`, для трёх соседних taps предполагалось читать только layer 0
+и доказывать чёрный результат через общую нижнюю границу receiver plane
+`abs(dot(normal, lightToReceiver)) * inversesqrt(dot(normal, normal))`. В вещественной
+арифметике идея выглядит корректно: для единичного cache direction абсолютный
+denominator не превосходит длину normal. При успехе можно было бы не повторять
+direction/plane math и остальные cache layers для трёх taps.
+
+Независимый Terra-аудит нашёл точный float-контрпример до внесения production-кода.
+Текущий helper нормализует cubemap direction умножением на `inversesqrt`, но
+GLSL -> SPIR-V -> MSL contract не гарантирует, что полученный float-вектор имеет
+длину не больше единицы. Для `edge=8`, face `+X`, texel `(2,0)`, raw direction
+`(1, 0.875, 0.375)` после float normalization имеет `dot(d,d)=1.0000001`. При
+`normal=d`, подходящем конечном `lightToReceiver`, black marker
+`0xff000000`, `hit=0.998` и epsilon `0.002` старый per-tap plane distance округляется
+до `1.0` и возвращает прежнюю белую visibility по условию `hit+epsilon >= plane`,
+тогда как proposed direction-free bound равен `1.0000001` и ошибочно доказывает
+чёрный результат по `hit+epsilon < bound`.
+
+Следовательно, кандидат не является bit-exact и мог бы создавать редкие ложные
+тени. Эвристический safety multiplier тоже не даёт platform-independent proof и
+противоречит quality-preserving gate. Код, ABI и shaders не менялись; benchmark не
+запускался, потому что correctness gate уже провален. **DO NOT RETRY** общую
+direction-free plane bound без формально специфицированной directed-rounding схемы
+либо без вычисления точного старого per-tap direction/plane expression. Последний
+вариант не является новым shortcut: он повторяет почти всю работу исходного helper
+до его существующего layer-0 black return.
+
+#### Fusion diffuse L3/L6 и dominant local GGX — отклонён по coverage gate
+
+Проверена более широкая идея убрать второй cluster traversal у terrain material
+path: текущий `metallumEvaluateClusteredMaterialSpecularV1` отдельно выбирает
+dominant light и повторно запрашивает его proxy/L6 visibility, после чего обычный
+`metallumEvaluateClusteredDirectV1` снова обходит тот же cluster. Теоретически
+terrain-only helper мог бы сохранить literal порядок diffuse accumulation, прежний
+strict `score > dominantScore` tie-break и использовать уже вычисленную visibility
+dominant light для одного GGX.
+
+Для целевой сцены кандидат провалил coverage gate до кода. Route фиксирует clear
+weather и frozen simulation, поэтому rain-wet material path недостижим. Основной
+translucent workload — lava; её material packet имеет ненулевой emission code, а
+L8 special-surface gate намеренно требует `emissionCode == 0`. Следовательно,
+дорогие lava fragments вообще не вызывают dominant local GGX. Возможные редкие
+water/glass/metal pixels не могут закрыть разрыв примерно `10 ms` GPU p95 до цели.
+
+Кроме отсутствия целевого покрытия fusion удерживал бы diffuse sum и dominant
+state через material/environment работу, расширяя register lifetime, и обязан был
+бы развести разные semantics: diffuse L6 fail-open/debug contribution против
+specular fail-closed, partial receiver, proxy и descriptor state. Это пересекается
+с уже отклонённым 2026-07-29 material-gated duplicated-lighting вариантом, который
+ухудшил FPS примерно на 6%, после чего был закреплён единый literal L3-L6 common
+path. Код и shaders не менялись, benchmark не запускался. **DO NOT RETRY** fusion
+для Nether без прямой telemetry значимого L8-material pixel coverage и emitted-MSL/
+register evidence; для отдельной material-heavy сцены это может быть самостоятельной
+будущей гипотезой, но не решением dense-emissive L6 bottleneck.
+
+#### Repack 32-byte L6 texel с normalization metadata — отклонён до кода
+
+Проверена возможность использовать четыре кажущихся избыточными `0xff` marker bytes
+в четырёх `{float distance, uint packedRgb}` records одного texel. При неизменных
+`32 bytes/texel` можно было бы уплотнить четыре RGB24 в три words, а освободившийся
+word занять normalization scalar и убрать часть direction ALU у каждого tap.
+
+Exact-аудит показал три блокера. Во-первых, старый marker является независимым
+fail-closed contract для каждого из четырёх layers: malformed marker при конечной
+неотрицательной distance обязан вернуть black. Один NaN/negative sentinel или общий
+texel bit не представляет те же четыре независимые invalid states; четыре validity
+bits вместе с полным IEEE scalar уже не помещаются без потери информации либо роста
+payload. Во-вторых, RGB1/RGB2 после плотной упаковки пересекают границы words и
+добавляют shifts/OR и live state в каждый hot layer; atlas traffic/residency остаются
+теми же, хотя GPU counters указывают ALU, а не buffer bandwidth как основной limiter.
+
+В-третьих, stored normalization не имеет bit-exact producer/consumer parity. Static
+builder использует CPU/double sqrt, dynamic builder — MSL `normalize`, а fragment
+consumer — GLSL `inversesqrt(dot(...))`; независимое округление на tangent-plane
+границе может изменить white/black early return. Сохранение raw length убирает лишь
+малый `dot`, но оставляет `inversesqrt` и добавляет repack decode. Код, ABI и benchmark
+не менялись. **DO NOT RETRY** marker-byte repack или normalization metadata без
+полного сохранения per-layer malformed-state contract, bit-identical GPU generation
+и emitted-code proof; в текущем 32-byte payload это не даёт several-ms потенциала.
+
+#### Contiguous 32x32 sublists внутри 64x64 macro cluster — отклонены до кода
+
+После проигрыша per-index microtile sideband отдельно проверен архитектурно иной
+вариант: build мог бы сформировать четыре contiguous quadrant sublists для каждого
+текущего 64x64xD10 macro cluster, а fragment shader выбирал бы один header/list один
+раз до light loop. В hot loop не было бы ни mask decode, ни новой ветки на каждый
+light, поэтому это не повторяет конкретную причину microtile shader-регресса.
+
+Exact-аудит, однако, показал, что по ресурсам это фактически возврат к global 32x32
+grid. При native 3024x1964 текущие `48*31*10 = 14880` macro clusters превращаются в
+`59520` quadrant sublists — на `68%` больше уже отклонённого global-32x32 D6
+(`35340`). Прямое четырёхкратное membership хранение потребовало бы
+`30474240 bytes` вместо `7618560 bytes` (`+22.86 MiB`), headers ещё около
+`357120 bytes`. Беспропускной worst-case list достигает `59520*256 = 15237120`
+indices, тогда как Balanced layout имеет fixed cap `4M`, а native ABI допускает
+максимум `8M`.
+
+Применять cap независимо после quadrant cull нельзя: так sublist может вернуть
+light, который прежний macro cap 256 уже отбросил, и изменить изображение. Для
+точной семантики нужно сначала сохранить первые 256 macro light IDs в прежнем
+ascending порядке, затем строить quadrant lists только из этого промежуточного
+списка. Это означает двухступенчатый build, дополнительные headers/passes и
+обязательный fallback на literal macro list при переполнении. Historical raw
+global-32x32 уже запросил `1351005` indices и cluster-build p95 `4.012 ms` при D6;
+retained macro-D10 использует около `500717` и p95 `2.757 ms`. Доказательства
+потенциала вернуть необходимые 5–6 ms при таком росте compute/memory нет.
+
+Production code, ABI и benchmark не менялись. **DO NOT RETRY** прямые contiguous
+quadrant sublists без предварительного census cardinality после исходного macro-cap,
+доли header-level fallback и worst-case capacity. Возвращаться можно только если
+этот census одновременно докажет exact overflow behavior и достаточное сокращение
+L6 вызовов; реализация затем всё равно обязана сохранить literal macro-list fallback
+и пройти текущие whole-frame/lows/visual gates.
+
+#### Fused four-tap all-visible prefilter — проверен и полностью удалён
+
+Проверен output-exact вариант существующего layer-0 all-visible witness. Soft helper
+сначала разрешал прежние четыре taps/weights, после существующего seam nearest-ID
+fail-closed gate делал nested layer-0 proof для nearest и трёх extras, и при четырёх
+white proofs возвращал прежнюю left-associated сумму четырёх `vec3(1)` с теми же
+finite/clamp. На любом proof miss выполнялся literal старый nearest helper, затем
+неизменённый retained three-extra witness и полный fallback. Invalid marker,
+NaN/negative/infinite distances, signed zero, epsilon equality, face seams и `.5`
+ties были проверены source/numeric contracts; actual GLSL -> SPIR-V -> MSL,
+L6_NEAREST_ONLY diagnostic, Metal API/GPU Validation и runtime trio прошли.
+
+Первый screening
+`20260822T111537Z-ge343bd0a5d9f-dirty-goal45-l6-prefilter-all-visible-screen-off`
+дал отрицательный сигнал (`33.791 FPS`, GPU p95 `33.629 ms`), но не был принят как
+сопоставимое доказательство: к measure сохранились `READY/STALE=85/1` вместо
+контрольных `87/0`. Поэтому выполнен ровно один повтор того же `600 warmup + 300
+measure` после чистого process preflight.
+
+Повтор
+`20260822T111804Z-ge343bd0a5d9f-dirty-goal45-l6-prefilter-all-visible-screen-repeat-off`
+был полностью сопоставим: native 3024x1964 HDR, Advanced/Balanced, MetalFX OFF,
+VSync OFF, `READY/STALE=87/0`, 2048 lights, `COMPLETE`, zero dropped timings,
+zero measured resource allocations. Относительно retained control
+`20260822T094449Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-footprint-census-off`:
+
+- FPS `35.807 -> 33.785` (`-5.65%`);
+- presenting GPU p50/p95/p99 `31.225/32.452/33.152 ->
+  32.965/34.106/34.581 ms`;
+- WORLD OPAQUE avg/p95 `13.591/13.983 -> 14.894/15.643 ms`;
+- 1% low `30.728 -> 29.611`; 0.1% low `28.939 -> 29.371` не компенсирует
+  проигрыш whole-frame и 1% low;
+- cluster build практически совпал (`1.905/2.757 -> 1.889/2.792 ms` avg/p95),
+  поэтому регресс локализован в terrain fragment/codegen, а не в culling compute.
+
+Кандидат, его новые contracts и golden hashes полностью удалены; retained
+nearest-first helper/witness восстановлен. **DO NOT RETRY** fusion, который держит
+разрешённые taps/weights live через возможный full nearest fallback: skipped nearest
+direction/plane work на all-visible footprints меньше, чем register pressure,
+повторные layer-0 reads и более тяжёлый control flow в обоих terrain passes.
+Возвращаться к four-tap prefilter можно только с emitted-ISA proof, устраняющим эту
+live-state цену без изменения старого fallback и без per-tap proof на miss path.
+
+#### Goal45: разрешён контролируемый quality/performance режим
+
+После исчерпания очередной серии output-exact кандидатов пользователь отдельно
+разрешил рассматривать **небольшую, визуально малозаметную** потерю качества ради
+заметного FPS win. Это не отменяет safety/pleasantness gates: запрещены заметная
+пикселизация или пропадание важных теней, spatial/temporal shimmer, нестабильность
+при движении, ухудшение frame pacing/1% lows и скрытое уменьшение light radius/count,
+HDR либо других несвязанных эффектов.
+
+Каждый approximate кандидат обязан быть независимо обратимым: отдельный явный
+runtime/config policy с сохранённым исходным full-quality path, узкий diff и отдельная
+запись A/B. Производственный default можно менять только после Tier B win, live
+визуальной проверки в Nether и другой dense-light сцене, затем Tier C 2x2. Уже
+измеренный `L6_NEAREST_ONLY` (`49.777 FPS`, GPU p95 `22.790 ms`) используется только
+как верхняя performance-граница: сам по себе он не принят, потому что полностью
+убирает 2D shadow filtering и может вернуть заметные texel silhouettes.
+
+#### Повторный exact-аудит receiver-plane hoist — NO-GO без кода
+
+Идея вычислять `dot(receiverWorldNormal, receiverWorldNormal)` и
+`dot(receiverWorldNormal, lightToReceiver)` один раз для nearest+soft taps оказалась
+прямым расширением уже отклонённого `Fragment atlas candidate 2`. Там те же scalars
+и `cacheFaceEdgeFloat` были вынесены для трёх extras: GPU p95 улучшился только на
+`0.189 ms`, ниже gate, при одновременном ухудшении обоих lows. Добавление nearest
+экономит лишь ещё один normal dot и максимум один условный numerator dot, но держит
+два scalars live через nearest и soft calls. Нового several-ms основания нет.
+Production code/tests/benchmark не менялись. **DO NOT RETRY** без emitted-MSL proof,
+что compiler не делает CSE сам и что register occupancy не ухудшается.
+
+#### Полный RG32Uint texture/gather atlas — NO-GO до реализации
+
+Проверена не metadata-надстройка, а полная bit-exact замена 4-layer L6 SSBO atlas на
+integer texture layout. На M1 Pro `RG32Uint` не является filterable format, поэтому
+нужный hardware 2x2 `textureGather` для raw distance/RGB bits недоступен; integer
+`read()` оставляет те же per-layer/per-tap reads. Float/UNORM варианты теряют NaN,
+marker и payload bit identity либо добавляют reconstruction ALU.
+
+Кроме того, fixed-size texture-array slices раздувают edge 8/16/32 pages в
+64x64 storage, а четыре edge-specific pools либо tiled atlas требуют новых fragment
+resources, descriptor ABI, allocators и отдельного dynamic-L6 texture write/hazard
+пути вместо текущего общего 64 MiB buffer+suffix. Прямого no-copy/no-residency-loss
+перехода нет. GPU counters также показывают buffer read secondary (`2.48% mean`)
+против fragment ALU limiter порядка `47-55%`. Код/ABI/benchmark не менялись.
+**DO NOT RETRY** texture/bandwidth family без нового hardware raw-integer gather,
+изменившегося limiter profile и доказанного layout с той же residency/dynamic safety.
+
+#### Nearest-wrapper layer-0 proof — проверен и полностью удалён
+
+Последним distinct exact micro-кандидатом existing layer-0 white proof был добавлен
+только в nearest wrapper после всех прежних finite/edge/atlas/face/nearest-address
+guards. При valid layer 0 и `+inf` либо прежнем
+`receiverDistance <= hitDistance + 0.002` он возвращал тот же initial `vec3(1)` до
+direction/normal/receiver-plane math; на любом miss буквально вызывался исходный
+full texel helper. В отличие от отклонённых per-tap layer0-first и fused prefilter,
+никакие soft taps/weights не жили через nearest fallback. Marker/NaN/negative,
+signed-zero и epsilon boundaries, source order, actual GLSL -> SPIR-V -> MSL,
+diagnostics, Metal API/GPU Validation и runtime tests прошли.
+
+Clean Tier B
+`20260822T113035Z-ge343bd0a5d9f-dirty-goal45-l6-nearest-layer0-proof-screen-off`
+имел native HDR/Advanced Balanced/MetalFX OFF/VSync OFF, 2048 lights,
+`READY/STALE=87/0`, `COMPLETE`, zero dropped timings и zero measured allocations.
+Относительно retained control:
+
+- FPS `35.807 -> 33.247` (`-7.15%`);
+- presenting GPU p50/p95/p99 `31.225/32.452/33.152 ->
+  33.750/35.290/35.849 ms`;
+- WORLD OPAQUE avg/p95 `13.591/13.983 -> 14.848/15.547 ms`;
+- 1%/0.1% lows `30.728/28.939 -> 30.574/30.438`; более высокий 0.1% tail не
+  компенсирует устойчивый проигрыш whole-frame, GPU и WORLD;
+- cluster build был легче (`1.667/2.552 ms` avg/p95), поэтому не объясняет регресс.
+
+Proof branch/read, tests и goldens полностью удалены; прежний nearest wrapper
+восстановлен. **DO NOT RETRY** source-level nearest proof без нового emitted-MSL/
+coverage evidence: даже без soft live state duplicate layer-0 read и control-flow
+изменили terrain codegen сильнее, чем сэкономили direction/plane ALU. На этом
+source-level exact L6 micro-tuning закрыт; дальнейший exact шаг требует отдельного
+opaque+translucent shader capture и coverage census, а не новой перестановки source.
+
+#### L6 continuous triangle three-tap — проверен и полностью удалён
+
+Первым independently reversible approximate-кандидатом был диагностический режим
+`L6_TRIANGLE_3_TAP`; production/default оставался byte-identical full-quality.
+Внутри face обычный bilinear 2x2 заменялся непрерывной triangle interpolation по
+фиксированной диагонали 00--11, а в seam-полосе использовалась уже существующая
+детерминированная resolved-ID диагональ. Это сохраняло C0 continuity и три
+ненулевых corner weights вместо четырёх, но могло дать слабую facet-форму, поэтому
+при достаточном win требовало отдельной live-проверки движения.
+
+До запуска numeric oracle исчерпывающе проверил edge 8/16/32/64, шесть faces,
+границы и `.5` ties. Он нашёл важный seam-case, где nearest logical tap имеет
+нулевой triangle weight; поэтому реализация не выкидывала его вслепую, а сохраняла
+ordered three-extra fallback. Positive-anchor footprint использовал nearest плюс
+не более двух extras. Full filter при выключенном режиме восстанавливался
+byte-identical; actual GLSL -> SPIR-V, idempotence, runtime trio и Metal API/GPU
+Validation прошли.
+
+Clean Tier B
+`20260822T115223Z-ge343bd0a5d9f-dirty-goal45-l6-triangle-3tap-screen-off`
+имел native 3024x1964 HDR, Advanced/Balanced, MetalFX OFF, VSync OFF, 2048 lights,
+`READY/STALE=87/0`, `COMPLETE`, zero dropped timings и zero measured allocations.
+Относительно retained control
+`20260822T094449Z-ge343bd0a5d9f-dirty-goal45-l6-infinite-footprint-census-off`:
+
+- FPS `35.807 -> 35.374` (`-1.21%`);
+- presenting GPU p50/p95/p99 `31.225/32.452/33.152 ->
+  31.933/33.303/34.231 ms`;
+- WORLD OPAQUE avg/p95 `13.591/13.983 -> 14.756/15.629 ms`;
+- 1%/0.1% lows `30.728/28.939 -> 32.652/32.537`, но улучшенный tail не
+  компенсирует проигрыш whole-frame/GPU/WORLD и отсутствие FPS win;
+- cluster build `1.905/2.757 -> 1.641/2.540 ms` avg/p95 был легче контроля,
+  поэтому terrain shader regression тем более не объясняется culling compute.
+
+Кандидат не прошёл минимальный performance stop-gate, поэтому live visual gate не
+запускался. Enum, source transform, oracle/contracts и diagnostic test полностью
+удалены; полный фильтр сохранён. **DO NOT RETRY** triangle-only interpolation как
+source-level сокращение одного tap: на M1 Pro более тяжёлый control-flow/register
+shape перекрывает арифметическую экономию. Возвращаться можно только с принципиально
+иной emitted-MSL формой и предварительным offline ISA/occupancy доказательством;
+само по себе разрешение небольшой потери качества не делает этот вариант полезным.
+
+#### Edge64 interior nearest с сохранёнными cubemap seams — проверен и удалён
+
+Временный CPU-census уже упакованных READY/STALE descriptors был добавлен только в
+существующий report-log раз в 300 submit. Он не создавал GPU buffer/readback и не
+менял fragment path. Clean full-filter run
+`20260822T120449Z-ge343bd0a5d9f-dirty-goal45-l6-page-edge-census-off`
+показал устойчивое распределение cached pages `8:1 / 16:1 / 32:1 / 64:84` при
+`READY/STALE=87/0`. Это descriptor-count, не screen-weighted coverage, но edge64
+охватывал `96.6%` resident pages и давал основание для одного диагностического A/B.
+
+`L6_EDGE64_INTERIOR_NEAREST` сохранял full filtering на страницах 8/16/32 и в
+полосе `<1.5` texel от каждой cubemap seam, а внутри edge64 возвращал уже вычисленный
+nearest visibility. Production/default оставался byte-identical; режим был отдельным
+shader variant без ABI/resource изменений. Actual GLSL -> SPIR-V, idempotence,
+restore-default и runtime tests прошли.
+
+Проверены две эквивалентные по изображению формы на одинаковом clean контракте
+(native 3024x1964 HDR, Advanced/Balanced, MetalFX/VSync OFF, `600+300`, 2048 lights,
+`READY/STALE=87/0`, edges `1/1/1/84`, `COMPLETE`, zero drops/allocations):
+
+- early return внутри soft helper,
+  `20260822T121112Z-ge343bd0a5d9f-dirty-goal45-l6-edge64-interior-nearest-screen-off`:
+  `42.297 FPS`, GPU p50/p95/p99 `26.546/27.501/28.236 ms`, lows
+  `39.314/39.173`, WORLD OPAQUE avg/p95 `12.786/13.220 ms`;
+- branch до вызова soft helper,
+  `20260822T121532Z-ge343bd0a5d9f-dirty-goal45-l6-edge64-interior-nearest-wrapper-screen-off`:
+  `42.458 FPS`, GPU p50/p95/p99 `27.060/28.101/29.046 ms`, lows
+  `35.561/33.228`, WORLD OPAQUE avg/p95 `13.015/13.504 ms`.
+
+Оба варианта дали большой throughput win относительно full filter, но не прошли
+заранее заданный gate `>=45 FPS` и `GPU p95 <=24.72 ms`; wrapper placement не
+устранил предел и ухудшил tails относительно первого варианта. Live visual gate не
+запускался. Enum/source transform/tests полностью удалены. **DO NOT RETRY** смешанный
+edge64-interior/full-seam CFG с threshold 1.5: сохранение старой seam-полосы плюс
+ветвление оставляет слишком много GPU frame time. Отдельный full-edge64 nearest
+может быть проверен только как более рискованный independently reversible probe и
+обязан быть отклонён при первом видимом texel silhouette, seam или temporal pop.
+
+#### Full edge64 nearest — быстрый diagnostic, не production; полностью удалён
+
+Отдельный `L6_EDGE64_NEAREST` variant оставлял literal full soft filter для страниц
+8/16/32, включая Balanced dynamic edge32, но на edge64 после прежнего exact nearest
+не вызывал три дополнительных soft taps. Default оставался byte-identical, менялся
+ровно один call site после descriptor validation и до неизменного distance fade;
+descriptor ABI, atlas, residency и builders не менялись. Shader/source/runtime и
+`localVoxelShadowUnitTest` прошли.
+
+Это был намеренно **quality- и fail-closed-semantics-changing diagnostic**, а не
+готовый policy. Если nearest tap валиден, но один из трёх дополнительных taps имеет
+invalid marker/NaN/negative distance, старый full filter может вернуть black, тогда
+как nearest-only extra tap вообще не читает и сохранит nearest result. Кроме того,
+на edge64 исчезает cubemap seam filtering и возможны квадратные texel silhouettes;
+при замене resident page 32<->64 меняется режим фильтра и возможен temporal pop.
+
+Clean `600 warmup + 600 measure` run
+`20260822T122043Z-ge343bd0a5d9f-dirty-goal45-l6-edge64-nearest-diagnostic-off`
+имел native 3024x1964 HDR, Advanced/Balanced, MetalFX/VSync OFF, 2048 lights,
+`READY/STALE=87/0`, cached edges `1/1/1/84`, `COMPLETE`, zero dropped timings и
+zero measured allocations. Два полных окна дали `44.231` и `44.175 FPS`;
+агрегат:
+
+- `44.203 FPS` против retained full-quality control `35.807` (`+23.45%`), но ниже
+  заранее заданной цели `45`;
+- presenting GPU p50/p95/p99 `25.165/26.136/26.742 ms`, хуже stop-gate
+  `p95 <=24.72 ms`;
+- 1%/0.1% lows `37.601/34.296` против контроля `30.728/28.939`;
+- WORLD OPAQUE avg/p95 около `13.994/14.591 ms`; cluster avg/p95
+  `1.378/2.102 ms`.
+
+До still-image/live gate вариант не допущен: throughput не достиг 45, а статический
+аудит уже выявил fail-closed и seam/replacement цену. Enum, transform и diagnostic
+test полностью удалены. **DO NOT RETRY** как production shortcut. Результат полезен
+как верхняя граница: снятие soft taps с `96.6%` resident pages даёт около 44.2 FPS,
+но оставшийся шаг к 45 требует затронуть low-edge pages или иной системный путь;
+делать это за счёт ещё большей пикселизации/temporal instability запрещено.
+
+#### Full edge64 nearest возвращён только как default-OFF пользовательский переключатель
+
+После отдельного объяснения цены исторического `L6_EDGE64_NEAREST` пользователь
+явно попросил вернуть **именно этот измеренный режим** как легко отключаемую
+настройку Sodium для собственного live A/B. Это осознанное исключение из прежнего
+`DO NOT RETRY as production shortcut`, а не пересмотр результата: режим не принят
+как production default, не считается quality-preserving оптимизацией и по-прежнему
+не доказывает достижение цели 45 FPS.
+
+Добавлен boolean `Fast Local Shadows (Experimental)` / `Быстрые локальные тени
+(экспериментально)` в группе Lighting. Default и миграции renderer config v1--v4
+дают `LocalShadowFilterMode.FULL`; schema v5 строго хранит `full` либо
+`fast_edge64_nearest`. Выключенное состояние использует прежний source byte-for-byte
+(старые golden SHA-256 не изменились). Включённое состояние меняет ровно resident
+L6 filter call: `cacheFaceEdge == 64` берёт уже рассчитанный `nearestVisibility`,
+а 8/16/32 выполняют literal прежний soft helper. Descriptor guards, nearest result,
+distance fade, ABI, atlas, residency, builders и light selection не менялись.
+
+Переключение применяет `REQUIRES_ASSET_RELOAD`, а не per-fragment runtime uniform.
+Option binding только атомарно сохраняет следующую policy. В начале одного
+`ShaderManager.apply` policy фиксируется на всю shader generation; preflight и
+компиляция получают один snapshot. Minecraft очищает Metal pipeline/shader caches
+до precompile, а `ShaderCompilationKey` дополнительно включает filter mode. Поэтому
+ON/OFF не смешиваются внутри одной generation и возврат в OFF собирает исходный
+full-filter shader заново.
+
+Цена остаётся той же и намеренно написана в tooltip: на edge64 исчезают три extra
+taps, включая cubemap seam filtering; возможны blocky/texel silhouettes, seams,
+изменение fail-closed результата при invalid extra tap и temporal pop при замене
+page 32<->64. Режим применяется к тем же общим L6 helpers у Sodium terrain,
+entity и end portal. Исторический clean Tier B diagnostic дал `44.203 FPS`
+(`+23.45%` к тогдашнему detailed full-filter control), GPU p95 `26.136 ms` и
+не прошёл цель 45 / p95 stop-gate. Это **не новый benchmark результата UI path** и
+не production FPS claim.
+
+Проверки переключателя: config v1--v5 migration/default/strict round-trip,
+Sodium option type + asset-reload flag, default golden identity, ON/OFF stale-source
+rejection, exact 64 branch и literal 8/16/32 fallback, FULL + AMBIENT_ONLY,
+все terrain/entity/portal GLSL -> SPIR-V и active MSL binding reflection,
+exclusive diagnostic modes, `localVoxelShadowUnitTest` и `metalRuntimeUnitTest`.
+Целевой набор прошёл. Полный `check` прошёл 87 задач при исключении двух вариантов
+одного уже несвязанного native `BuiltinShaderLibraryValidation` failure
+`Lazy clustered-lighting recovery failed`; оба варианта падают также отдельно и не
+используют Sodium config/GLSL patcher. Benchmark launcher теперь fail-closed
+требует `localShadowFilterMode=full`, поэтому включённый пользовательский режим не
+может случайно выдать себя за обычный full-filter benchmark. Отдельная attested
+quality-policy A/B поддержка не добавлялась до live визуального решения пользователя.
+
+Статус: **IMPLEMENTED AS USER OPT-IN, DEFAULT OFF, LIVE VISUAL A/B PENDING**.
+При первом заметном seam, silhouette, light leak, shimmer/pop либо неприятном pacing
+режим нужно выключить; OFF является полным откатом без удаления кода. Если пользователь
+его отвергнет окончательно, изолированные UI/config enum axis и source specialization
+можно удалить без ABI/native/world-data migration.
+
+#### Full edge64 nearest отвергнут live-визуально; переключатель полностью удалён
+
+Пользователь провёл предусмотренный live A/B и оценил включённый вариант как
+«выглядит ужасно». Это окончательный visual rejection: большой диагностический
+throughput win не компенсирует разрушение мягкости и ступенчатые/резкие края.
+Экспериментальный Sodium option, translations, renderer-config schema v5 и
+`LocalShadowFilterMode`, generation snapshot/cache-key axis, preflight/source
+specialization, benchmark guard и специализированные tests полностью удалены.
+Renderer config возвращён к schema v4; production снова имеет единственный полный
+мягкий L6 filter. Пользовательский `run/config/metallum-renderer.properties` не
+содержал нового ключа, поэтому удаление не потребовало runtime migration.
+
+**DO NOT RETRY** edge64 nearest, interior nearest или иной режим, который получает
+скорость удалением soft taps и заметно превращает тени в texel silhouettes. Ранее
+разрешённая небольшая потеря качества не распространяется на уже доказанно неприятный
+вид. Возвращение такого переключателя возможно только по новому явному запросу, но не
+как кандидат достижения 45 FPS.
+
+#### Exact edge64 full-filter specialization — проверен и полностью удалён
+
+После visual rejection проверен единственный новый узкий кандидат, который не менял
+картинку и семантику: отдельная literal-edge64 копия полного soft helper. Она сохраняла
+все четыре taps, прежние bilinear weights, cubemap seam resolution, ordered colored
+transmittance, invalid/NaN fail-closed guards, layer-0 all-visible proof и distance
+fade. Изменений ABI, atlas, descriptors, builders или residency не было. До запуска
+проверен реальный GLSL -> SPIR-V -> MSL: emitted MSL содержал отдельную функцию без
+runtime `cacheFaceEdge`, с literal `64`, `4096u` texels на face и теми же четырьмя
+visibility reads. Более слабая source-форма, где literal передавался прежнему helper,
+была отклонена до benchmark, потому что emitted MSL сохранил generic runtime parameter.
+
+Fresh full-soft control
+`20260822T131338Z-ge343bd0a5d9f-dirty-goal45-full-soft-control-screen-off`
+и candidate
+`20260822T132336Z-ge343bd0a5d9f-dirty-goal45-l6-edge64-full-specialized-screen-off`
+выполнены последовательно на одном контракте: native 3024x1964 HDR,
+Advanced/Balanced, MetalFX/VSync OFF, `600 warmup + 600 measure`, 2048 lights,
+`COMPLETE`, zero dropped timings/allocations, clipmap `dirty=0`, overflow `68`.
+Результат — consistent regression:
+
+- FPS `34.771 -> 34.410` (`-1.04%`);
+- presenting GPU p50/p95 `30.772/32.156 -> 31.164/32.364 ms`;
+- 1% low `30.625 -> 29.394 FPS` (`-4.02%`);
+- WORLD OPAQUE mean avg примерно `13.875 -> 14.114 ms`, mean p95
+  `14.413 -> 14.640 ms`;
+- cluster build `1.341/2.074 -> 1.382/2.034 ms` avg/p95 не объясняет
+  проигрыш fragment path.
+
+Кандидат не прошёл даже минимальный performance gate. Наиболее вероятная причина —
+хуже code size/register/codegen из-за дублирования большого full helper; это inference,
+а не доказанная occupancy причина. Diagnostic enum, duplicated helper, marker и tests
+удалены, полный мягкий source восстановлен.
+
+Source/representation audit также закрыл «очевидные» альтернативы без повторного
+benchmark: hardware bilinear/gather неприменимы к packed integer SSBO hit lists с
+receiver-dependent сравнением distance на каждом tap; предварительно фильтрованные
+depth/moments/VSM меняют ordered colored transmittance и дают light leaks/halos;
+triangle three-tap уже измеренно регрессировал; nearest уже визуально отвергнут;
+FP16/generic source перестановки и seam-only lookup не имеют нового emitted-MSL или
+достаточного cost evidence. Поэтому **в текущей L6 representation нет доказанного
+способа удешевить саму фильтрацию, сохранив красивые мягкие тени**. Никакое изменение
+фильтрации не оставлено. Следующий путь к 45 FPS должен быть вне потери soft-shadow
+samples либо начинаться с нового GPU-capture/representation evidence, а не с ещё одной
+аппроксимации текущих четырёх taps.
+
+#### Shared receiver-plane ray для трёх extra taps — отклонён и полностью удалён
+
+Проверен новый диагностический вариант `L6_SHARED_PLANE_RAY`, не повторяющий прежний
+exact receiver-plane hoist: nearest tap всё ещё вычислялся исходным путём, а для трёх
+остальных seam-safe bilinear taps переиспользовались его cubemap direction и
+receiver-plane distance. Все четыре веса, face/seam resolution, четыре ordered cache
+layers каждого tap, invalid/NaN fail-closed guards, colored transmittance и distance
+fade сохранялись. Следовательно, это была небольшая **неэквивалентная** аппроксимация
+только receiver-plane correction; её потенциальная цена — иной порог остановки за
+окклюдером у соседнего texel. Целью было убрать три `cubeDirection + inversesqrt` из
+ALU-bound fragment path без nearest-only деградации силуэтов.
+
+Первый live launch
+`20260824T114554Z-g366f066cd8e2-dirty-l6-shared-plane-ray-off` не является
+результатом: Metal/GLSL цепочка отвергла helper, потому что его определение находилось
+после первого вызова. Advanced admission правильно перевёл renderer в vanilla и
+benchmark завершился `FAIL`; FPS из этого запуска не используются. Добавлены только
+diagnostic forward declarations, после чего actual GLSL -> SPIR-V diagnostic test,
+default golden/restore contract и `localVoxelShadowUnitTest` прошли; runtime admission
+во втором запуске подтвердил `advanced`, `l3=true`, `l5=true`, `l6=true`.
+
+Сопоставимый Tier B на Apple M1 Pro: built-in 3024x1964 HDR,
+Advanced/Balanced, MetalFX/VSync OFF, Nether `nether-lava-stress-v1`, `600 warmup +
+600 measure`, два окна, nominal thermal, zero dropped timing events. Control
+`20260824T113705Z-g366f066cd8e2-dirty-l6-shared-plane-baseline-off` против valid
+candidate
+`20260824T114804Z-g366f066cd8e2-dirty-l6-shared-plane-ray-rerun-off`:
+
+- FPS `35.676 -> 34.127` (`-4.34%`); 1% low `30.571 -> 30.662`, 0.1% low
+  `29.040 -> 29.202` — mixed low-frame signal не компенсирует lost throughput;
+- presenting GPU average `31.093 -> 31.046 ms` (`-0.048 ms`, около `-0.15%`),
+  p95 `32.191 -> 32.132 ms`, но p99 `32.774 -> 32.828 ms`;
+- candidate получил `EVENT=COMPLETE`, 600 measured frames и healthy L6 residency;
+  это не fallback и не startup-telemetry result.
+
+Такой микроскопический и противоречивый Tier B с худшим FPS не достигает даже
+screening gate, поэтому live visual A/B и Tier C не запускались. Diagnostic enum,
+source transform и его test удалены полностью; default full filter не менялся,
+пользовательские benchmark preflight edits (`schema v4` и exclusive fullscreen)
+возвращены к исходным runtime settings.
+
+**DO NOT RETRY** shared receiver-plane/direction reuse в текущем L6 filter без нового
+Metal capture, который отдельно покажет заметную стоимость именно этих трёх
+normalizations, и без нового representation path. Уже измеренный выигрыш менее 0.2%
+GPU time не оправдывает даже малую receiver-plane ошибку и не приближает к требуемому
+35 -> 44 FPS уровню.
+
+#### L6 bounded direct-error budget 1/512 — отклонён и полностью удалён
+
+Новый независимый diagnostic `L6_BOUNDED_ERROR_1_OVER_512` не упрощал геометрию
+soft filter: после точной proxy-occlusion он мог пропустить resident L6 только тогда,
+когда абсолютный unshadowed direct contribution помещался в оставшийся покомпонентный
+budget `1/512`. Каждый пропуск вычитал свой bound, поэтому суммарная ошибка прямого
+линейного света в одном fragment была формально ограничена `<= 0.001953125` в каждом
+RGB-канале. Все не помещающиеся в budget lights выполняли исходный четырёхtap L6 путь;
+default source оставался byte-identical.
+
+Это не стало выигрышем. Свежий Tier B на Apple M1 Pro, built-in 3024x1964 HDR,
+Advanced/Balanced, MetalFX/VSync OFF, Nether `nether-lava-stress-v1`, `600 warmup +
+600 measure`, nominal thermal, two complete windows и zero dropped timing events:
+control `20260824T120439Z-g366f066cd8e2-dirty-l6-bounded-error-baseline-off` против
+candidate
+`20260824T120620Z-g366f066cd8e2-dirty-l6-bounded-error-1-over-512-off`.
+
+- FPS `35.766 -> 34.396` (`-3.83%`); 1% / 0.1% low `32.145 / 31.702 ->
+  30.801 / 29.255`;
+- presenting GPU average `31.050 -> 32.174 ms` (`+1.124 ms`, `+3.62%`),
+  p50/p95/p99 `31.029/32.066/32.716 -> 32.146/33.214/33.757 ms`;
+- оба прогона имеют `resolved_lighting=advanced`, active voxel clipmaps, 2048 lights,
+  `COMPLETE`, 600 presented frames и zero timing drops, то есть это не fallback и не
+  неполный workload.
+
+Поскольку screening уже заметно хуже, visual A/B и Tier C не запускались. Diagnostic
+enum, source transform и shader test удалены полностью; `localShadowFilterMode=full`
+и исходные fullscreen/settings возвращены. **DO NOT RETRY** source-level
+per-fragment budget/conditional-skip family при таком или меньшем budget без
+emitted-MSL/counter evidence, что условие реально избегает L6 работы, а не добавляет
+register/control-flow pressure в ALU-bound terrain shaders.
+
+#### L6 nearest только для translucent terrain — отклонён и полностью удалён
+
+Следующая distinct гипотеза использовала прежний `L6_NEAREST_ONLY` лишь как верхнюю
+границу, но не переносила его на весь мир: отдельный Sodium
+`pipeline/translucent_terrain` fragment module по явному diagnostic mode
+`L6_NEAREST_TRANSLUCENT_ONLY` сохранял opaque terrain full four-tap filter, а в
+translucent terrain оставлял только уже вычисленный nearest cache tap. Мотивация была
+из нового Metal System Trace: translucent terrain — второй крупный ALU-bound fragment
+encoder. Это не production policy: lava/water и coloured translucent shadows могли
+получить texel silhouettes, поэтому для начала требовался только screening win.
+
+Перед запуском source test подтвердил, что diagnostic marker и отсутствие soft helper
+есть исключительно у translucent fragment; opaque source с тем же runtime mode
+byte-identical к full-quality source. Actual GLSL -> SPIR-V test прошёл. Fresh Tier B
+на том же Apple M1 Pro/3024x1964 HDR/Advanced Balanced/MetalFX OFF/VSync OFF,
+Nether `nether-lava-stress-v1`, `600 warmup + 600 measure`, nominal thermal:
+control `20260824T121644Z-g366f066cd8e2-dirty-l6-nearest-translucent-baseline-off-off`
+против candidate
+`20260824T121821Z-g366f066cd8e2-dirty-l6-nearest-translucent-only-off-off`.
+
+- FPS `35.653 -> 34.779` (`-2.45%`); 1% / 0.1% low `31.294 / 29.792 ->
+  31.333 / 30.235` не компенсируют lost throughput;
+- presenting GPU average `31.216 -> 31.905 ms` (`+0.689 ms`),
+  p50/p95/p99 `31.159/32.263/32.770 -> 31.841/32.933/33.393 ms`;
+- оба запуска имеют explicit `ADVANCED_ADMISSION` (`l3=true`, `l5=true`, `l6=true`),
+  `COMPLETE`, 600 frames, 2048 lights, active voxel clipmaps и zero timing drops.
+
+Live visual A/B и Tier C не запускались: diagnostic проиграл раньше quality gate.
+Enum, pipeline-specific shader-cache define/routing, source transform и test удалены;
+opaque и translucent снова используют исходный full L6 filter, runtime settings
+восстановлены. **DO NOT RETRY** nearest-only filter только для translucent terrain
+без нового counter/emitted-MSL evidence, объясняющего этот regression: текущий
+fragment/PSO codegen не превращает удаление three taps в выигрыш whole-frame GPU time.
+
+#### Apple Metal fast-math compile option — NO-GO без кода
+
+Проверен отдельный AppleSilicon/Metal путь в настоящем native runtime. Динамически
+сгенерированный terrain MSL создаётся в `metallum_create_shader_function` через
+`device.makeLibrary(source: ..., options: nil)`. Однако заголовок текущего macOS SDK
+(`Metal.framework/Headers/MTLLibrary.h`) прямо устанавливает для
+`MTLCompileOptions.fastMathEnabled` default `YES`; для новых API default
+`mathFloatingPointFunctions` также `Fast`. Следовательно, подстановка явного
+`MTLCompileOptions` с fast math не создаёт новую оптимизацию, а relaxed/fast mathMode
+может нарушить NaN/Inf fail-closed guards L6 и изменить итог изображения.
+
+Код и benchmark не менялись. **DO NOT RETRY** явное включение Metal fast math как
+FPS-кандидат: оно уже включено по умолчанию; не рассматривать более агрессивный
+mathMode без отдельного visual/numerical safety контракта.
+
+#### Apple Silicon TBDR/imageblock L6 audit — архитектурный кандидат, не micro-opt
+
+Отдельно проверен оставшийся Apple-specific путь для M1 и новее: tile-based deferred
+lighting с tile shaders/imageblocks. На Apple GPU imageblock хранится в локальной
+tile-memory в течение render pass; при удачном переносе opaque direct lighting из
+forward terrain pass это потенциально может убрать повторное выполнение L6 на hidden
+fragments и дать tile-local reuse для G-buffer и списка lights. Это единственный
+найденный путь, который может уменьшить **число запусков** текущего full-quality L6,
+не меняя четыре soft taps, ordered coloured transmittance или receiver-plane test.
+
+Это не switch для существующего shader. Сейчас L6 зависит от позиции receiver,
+world normal, направления от light к receiver, receiver distance и четырёх ordered
+integer-hit layers каждого cache texel. Поэтому нельзя exact-переиспользовать готовую
+visibility между соседними fragment lanes/quad и нельзя отдать текущий `uvec2` cache
+hardware bilinear/gather: filtering должен происходить после per-receiver visibility
+test. SIMD/quad reuse был бы новой аппроксимацией с риском silhouette/temporal ошибок,
+а float/depth/moment representation меняет coloured transmittance и уже закрыта как
+семейство representation-risk. Metal 4 argument tables/binary archives изменяют
+создание/encoding pipelines, но не стоимость executed L6 fragment; на actual M1 Pro
+runtime probe также нет dynamic caching, hardware ray tracing, mesh shader family 9
+и per-draw statistic counters.
+
+Код и FPS benchmark намеренно не менялись: без доказательства overdraw такой большой
+перевод легко проиграет за счёт G-buffer bandwidth, tile-memory pressure и нового
+translucent path. Перед прототипом обязательны: (1) labeling текущих opaque/cutout/
+translucent PSO только для диагностики; (2) новый 5 s Metal System Trace на исходном
+Nether contract, показывающий raster/fragment work и depth/overdraw именно для L6;
+(3) paper-budget G-buffer + imageblock formats против saved fragment invocations;
+(4) отдельный opaque-only A/B, где translucent сохраняет исходный forward L6;
+(5) тот же visual + Tier B/C contract. Если capture не покажет достаточную лишнюю
+fragment работу, **DO NOT START** tile-deferred rewrite: это не доказанный способ
+получить 35 -> 44 FPS и не замена текущей качественной фильтрации.
+
+#### Follow-up: opaque-only tile/deferred L6 — REJECTED до production-прототипа
+
+Повторный аудит исправил исходную предпосылку предыдущего раздела. Полноценный
+imageblock/deferred L6 в Metallum раньше не внедрялся: в Apple Silicon sprint был
+остановлен только Tile Forward+ для light-list (`0.465–1.317 ms` cluster-build p95),
+а ранний аудит pass fusion/memoryless констатировал отсутствие G-buffer. Однако уже
+существующие измерения закрывают именно предполагаемый источник выигрыша — лишние
+L6-вызовы на hidden opaque fragments.
+
+**SUPPORTED evidence:**
+
+- **SUPPORTED (structural):** финальный solid-terrain MSL/PSO ранее классифицирован
+  как `HSR_OPTIMAL`: обычные
+  scene/reactive outputs, без `discard_fragment`, fragment-depth/sample-mask output,
+  atomics или записей в buffers/textures; depth compare/write включены, blending
+  выключен. Текущий `MetalCompiledRenderPipeline` сохранил тот же PSO contract, а
+  свежие `advancedDirectLightingShaderUnitTest` и `metalRuntimeUnitTest` прошли.
+  Следовательно, Apple TBDR уже может выполнять hidden-surface removal внутри
+  существующего opaque render pass; imageblock не открывает новый механизм удаления
+  скрытых solid fragments.
+- **SUPPORTED (Tier B):** Exact Sodium camera depth-prepass уже был измерен на том же
+  Nether/L6 workload.
+  Он повторял тот же vertex path и alpha/depth semantics, затем запускал исходный
+  full-quality pass с готовой depth. Это наиболее близкий практический upper-bound
+  для гипотезы «сначала видимость, потом дорогой L6»: `WORLD_OPAQUE` p95 выиграл менее
+  `0.75 ms`, whole-frame не достиг даже `5%`, а warmed presenting GPU p95 ухудшился.
+  Эксперимент был полностью удалён; activation-proof сохранился в артефакте
+  `20260822T075114Z-...-depth-prepass-activation-proof-off`.
+- **SUPPORTED (counter trace):** Metal GPU Counters
+  `20260822T0830Z-nether-gpu-counters.trace` показывают ALU-bound
+  terrain: opaque-like encoder имеет ALU Limiter около `47–48%`, Texture Sample около
+  `3.6%`, Buffer Read около `3.5%`, LLC около `3.1–3.3%`. Translucent-like encoder,
+  который opaque-only deferred вообще не меняет, стоит ещё около `11.7 ms/frame` и
+  имеет ALU Limiter около `54–55%`. Перенос той же L6 математики в tile function не
+  уменьшает ALU на каждом уже видимом sample.
+
+**Paper budget / break-even:**
+
+- При `3024x1964`, sample count `1`, текущий render pass несёт примерно `13 B/sample`
+  attachment payload (`RGBA16F scene + R8 reactive + D32 depth`). Для byte-conservative
+  split текущей функции нужны как минимум float32 view position (`16 B` attachment),
+  float32 normal (`16 B`), pre-light color/albedo (`16 B`) и material + rain/sky
+  inputs (`12 B`), после чего всё ещё нужны final scene/reactive/depth. Это около
+  `73 B/sample`: `18,688 B` на `16x16`, но `74,752 B` на `32x32`. Runtime M1 Pro
+  сообщает `maxThreadgroupMemoryLength=32,768`; это не pipeline-specific
+  `imageblockSampleLength`, но достаточный pressure warning: quality-conservative
+  вариант потребует меньших tiles/occupancy, а компактный вариант около `29 B/sample`
+  достигается только reconstruction/half/packed normal/material и уже не гарантирует
+  текущую numerical/visual parity.
+- Чтобы поднять примерно `35 -> 44 FPS`, нужно убрать около `5.84 ms/frame`. Даже если
+  считать весь opaque-like interval `13.8 ms` потенциально удаляемым, кандидат должен
+  сэкономить более `42%` этого encoder **до** оплаты G-buffer/tile pass. Existing exact
+  depth-prepass обнаружил менее `0.75 ms`; новый GPU trace также не даст отсутствующие
+  per-draw fragment statistics, потому что capability probe отмечает statistic counters
+  unavailable. Для `5%` Gate A candidate должен был бы показать хотя бы `1.5–2.0 ms`
+  правдоподобного net upside; доказанный upper-bound этого не даёт.
+
+Implementation census подтверждает, что это не bounded shader toggle. Текущий
+`MetalCrossShaderCompiler` создаёт только vertex/fragment functions; native/Panama
+bridge не имеет `MTLTileRenderPipelineDescriptor`, `setTileRenderPipelineState` или
+`dispatchThreadsPerTile`; render-pass owner предоставляет scene color, optional
+semantic/reactive attachment и depth. Прототип потребовал бы нового PSO/cache axis,
+tile ABI и split общего Sodium solid/cutout/translucent source, сохраняя отдельный
+forward translucent path. Это затрагивает renderer lifetime/pipeline ownership раньше,
+чем появляется измеримый кандидат.
+
+**Решение: REJECT/DO NOT IMPLEMENT на текущей архитектуре.** Большой rewrite не
+построен и production source не изменён: он дублировал бы уже работающий HSR,
+оставлял бы второй крупный translucent L6 path нетронутым и добавлял tile-memory,
+pipeline/cache/attachment complexity. Вернуться к нему можно только с новым фактом,
+который одновременно опровергает `HSR_OPTIMAL` на actual opaque PSO и показывает
+`>1.5–2.0 ms` removable hidden-fragment work после учёта G-buffer/tile overhead.
+Обычный новый System Trace без таких counters не является этим фактом.
+
+#### Exact four-tap Apple layout/codegen follow-up — отклонён и удалён
+
+После запроса не считать разрыв full `~35 FPS` против nearest `~44 FPS`
+исчерпанным проверены ещё четыре exact-варианта. Все сохраняли четыре bilinear taps,
+четыре ordered `{float distance, RGB8 visibility + valid marker}` слоя на tap,
+receiver-distance/receiver-plane tests, веса и итоговую арифметику. Synthetic Metal
+microbenchmark использовал реальный Apple M1 Pro, private `32 MiB` atlas, `262144`
+queries, восемь повторов на sample и 12 interleaved samples; correctness сравнивалась
+побитно с текущим lazy AoS buffer path.
+
+- Два private texture reads на tap (`RGBA32Float` distances + `RGBA32Uint` colours),
+  то есть восемь vector reads вместо до 16 lazy `uint2`: `0` mismatches, но
+  `3.2633 -> 17.1454 ms` (`+425.39%`). Texture unit не является бесплатной заменой
+  SSBO на этом ALU-bound shader и eager-загрузка всех layers уничтожает ранние exits.
+- Аналогичный private SoA buffer (`float4` distances + `uint4` colours): `0`
+  mismatches, `3.2611/3.2633 -> 5.4870–5.6797 ms` (`+68–74%`). Меньшее число
+  формальных vector loads не компенсирует eager state/liveness.
+- Настоящий layer-major `RG32Uint` texture-array с двумя hardware gathers на layer
+  обрабатывал четыре соседних taps совместно и сохранял ранний выход, когда все taps
+  завершены. MSL на M1 Pro поддержал integer gather; после явной перестановки Metal
+  gather order результат дал `0` mismatches, но `3.2611 -> 6.9405 ms` (`+112.83%`).
+- Layer-major private buffer с двумя соседними records в каждом unaligned vector load
+  также дал `0` mismatches, но `3.2611 -> 5.4870 ms` (`+68.26%`). Параллельное
+  ведение четырёх tap states дороже текущих независимых lazy loops.
+- MSL `[[likely]]/[[unlikely]]` hints были exact, но в повторных samples дали
+  примерно `+1.5–3.2%` cost. Не переносить в production.
+
+Единственный microbench-кандидат около noise floor — запрет автоматического unroll
+четырёхслойного cache loop (`#pragma clang loop unroll(disable)`, `0` mismatches,
+примерно `1–1.5%` synthetic improvement) — был проверен в реальном terrain MSL через
+временный, default-OFF environment diagnostic. Fresh Tier B, built-in
+`3024x1964` HDR, Advanced/Balanced, MetalFX/VSync OFF, Nether
+`nether-lava-stress-v1`, `600 warmup + 600 measure`, nominal thermal:
+
+- control `20260824T130827Z-g366f066cd8e2-dirty-l6-layer-loop-control-off`:
+  `35.700 FPS`, GPU average/p50/p95/p99
+  `31.112/31.097/32.284/32.862 ms`, 1%/0.1% lows `31.544/30.235`;
+- candidate `20260824T131008Z-g366f066cd8e2-dirty-l6-layer-loop-no-unroll-off`:
+  `33.889 FPS`, GPU average/p50/p95/p99
+  `31.807/31.715/33.141/36.155 ms`, 1%/0.1% lows `27.507/25.885`;
+- оба отчёта `COMPLETE`, `ADVANCED_ADMISSION status=PASS` с
+  `l3=true/l5=true/l6=true`, 2048 lights, L6 READY/STALE `87/0`, active voxel
+  clipmaps, zero dropped timing events и thermal `nominal`. Candidate log отдельно
+  подтвердил diagnostic activation. Различный total copy traffic не позволяет
+  повышать single-pair regression до `PROVEN`, но candidate явно не показал
+  требуемого выигрыша и не прошёл даже screening gate.
+
+Diagnostic constants, environment switch, generated-MSL transform и helper удалены;
+runtime fullscreen/schema settings восстановлены. Production shader снова использует
+исходный full four-tap lazy AoS path. **DO NOT RETRY** texture/SoA/layer-major gather,
+branch-hint или cache-loop no-unroll family без новой архитектуры данных либо нового
+counter evidence: на M1 Pro они либо кратно медленнее exact baseline, либо не дают
+real-frame выигрыша. Исторические `35 -> 44 FPS` остаются реальной верхней границей
+стоимости трёх дополнительных taps, но nearest получает её именно удалением трёх
+независимых visibility evaluations; текущие exact-перестановки эту работу не убирают.
+
+#### Opaque L6 stochastic temporal reconstruction — RETAINED as default-OFF experiment
+
+Повторная проверка истории не нашла ранее реализованного temporal L6. Старый L8
+temporal/reactive path накапливает всю сцену после world pass и не является заменой
+пространственного L6-фильтра. Tile/deferred rewrite также не был начат: прежние HSR,
+depth-prepass и G-buffer/imageblock budgets по-прежнему делают его неоправданным.
+
+Сначала измерена только цена сокращения taps, без temporal resolve. Fresh screening,
+built-in `3024x1964` HDR, `hdrtest-static-v1`, Advanced/Balanced, MetalFX/VSync OFF,
+`600 warmup + 600 measure`:
+
+- exact control `20260824T134725Z-...-l6-stochastic-gatea-control-off`: `35.315 FPS`,
+  GPU p50/p95/p99 `29.982/31.010/31.920 ms`;
+- nearest + one stochastic extra (два taps) `20260824T134903Z-...-gatea-two-tap-off`:
+  `35.783 FPS` (`+1.3%`), GPU p95 `30.635 ms`; этого недостаточно;
+- новый exact control `20260824T135339Z-...-gatea-control-off`: `35.620 FPS`, GPU
+  p50/p95/p99 `31.136/32.443/32.862 ms`;
+- unbiased один tap, выбираемый по исходным четырём bilinear weights,
+  `20260824T135516Z-...-gatea-one-tap-off`: `40.507 FPS` (`+13.7%`), GPU
+  p50/p95/p99 `27.636/28.378/28.841 ms`, lows `35.738/32.904` против
+  `29.730/28.815`. Это подтвердило достаточный ALU budget для reconstruction.
+
+Полноэкранный Apple MetalFX Temporal при native scale был проверен и отвергнут как
+решение L6. Exact + Temporal
+`20260824T140206Z-...-gateb-control-exact-temporal` дал `27.075 FPS`, one-tap +
+Temporal `20260824T140405Z-...-gateb-one-tap-temporal` — `31.113 FPS`. Он подтвердил
+экономию taps, но temporal resolve всей сцены стоил заметно дороже исходного exact/OFF
+пути (`35.620 FPS`). Поэтому retained implementation не накапливает scene color.
+
+Реализован более узкий forward/MRT path только для
+`sodium:pipeline/solid_terrain`:
+
+- diffuse L6 выбирает один из исходных четырёх taps с вероятностью его bilinear weight;
+  material specular, cutout, translucent, entity и остальные L6 paths сохраняют exact
+  four-tap filter;
+- fragment пишет в private `RGBA16F` history только RGB-отношение
+  `shadowedDirect/unshadowedDirect` и current depth. Два ping-pong history при
+  `3024x1964` занимают около `92 MiB`; отдельного fullscreen pass нет;
+- previous-frame lookup использует camera reprojection и Metal raster Y convention.
+  История отклоняется по previous view-space depth (`0.03125..0.25` block tolerance),
+  восстановленной depth-normal (`dot >= 0.78`), bounds/finite checks, history reset и
+  L6 contract validity. Accepted history смешивается EMA weight `0.75`;
+- albedo, environment, fog и final scene color не накапливаются. Lighting/renderer/
+  extent/world changes уже входят в frame `resetMask`, поэтому история на них
+  инвалидируется;
+- отдельный `METALLUM_ADVANCED_L6_TEMPORAL` PSO использует `color(1)=RGBA16F`, native
+  fragment buffer slot 12 и texture/sampler slot 10. Первые варианты корректно
+  fail-closed обнаружили invalid Metal slots 31/16 и auxiliary-role mismatch; после
+  переноса и исправления Metal PSO прошёл runtime admission без Advanced fallback.
+
+Идентичная final-source screening-пара `600+600`:
+
+- exact `20260824T143432Z-...-l6-temporal-final-screen-control-off`:
+  `44.834 FPS`, GPU p50/p95/p99 `23.783/24.179/24.774 ms`;
+- temporal `20260824T143551Z-...-l6-temporal-final-screen-candidate-off`:
+  `50.934 FPS` (`+13.6%`), GPU `20.749/21.530/22.211 ms`, lows
+  `37.522/36.038` против `33.766/32.079`.
+
+Две независимые production-length пары (`1800 warmup + 3000 measure`, одинаковые
+source/artifact hashes, nominal thermal, `COMPLETE`, zero dropped events, Advanced
+admission `l3/l5/l6=true`) повторили результат:
+
+| run | FPS | 1% / 0.1% low | GPU p50 / p95 / p99 ms |
+|---|---:|---:|---:|
+| exact 1 `20260824T143855Z-...-tierc-control-1-off` | 45.314 | 34.430 / 32.932 | 23.594 / 23.916 / 24.533 |
+| temporal 1 `20260824T144130Z-...-tierc-candidate-1-off` | 50.934 | 37.969 / 36.007 | 20.762 / 21.550 / 22.251 |
+| exact 2 `20260824T144350Z-...-tierc-control-2-off` | 45.364 | 33.077 / 31.434 | 23.926 / 24.294 / 24.880 |
+| temporal 2 `20260824T144621Z-...-tierc-candidate-2-off` | 50.966 | 37.022 / 35.608 | 20.747 / 21.544 / 22.083 |
+
+Средние: `45.339 -> 50.950 FPS` (`+12.38%`), GPU p95
+`24.105 -> 21.547 ms` (`-2.558 ms`, `-10.61%`). Однако launcher не создал
+`.accepted.json`: после каждого полного run attestation остановилась на
+`benchmark evidence events are out of order` в текущем dirty WIP. Raw/summary
+контракты валидны и две пары согласованы, поэтому evidence — **SUPPORTED**, не
+release-`PROVEN` Tier C.
+
+Camera-motion/L6-dynamic screening также сохранил throughput gain:
+`20260824T144914Z-...-l6-temporal-dynamic-control-off` против
+`20260824T145042Z-...-l6-temporal-dynamic-candidate-off`: `33.186 -> 37.426 FPS`
+(`+12.78%`), GPU p95 `35.760 -> 30.104 ms`. Но window-summary lows ухудшились:
+1% `22.148 -> 17.735`, 0.1% `20.562 -> 16.358`. Single-pair dynamic allocation/
+entity variability не доказывает причинность, но это обязательное предупреждение для
+ручной проверки плавности.
+
+**Решение:** оставить как явно экспериментальный, default-OFF user opt-in. В Sodium
+добавлена restart-required галочка `Экспериментальные тени`; она сохраняется отдельно
+в `metallum-experimental-shadows.properties`. Environment/property overrides остаются
+для воспроизводимого A/B. При активном MetalFX Temporal эксперимент автоматически не
+выбирается, чтобы два temporal history path не конкурировали за auxiliary output.
+
+Проверены `advancedDirectLightingShaderUnitTest` (actual GLSL -> SPIR-V -> MSL и exact
+specular isolation), `rendererArchitectureUnitTest`, `metalRuntimeUnitTest`,
+`temporalScalingUnitTest`, native Swift build и обе language JSON. **Визуальная
+приёмка остаётся открытой:** spatial four-tap result не вычисляется в одном кадре, а
+реконструируется во времени. Проверить прежде всего slow camera orbit, тонкие цветные
+полупрозрачные границы рядом с opaque terrain, появление/исчезновение факела,
+disocclusion и возможный shimmer/ghosting. До такой проверки не включать по умолчанию.
+
+#### Water-only frozen voxel cone reflection — RETAINED as default-OFF experiment
+
+Planar rendering в этом кандидате отсутствует. Retained carrier использует один
+accepted-Sodium source `64^3`, два блока на cell, `RGBA16F` radiance/optical presence,
+R8 validity и шесть mip levels. Только water vertices выполняют ограниченный
+40-шаговый world-space cone trace (`0.75` start, `1.75` block step, около 69 blocks)
+вдоль `reflect(view, up)`; roughness выбирает mip LOD. Fragment получает один
+интерполированный `vec4`, не делает `texture3D` reads и смешивает результат только с
+environment term через water Fresnel. Solid/cutout/translucent non-water paths обходят
+все reflection reads. Retained visual constants: strength `0.75`, roughness `0.18`.
+
+Dedicated immutable fixture `reflection-house-voxel-v1` имеет digest
+`6c2d00ee96ecfead1b0dac27d21b95323b02980e84084e3dd79d718c4045d2bb`; static route
+digest — `2316274b3b58814788391ff76217f91ec7f59ba8458ec985ee0d028b8a06b286`.
+Source-level contribution capture
+`20260825T071756Z-...-voxel-house-quality-candidate-contribution-v8-off.png`
+(`27827ea52f43...`) сохраняет узнаваемые redstone columns/wall, sand, brown house и
+green shore. Final production capture
+`20260825T081052Z-...-voxel-house-final-production-v6-off.png`
+(`8e7010dc5295...`) сохраняет дальний красный reflection, тёплую полосу дома/берега и
+rough water breakup без чёрных chunk-like псевдоотражений. Это voxel lookup: никакого
+scene/planar capture pass нет.
+
+Три реальные причины первоначально нулевого/ложного результата исправлены узко:
+
+- Java source layout `(y,z,x)` раньше копировался в Metal staging как `(z,y,x)` без
+  transpose; upload теперь явно переставляет destination rows;
+- contribution-only диагностика раньше оставляла прозрачный water alpha, и видимое
+  дно ошибочно принималось за reflection; diagnostic output теперь opaque;
+- L6 camera/world params в slot 16 были fragment-only, хотя reflection vertex shader
+  использует их для world origin. При включённом experiment slot 16 теперь bindится и
+  во vertex stage; до этого все rays фактически стартовали около world origin.
+
+CPU source исключает receiver water, агрегирует все восемь blocks каждого `2x2x2`
+cell и центрирует domain к ближайшей section. Native ownership остаётся double-buffered:
+старое READY field bound до exact completion нового `PENDING/READY/FAILED` build.
+Motion route `reflection-house-voxel-motion-v1` выявил дополнительный recenter bug:
+выход за X guard заново центрировал также стабильный Z и вызывал rebuild oscillation.
+Per-axis recenter сохраняет оси внутри guard. Validated motion receipt
+`20260825T080811Z-...-voxel-house-motion-recenter-v3-off` дал ровно initial + one
+recenter: `[176,0,80] -> [144,0,80]`, два `512/512 READY`, final admission `READY`,
+`COMPLETE`, zero timing drops и ни одного `INVALID/FAILED`.
+
+Tier C M1 Pro, built-in `3024x1964` HDR, Advanced/Balanced, MetalFX/VSync OFF,
+immutable fixture, source `0d338d5141fae79357e7592407f688193f0337e536a9a61341085fdf314359a0`,
+artifact `269bba90ca8d2f8c309c75018f1b5873f448fbdc756bf3c8bc4c9ec52fe8f26b`,
+`1800 warmup + 3000 measure`, `COMPLETE`, zero drops, exact Advanced L3/L5/L6 and
+reflection READY admission; все четыре run имеют `.accepted.json`:
+
+| run | FPS | 1% / 0.1% low | GPU p50 / p95 / p99 ms |
+|---|---:|---:|---:|
+| OFF A `20260825T081216Z-...-tierc-a-off-off` | 77.067 | 55.091 / 51.078 | 14.9284 / 15.6984 / 16.2654 |
+| ON A `20260825T081410Z-...-tierc-a-on-off` | 75.362 | 53.289 / 49.732 | 15.2264 / 16.0152 / 16.6019 |
+| ON B `20260825T081605Z-...-tierc-b-on-off` | 75.658 | 54.233 / 50.425 | 15.1305 / 15.9190 / 16.5548 |
+| OFF B `20260825T081803Z-...-tierc-b-off-off` | 76.640 | 54.723 / 50.926 | 15.0102 / 15.7620 / 16.5105 |
+
+`compare-multi`: baseline mean `76.85 FPS`, GPU p95 `15.73 ms`; candidate mean
+`75.51 FPS`, GPU p95 `15.97 ms`. Delta `-1.75% FPS`, `+0.24 ms / +1.51% GPU p95`;
+строгий `+0.20 ms` gate не пройден. ON также закономерно поднимает instrumented
+GPU-shared upload high-water `155668 -> 160848` bytes. UVW recurrence, polynomial LOD
+approximation и `35 x 2.0` same-range march были измерены по одному и отклонены: все
+ухудшили timing; не повторять без нового shader/counter evidence. `80^3` source также
+отклонён: persistent bytes `14,417,920` превышают экспериментальный 8 MiB budget.
+
+Benchmark evidence ordering исправлен без ослабления attestor: единственный
+`SERVER_TICKS_FROZEN` теперь публикуется после server confirmation и `ROUTE_APPLY`;
+shell runner использует ту же каноническую последовательность.
+
+**Решение:** визуально и lifecycle-корректный voxel reflection carrier retained, но
+остаётся restart-gated default-OFF opt-in из-за воспроизводимого `+0.24 ms` Tier C
+near-miss. Не включать по умолчанию и не снижать дальность/roughness ради FPS. Future
+wet/glossy receivers могут переиспользовать carrier только после явного material
+predicate и отдельного performance/visual gate; не расширять water predicate неявно.
+
+#### Water voxel-reflection receiver refinement — HUMAN PENDING
+
+Термин `frozen` уточнён: READY texture snapshot не обновляется по block edits и не
+имеет per-frame upload, но полный replacement build запускается после выхода камеры
+за 32-block per-axis guard. Это snapshot-built/recentered voxel reflection, не planar
+reflection. Текущая topology также не совпадала со старым audit: один `RGBA16F`
+radiance resource, один syntactic `texture3d.sample` внутри bounded 40-step vertex
+cone loop, без Cartesian moment texture. Следовательно, это до 40 runtime samples на
+water vertex, а не «ровно два lookup».
+
+Старая receiver-композиция сначала вычисляла общий
+`metallumEvaluateEnvironmentV1(...)`, затем для water заменяла весь этот term через
+`mix(environmentTerm, coarseRGB, confidence * (0.08 + 0.92 * F))` и прибавляла его к
+`color.rgb`. Direction был заранее выбран в vertex как `reflect(viewRay, up)`; wave
+normal влиял на Fresnel, но не менял coarse reflection direction. При этом material
+environment/sun GGX добавлялись отдельным L8 block, а framebuffer alpha/body
+transmission не получали complementary Fresnel. Поэтому broad world RGB выглядел как
+окрашенная diffuse-подсветка, а дно оставалось слишком сильным на grazing angles.
+
+Refined carrier сохраняет тот же vertex cone trace/resource и добавляет только второй
+`float4` varying: `coarseRGB/confidence` плюс `flatTraceDirection/roughness`. Fragment
+строит `Rwave = reflect(-V, Nprocedural)`, переводит его в world, считает bounded
+alignment lobe (`roughness=0.28`, floor `0.45`), затем
+`W=clamp(confidence*directionalResponse,0,1)`. Аналитическое environment заменяется
+через `mix(analyticEnvironment, max(coarseRGB,0), W)` до единственного water Fresnel.
+Для body используется `T=1-max(F)`: `color.rgb*=T`, prepared diffuse albedo `*=T`,
+`color.a=1-(1-color.a)*T`. Sun highlight и local clustered GGX остаются отдельными.
+Contribution-only теперь opaque и показывает только
+`max(coarseRGB,0)*confidence*directionalResponse`, не final water color.
+
+Generated GLSL -> SPIR-V -> MSL gate:
+
+| | OLD | REFINED |
+|---|---:|---:|
+| vertex SHA-256 | `ce76bdcf7244...` | `24acff3bcc20...` |
+| fragment SHA-256 | `be5bbc4134c8...` | `30aa7182fd7f...` |
+| vertex chars | 11,581 | 11,879 |
+| fragment chars | 143,064 | 147,370 |
+| user varyings vertex/fragment | 9/9 | 10/10 |
+| reflection resources/sample sites | 1/1 | 1/1 |
+| fragment `texture3d` | 0 | 0 |
+
+Delta: +298 vertex chars, +4306 fragment chars (~3.0%), exactly one additional
+`float4` varying. Generated source cannot prove physical register occupancy; runtime
+A/B is the occupancy/cost gate.
+
+Immutable-fixture visual receipts, all `3024x1964`, Advanced/Balanced, MetalFX OFF,
+same route pose/time/weather between OLD and NEW:
+
+| view | OLD | NEW production | NEW contribution-only |
+|---|---|---|---|
+| broad lake/shore | `voxel-reflection-house-v1/20260825T081052Z-...-voxel-house-final-production-v6-off.png` | `voxel-reflection-refinement-v1/20260825T133724Z-...-water-refine-wide-final-r028-off.png` | `.../20260825T133827Z-...-wide-final-contribution-r028-off.png` |
+| top-down | `.../20260825T132001Z-...-topdown-old-off.png` | `.../20260825T133931Z-...-topdown-final-r028-off.png` | `.../20260825T134048Z-...-topdown-final-contribution-r028-off.png` |
+| low/red landmark | `.../20260825T132132Z-...-low-red-old-off.png` | `.../20260825T133338Z-...-low-red-new-v3-r028-off.png` | `.../20260825T134203Z-...-low-red-final-contribution-r028-off.png` |
+| grazing/late sun | `.../20260825T132403Z-...-grazing-old-v2-off.png` | `.../20260825T134306Z-...-grazing-final-r028-off.png` | `.../20260825T134408Z-...-grazing-final-contribution-r028-off.png` |
+
+Observed, без объявления subjective acceptance: red landmark остаётся spatially
+localized, но более размытым; broad yellow/green shore bands значительно ослаблены;
+top-down transparency сохранена; grazing water получает более сильную reflection/
+alpha и менее доминирующее дно. Contribution diagnostic показывает, что coarse field
+остаётся low-frequency. Static captures не выявили явных vertex/probe facets, но
+shimmer/swimming требуют human motion review.
+
+Deterministic motion receipt
+`20260825T134833Z-...-water-refine-motion-final-r028-single-window-off`:
+initial `[176,0,80]` READY, ровно один per-axis recenter в `[144,0,80]`, replacement
+`512/512 READY`, measured admission READY, `COMPLETE`, zero timing drops, no measured
+reflection rebuild. Первоначальный 600-frame/2-window report сохранён как rejected:
+динамический маршрут дал разные renderer-generation declarations между окнами;
+single-window 300-frame receipt является валидным lifecycle evidence, но не видео-
+доказательством отсутствия shimmer.
+
+Tier C detail-OFF, два независимых `1800+3000` run, source
+`dda14fd9a9c3a17de91a8e32a9ecbb3e6cbda446eefea484c28e036fc85466d2`, artifact
+`bcdbe67bf714712736b49fa6151f01c89746e811b98cc454e23f927ff352da46`, Advanced/
+Balanced, MetalFX/VSync OFF, READY, `COMPLETE`, zero drops:
+
+| state | run FPS | mean FPS | run GPU p95 ms | mean GPU p95 ms |
+|---|---|---:|---|---:|
+| refined ON | 74.091 / 74.140 | 74.116 | 16.273 / 16.287 | 16.280 |
+| refined source OFF | 76.266 / 77.272 | 76.769 | 15.706 / 15.532 | 15.619 |
+
+Против прежней current-prototype ON пары (`75.510 FPS`, `15.967 ms` mean GPU p95)
+refinement даёт `-1.847% FPS`, `+0.313 ms / +1.958% GPU p95`: GOOD по visual-task
+порогу `<=2%`, но у самой границы. Полная refined reflection цена против OFF той же
+source: `-3.456% FPS`, `+0.661 ms / +4.231% GPU p95`. Detailed stage receipts дают
+indicative translucent `3.866 -> 4.161 ms avg`, `4.518 -> 4.765 ms p95`; old side
+имеет только два 300-frame measured windows, поэтому это attribution, не отдельный
+release gate. Короткий `600+600` refined screen с GPU p95 `17.347 ms` отклонён как
+неустоявшийся и не используется в решении.
+
+Cloud feasibility audit: текущий R8 cloud-shadow texture — уже интегрированная вдоль
+sun direction transmittance и не подходит как arbitrary water reflection color.
+Позднее water-only cloud reflection можно сделать без voxel field: пересечь water
+reflection vector с cloud layer/slab и читать отдельное 2D coverage/density source с
+global cloud tint/opacity. В этой итерации cloud production code не добавлялся.
+
+**Решение:** сохранить refinement default-OFF для human review. Не усиливать coarse
+RGB и не делать поле резче: оставшийся tint/parallax — ограничение единственного
+vertex trace direction и coarse spatial field. Один следующий эксперимент после
+human review — заменить single-direction carrier на bounded two-lobe directional
+representation при неизменном fragment zero-volume-read contract; не добавлять
+planar/SSR/temporal/cloud/live updates.
+
+#### Grazing shoreline and dawn-color confidence correction — HUMAN PENDING
+
+Последующий human review подтвердил, что top-down/дальний refined receiver заметно
+лучше, но почти горизонтальный взгляд у поверхности воды всё ещё превращал песок в
+широкие грязно-жёлтые полосы. Отдельный редкий рассветный ракурс давал однородный
+мутно-розовый wash. Source audit выявил две связанные причины: минимальный
+directional response `0.45` не учитывал, что двухблочный voxel cell особенно плохо
+представляет почти горизонтальный cone ray, а обычный Schlick доводил весь rough
+environment lobe до идеального зеркала при `NdotV -> 0`.
+
+Исправление не меняет поле, vertex trace, ABI, ресурсы или прямой specular. При
+включённом `Representation Confidence` fragment теперь умножает directional response
+на bounded horizon confidence: `0.30` при elevation `<=0.035`, плавно до `1.0` при
+`>=0.18`. Это сохраняет сильные horizon landmarks, но не позволяет одному shoreline
+cell занимать длинную полосу воды. Общий environment/body composition использует
+roughness-aware Schlick с grazing limit `max(1-roughness,F0)`; при coarse roughness
+`0.28` предел равен `0.72`, поэтому низкочастотное рассветное небо не вытесняет всё
+тело воды. Sun GGX и local clustered GGX остаются отдельными и неизменными.
+
+Generated MSL: vertex SHA и размер не изменились
+(`7120b44b6c...`, 15,327 chars), fragment стал `0e97ea58d4b6...`, 148,774 chars;
+varyings остались `10/10`, одна syntactic vertex `texture3d.sample`, fragment volume
+resources/reads — ноль. Полный `./gradlew build` прошёл 97 задач.
+
+Детерминированный `reflection-house-voxel-grazing-v1` capture текущего кандидата:
+`run/lighting-reference/l0/20260825T161949Z-...-grazing-horizon-fix-capture-off.png`.
+Против прежнего exact-route capture `20260825T134306Z-...-grazing-final-r028-off.png`
+широкие жёлтая/зелёная/красная shoreline-полосы существенно ослаблены; top-down
+transmission в ближней части кадра сохранён. Это fixture observation, не human
+acceptance пользовательского рассветного ракурса.
+
+Короткий одинаковый `600+600` Advanced/Balanced screen, field READY, MetalFX OFF:
+confidence OFF `85.028 FPS`, GPU p95 `14.4943 ms`; refined ON `85.336 FPS`, GPU p95
+`14.2929 ms`. p99 изменился `15.4443 -> 15.8807 ms`, поэтому результат считается
+Tier-B/noise-level и доказывает только отсутствие явной большой регрессии, не
+production improvement. **Решение:** оставить узкий receiver fix и передать точные
+water-level sand/dawn ракурсы на повторную human review; не ослаблять redstone или
+весь world reflection глобальной strength-константой.
+
+#### Rough reflection continuity follow-up — HUMAN PENDING
+
+Human review следующего кандидата выявил, что песчаное отражение местами распадается
+на горизонтальные полосы «есть/нет». Причина находилась в receiver, а не в voxel
+field: при roughness `0.28` прежний squared-roughness directional lobe имел ширину
+около `0.043`, поэтому обычный procedural wave slope пересекал узкий `smoothstep`.
+Кроме того, тот же fragment wave повторно уменьшал representation confidence через
+`min(referenceElevation, reflectedElevation)`, то есть одна волна дважды гасила
+coarse reflection.
+
+Исправление разделяет семантику сигналов. Representation confidence теперь зависит
+только от стабильного vertex-trace `referenceElevation`; fragment wave остаётся лишь
+в directional alignment. Lobe использует roughness-linear bounded footprint
+`max(roughness * 0.55, 0.12)`: он сохраняет мягкую wave modulation, но не вырезает
+отражение в ноль между соседними гребнями. Field, trace, ABI, texture resources,
+varyings, Fresnel/composition и direct sun/local GGX не менялись.
+
+Generated MSL сохранил vertex SHA `7120b44b6c01...` и размер `15,327` chars;
+fragment SHA стал `8bb21901f488...`, размер уменьшился `148,774 -> 148,642` chars.
+Varyings остались `10/10`, vertex содержит одну syntactic reflection sample site,
+fragment volume resources/reads — ноль. Targeted reflection/shader tests и полный
+`./gradlew build` прошли; build выполнил 97 задач.
+
+Exact-route visual comparison: прежний candidate
+`run/lighting-reference/l0/20260825T161949Z-...-grazing-horizon-fix-capture-off.png`;
+continuity candidate
+`run/lighting-reference/l0/20260825T164847Z-...-grazing-continuity-candidate-off.png`.
+Новый capture имеет Advanced/Balanced admission PASS, reflection field READY и все
+три quality-флага ON. Он показывает непрерывную широкую rough response вместо
+жёстких wave holes, сохраняя мягкие водные полосы. Exact night/sand clipboard pose
+не воспроизведена, поэтому окончательная оценка остаётся за human review.
+
+#### Dawn/sunset planar contamination removal — HUMAN PENDING
+
+Повторный human review показал, что при tick `23500` и изменении высоты камеры вода
+иногда снова становится однородно розово-оранжевой. Первая гипотеза — чрезмерно
+окрашенный analytic `skyIrradiance` — была проверена и отклонена: ограничение его
+chroma уменьшило синюю составляющую воды и относительно усилило оранжевый fog.
+Кандидат полностью удалён и не оставлен в production source.
+
+Source audit обнаружил архитектурное загрязнение refined voxel receiver: перед
+coarse-world mix он всё ещё читал `metallumPlanarReflection` и подмешивал
+mirrored-camera HDR target. Такой target уже содержит ракурсный sky/fog и меняется с
+высотой камеры, поэтому сохранённая planar-конфигурация могла перекрасить весь water
+receiver на рассвете. Это нарушало выбранный voxel-only контракт.
+
+Voxel mode теперь эксклюзивен на двух уровнях. Generated fragment helper не читает
+и не смешивает planar texture; runtime не создаёт planar pass, если фактический
+`VertexReflectionExperiment.isRuntimeEnabled()` возвращает true. Включение voxel
+опции в Sodium также сбрасывает сохранённый planar toggle. Отдельный legacy planar
+режим остаётся доступен только когда voxel reflections выключены.
+
+Generated MSL сохранил vertex SHA `7120b44b6c01...`, `15,327` chars, `10/10`
+varyings и одну syntactic vertex sample site. Fragment SHA стал `9089c6943f5c...`,
+размер уменьшился `148,642 -> 146,785` chars; `metallumPlanarReflection` отсутствует
+в generated voxel fragment вместе с любыми 3D resources/reads.
+
+Детерминированный dawn route `reflection-house-voxel-dawn-elevated-v1` фиксирует
+tick `23500`, y=`82`, clear/frozen. Конфликтный runtime запуск с принудительным
+`-Dmetallum.planar_reflections=true` до окончательного guard зарегистрировал
+`Live water planar reflection active`:
+`run/lighting-reference/l0/20260825T175957Z-...-dawn-voxel-exclusive-candidate-off.png`.
+После runtime guard тот же контракт не зарегистрировал planar activation, сохранил
+Advanced PASS и voxel field READY:
+`run/lighting-reference/l0/20260825T180230Z-...-dawn-voxel-exclusive-candidate-v2-off.png`.
+Capture-прогоны `300+300` не являются performance evidence; уменьшение generated
+fragment — механический cost gate, не заявление об ускорении. Точный пользовательский
+ракурс остаётся HUMAN PENDING после перезапуска клиента. Targeted reflection/shader/
+Sodium tests и полный `./gradlew build` прошли; build выполнил 97 задач.
+
+#### Water cloud reflection layer — HUMAN PENDING
+
+После human review voxel-only water отражал coarse environment и отдельный celestial
+GGX, но видимые Minecraft clouds отсутствовали. Planar/cubemap/replay rejected: они
+добавили бы отдельный scene pass и вернули бы уже устранённую camera-height
+contamination. Cloud-shadow R8 также нельзя читать как arbitrary reflection coverage:
+его R уже preintegrated вдоль направления солнца.
+
+Выбран water-only analytic layer без нового pass/binding/history. Существующая
+периодическая cloud texture в slot 12 расширена `R8 -> RG8`: R сохраняет прежнюю
+sun-direction transmittance, G хранит исходный 3x3-prefiltered vanilla coverage.
+Размер 256x256 ресурса меняется с 64 до 128 KiB. Fragment только в voxel-water ветке
+пересекает отражённый procedural-wave луч с flat/fancy cloud slab, делает ровно один
+дополнительный 2D sample G, применяет actual linearized Minecraft `cloudColor`,
+opacity и bounded low-elevation fade, затем заменяет эту часть rough environment
+lobe. Direct sun/local GGX, voxel field, vertex carrier, Fresnel/transmission и
+cloud-shadow R остаются отдельными.
+
+Cloud contract поднят до v2 без увеличения 448-byte environment packet: прежний
+unused/fade vec4 в offset 416 теперь несёт cloud RGB + reflection strength; shadow
+horizon thresholds стали compile-time constants. Отдельный flag сохраняет прежнее
+daylight-only attenuation direct light, тогда как видимые clouds остаются доступны
+water reflection на закате и рассвете. Когда direct shadow уже не eligible,
+CPU generation переключается на дешёвый flat путь: G coverage сохраняется, но
+восьмиточечная volumetric preintegration R больше не пересчитывается вслед за солнцем.
+
+Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`, 15,327 chars),
+varyings остались `10/10`, одна syntactic vertex 3D sample site. Fragment SHA
+`e94d11b138cf...`, 150,699 chars против voxel-only 146,785; fragment по-прежнему
+имеет zero texture3d/planar resources и использует существующий `texture(12)` с одной
+bounded coverage sample в cloud helper.
+
+Immutable-fixture visual captures, Advanced/Balanced, MetalFX OFF, field READY:
+
+- broad/day: `run/lighting-reference/l0/20260825T182620Z-...-cloud-reflection-candidate-off.png`;
+- top-down: `run/lighting-reference/l0/20260825T183027Z-...-cloud-reflection-topdown-off.png`;
+- dawn tick 23500: `run/lighting-reference/l0/20260825T183234Z-...-cloud-reflection-dawn-off.png`.
+
+В captures облачная coverage появляется отдельными мягкими пятнами и изгибается
+water normals; top-down underwater scene остаётся читаемой. Dawn capture сохраняет
+синюю/серую воду с локальными cloud shapes вместо прежней сплошной оранжевой заливки.
+Это fixture observation, не subjective acceptance или motion proof. Все три запуска
+`300+300` сделаны с capture instrumentation и не являются performance evidence;
+последовательность также увидела существующий L6 dynamic fallback, поэтому её FPS не
+используется. Shader/resource contract и targeted cloud/reflection/Metal tests прошли;
+полный `./gradlew build` прошёл 97 задач.
+
+#### Sky-correlated cloud reflection correction — HUMAN PENDING
+
+Human review отклонил первую cloud-layer версию: её белые кольца и
+разводы на воде не были узнаваемым отражением облаков. Source audit выявил
+четыре причины: G-channel хранил 3x3-prefiltered coverage вместо исходной
+vanilla cell mask; полный procedural-wave normal проецировал малые slopes на
+высокую cloud plane как десятки блоков сдвига; cloud lookup не повторял
+vanilla cloud-range fog; cloud color накладывался после coarse-world mix и мог
+закрашивать отражённый берег.
+
+Исправленный layer читает raw occupied-cell mask из G с точными vanilla
+12-block topology/animation offsets. Cloud ray использует 8% procedural normal
+вокруг stable world-up: волны мягко искажают силуэт, но не растягивают
+его в кольца. Intersection идёт с видимой снизу cloud underside, применяет
+actual `cloudRange * 16` linear fog и Fancy underside light `0.70`. Слой облаков
+теперь составляет sky до confidence-weighted coarse geometry, поэтом мир может
+окклюдировать облака. Base sky больше не берётся из irradiance approximation:
+per-frame packet передаёт actual linear `SkyRenderState.skyColor` и
+`sunriseAndSunsetColor`; последний локализуется только в нужном направлении
+и возле горизонта. Environment packet вырос `448 -> 480` bytes, contract v3;
+новых passes, textures, uploads и steady allocations нет.
+
+Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`, 15,327 chars),
+fragment SHA `9fc0b31269c7...`, 154,466 chars, varyings `10/10`. Water fragment имеет
+ровно один cloud `texture2d` sample; planar и `texture3d` resources/reads по-прежнему
+отсутствуют. Полный `./gradlew build` прошёл 97 tasks.
+
+Exact-route `300+300` capture receipts, Advanced/Balanced, MetalFX OFF, field READY:
+
+- broad/day: `run/lighting-reference/l0/20260825T192108Z-...-sky-cloud-reflection-v2-broad-off.png`;
+- top-down: `run/lighting-reference/l0/20260825T192305Z-...-sky-cloud-reflection-v2-topdown-off.png`;
+- grazing: `run/lighting-reference/l0/20260825T192517Z-...-sky-cloud-reflection-v2-grazing-off.png`;
+- dawn tick 23500: `run/lighting-reference/l0/20260825T192841Z-...-sky-cloud-reflection-v2-dawn-off.png`.
+
+В captures прежние closed white/oil contours исчезли; при grazing остались
+перспективно вытянутые, но непрерывные cloud bands. Dawn оранжевый вклад
+локализован в воде, отражающей окрашенный горизон; ближняя вода
+остаётся blue/gray. Это fixture observation, не subjective acceptance.
+
+Короткий capture-instrumented broad screen против отклонённой v1: FPS
+`67.297 -> 66.535` (`-1.13%`), presenting-CB GPU average `17.075 -> 17.465 ms`
+(`+2.29%`), p50 `16.209 -> 16.648 ms` (`+2.71%`). Это short non-attested screen и
+не production performance claim; он не показывает явной большой регрессии.
+Первая v1 считается visually rejected; v2 остаётся HUMAN PENDING.
+
+#### Camera-correlated cloud environment stabilization — REJECTED BY HUMAN MOTION REVIEW
+
+Human review v2 выявил ещё два дефекта: cloud shapes были слабыми/мелкими
+и сильно плыли при ходьбе или прыжке. Source audit vanilla `CloudRenderer`
+показал, что небесные clouds проецируются от camera world position,
+а v2 начинал cloud ray от каждого water receiver. Для высокой плоскости
+и grazing ray это давало большой, противоположный небу parallax.
+Даже 8% procedural normal перебрасывал lookup через несколько 12-block
+cloud cells возле горизонта.
+
+V3 трактует clouds как distant environment: сохраняет reflected angular
+direction, но начинает ray от camera world position и использует stable world-up
+для cloud silhouette. Procedural waves остаются в Fresnel, water brightness и coarse
+world environment, но больше не перемещают высокую cloud coverage. Fancy
+single-plane approximation теперь плавно переходит от vanilla-like side
+light `0.88` на grazing к underside `0.70` при вертикальном луче; bounded
+reflection strength поднят `0.90 -> 1.0`.
+
+Generated MSL сохранил vertex SHA `7120b44b6c01...`, 15,327 chars и `10/10`
+varyings. Fragment SHA `dbb6cf421fd1...`, 154,066 chars — на 400 chars меньше
+v2; cloud helper по-прежнему делает ровно один `texture2d` sample, а
+fragment не имеет planar/`texture3d` resources. Immutable grazing capture,
+Advanced/Balanced, MetalFX OFF, field READY:
+`run/lighting-reference/l0/20260826T040524Z-...-cloud-stable-environment-v3-grazing-off.png`.
+В нём cloud bands более связные и светлые, без возврата oil-ring pattern.
+Это static fixture observation; jump/walk motion acceptance остаётся HUMAN PENDING.
+
+Короткий capture-instrumented screen v3 против intermediate camera-origin+
+4%-wave варианта: FPS `83.898 -> 84.163`, GPU p50 `13.9418 -> 13.9042 ms`,
+p95 `14.6769 -> 14.6553 ms`. Это noise-level non-attested screen, не production
+performance claim; он лишь не показывает явной регрессии.
+
+Human motion review отклонил v3: прыжок всё ещё сильно сдвигал
+cloud reflection, а при быстром движении вперёд вся reflection mass уезжала
+вперёд одновременно. Статический capture не обнаружил этот дефект.
+
+#### Water-height cloud projection stabilization — REJECTED BY HUMAN MOTION REVIEW
+
+Повторный math/source audit нашёл общую причину обоих motion symptoms:
+v3 использовал camera Y не только как origin, но и для cloud-plane
+distance `t = (cloudY - cameraY) / rayElevation`. На elevation `0.05` один
+блок jump/bobbing менял lookup на 20 blocks вдоль отражённого луча.
+Это и выглядело как одновременное движение всех clouds вперёд.
+
+V4 сохраняет exact vanilla camera XZ + animation phase, но вычисляет
+angular scale от reconstructed water receiver Y. Так horizontal movement сохраняет
+world-anchored cloud translation, а изменение eye height не может сдвинуть
+фазу или масштаб отражения. Pure regression фиксирует rejected
+20-block jump amplification и exact invariance новой distance при +1 camera Y.
+
+Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`,
+15,327 chars), fragment SHA `2d98cfd0b09d...`, 154,378 chars, varyings `10/10`,
+один cloud `texture2d` sample и zero planar/`texture3d` fragment resources.
+Пара identical-XZ/yaw/pitch captures с camera Y `65 -> 66`:
+
+- `run/lighting-reference/l0/20260826T044915Z-...-cloud-water-height-v4-grazing-off.png`;
+- `run/lighting-reference/l0/20260826T045250Z-...-cloud-water-height-v4-grazing-y66-off.png`.
+
+В static pair cloud reflection сохраняет фазу/масштаб при изменённой
+высоте; изменяется только геометрия видимого ракурса. Captures `300+300`
+и их FPS не являются performance evidence. Живой jump/forward motion review
+отклонил и v4: заметный jump shift сохранился, а при быстром движении облачная
+масса отражения по-прежнему двигалась вперёд относительно игрока. Поэтому
+finite-plane/camera-correlated lookup больше не принимается как water-cloud
+architecture, даже если отдельная формула пересечения проходит static tests.
+
+#### Translation-invariant angular cloud environment — REJECTED BY HUMAN MOTION REVIEW
+
+V5 заменяет отвергнутую конечную cloud plane на удалённый angular sky layer.
+Lookup зависит только от отражённого world direction и vanilla animation offset:
+camera X/Y/Z, receiver position и ray-plane distance полностью удалены из helper.
+В результате jump, bob и horizontal camera translation не могут изменить фазу
+узора по data-flow contract; поворот камеры и штатная анимация облаков сохранены.
+
+Angular distance `96 blocks` и minimum elevation `0.10` выбраны так, чтобы
+12-block vanilla cells оставались крупным rough cloud silhouette и не сжимались
+в быстрые полосы у горизонта. Runtime cost остаётся одним существующим RG cloud
+texture sample и bounded fragment ALU, без нового pass, history или resource.
+
+Осознанный компромисс: отдельные облака больше не имеют параллакса конечной
+Minecraft cloud plane при перемещении игрока. Exact same-frame image matching
+потребовал бы cloud prepass/render-order split и отдельную screen-space texture;
+это более дорогая и существенно более широкая архитектура. После двух human
+motion rejections стабильный sky-environment contract выбран приоритетно.
+
+Source/generated contract и pure translation-invariance test прошли. Generated
+MSL сохранил vertex SHA/size (`7120b44b6c01...`, 15,327 chars), `10/10`
+varyings и один reflection volume sample; fragment SHA `ef59676184f9...`,
+152,849 chars, один cloud `texture2d` sample и zero `texture3d` resources.
+Fragment стал на 1,529 chars меньше v4. Full Gradle `test build` и targeted
+cloud/reflection suites прошли. Статическая или математическая проверка не
+считается human motion acceptance; jump/walk/fast-forward результат остаётся
+HUMAN PENDING.
+
+Human motion review отклонил и V5: внешний вид отражения изменился, но при
+прыжке и быстром движении cloud reflection продолжала смещаться ровно так же.
+Это опровергло прежнюю атрибуцию finite-plane/camera translation: источник
+оставшегося движения находился до cloud lookup, в восстановлении направления.
+
+#### Exact raster-projection cloud receiver — REJECTED BY HUMAN MOTION REVIEW
+
+Повторный source audit сравнил не только формулы cloud lookup, но и полный
+projection path. Vanilla clouds растеризуются через финальную world projection
+кадра: base projection, view bob/portal transform и, когда активен Temporal,
+jitter. V5 получал направление из terrain `viewPosition`, вычисленного до
+финального view-bob transform. Поэтому смена plane/angular architecture меняла
+рисунок, но не могла устранить общий screen-space drift при прыжке и ходьбе.
+
+V6 восстанавливает view ray непосредственно из `gl_FragCoord` и inverse именно
+той raster projection, которой нарисован текущий кадр. Native params получают
+`frame.currentProjection.inverse`; fragment переводит пиксель в NDC, умножает
+на эту матрицу и затем на существующий `worldFromView`. Cloud lookup остаётся
+camera-translation-independent angular environment с одним texture sample, но
+теперь его направление следует тому же bob/jitter projection contract, что и
+видимое небо. Shader не вычисляет matrix inverse и не делает дополнительных
+texture reads.
+
+Lighting params ABI расширен `256 -> 320 bytes` одной `float4x4`; Java, Swift,
+Metal и native layout validation синхронизированы. Это не добавляет render pass,
+history, texture resource или steady allocation. Native regression отдельно
+проверяет, что при трёх view-bob angles в params действительно попадает inverse
+соответствующей raster projection. Static/source/build proof не заменяет живую
+проверку прыжка и быстрого движения. Generated MSL сохранил vertex SHA/size
+(`7120b44b6c01...`, 15,327 chars), `10/10` varyings и один reflection volume
+sample; fragment SHA `36d452237af5...`, 155,267 chars, один cloud `texture2d`
+sample и zero `texture3d` resources. Полный `./gradlew test build` прошёл 97
+tasks. Результат остаётся HUMAN PENDING.
+
+Human motion review отклонил V6: исходный jump/forward drift остался, а точное
+включение final raster projection добавило сильную тряску cloud reflection от
+анимации камеры. Это ожидаемо по исправленному data flow: V6 буквально передавал
+view bob в аналитический per-fragment lookup. После четырёх отклонённых вариантов
+дальнейшая настройка ray/plane/angular формулы прекращена.
+
+#### Cloud-only reflected image capture — HUMAN PENDING
+
+V7 меняет метод. Перед main pass отдельный quarter-resolution target каждый кадр
+рисует настоящий Minecraft `CloudRenderer` с отражённой камерой. Target очищается
+в transparent black и содержит только cloud geometry: sky, sun, terrain и другие
+world surfaces в него не рисуются. Поэтому voxel reflection остаётся единственным
+источником отражённого окружения, а новый target является только готовым RGBA
+слоем облаков, не planar world reflection.
+
+Water fragment больше не восстанавливает cloud ray, не пересекает cloud plane и
+не читает coverage pattern. Он делает один screen-space sample готового cloud
+target, слегка смещённый существующим procedural water normal, и смешивает его по
+captured alpha с analytic sky до confidence-weighted voxel world contribution.
+Vanilla `TRANSLUCENT` blend сохраняет в transparent target premultiplied RGB;
+receiver перед единственным mix восстанавливает straight cloud color, чтобы не
+умножать opacity второй раз и не делать облака искусственно слабыми.
+Capture обновляется каждый кадр: запрещено двухкадровое кеширование full-planar
+пути, которое дало бы lag при ходьбе. Full planar остаётся отдельным режимом и
+по-прежнему взаимно исключён с voxel world receiver.
+
+Один `CloudRenderer` используется также основным cloud draw. После reflected draw
+его dynamic CloudInfo UBO явно rotate-ится до main pass, чтобы CPU не перезаписал
+параметры отражённой камеры в ещё используемом GPU buffer. Cloud mesh/UTB остаётся
+read-only и вращается самим Minecraft только при реальном mesh rebuild.
+
+Предыдущая `inverseRasterProjection` удалена; lighting params ABI возвращён
+`320 -> 256 bytes`. Fragment MSL стал `155,267 -> 152,951 chars` (SHA-256
+`c15c4f9d6055...`), vertex остался
+15,327 chars, `10/10` varyings, один reflection volume sample и zero fragment
+`texture3d`. Cloud reflection использует один `texture2d` sample из slot 11;
+существующий slot 12 остаётся отдельно для direct cloud shadows. Цена новой
+архитектуры — дополнительный cloud-only draw в persistent 1/4-resolution target
+каждый кадр, без terrain draw, sky draw, history и per-frame texture allocation.
+GPU/FPS delta пока не измерен; static/source validation не заменяет живой
+jump/walk/fast-forward review.
+
+Human visual review rejected the first V7 capture: clouds were absent and the
+water environment lobe became much less visible. Source audit found two capture
+correctness faults rather than a strength-tuning problem. `CloudRenderer` already
+builds its vertices relative to the supplied reflected camera, while the pass also
+applied terrain's translated mirror matrix, reflecting the water-plane Y offset a
+second time. The same negative-determinant matrix reversed fancy-cloud winding but
+left the normal back-face-culling pipeline active.
+
+V8 gives clouds their own transform: reflected-camera-relative vertices receive
+only the Y mirror, use the ordinary perspective projection instead of terrain's
+oblique near-plane projection, and explicitly receive the current terrain fog.
+Only during that reflected draw, fancy `CLOUDS` is substituted with the otherwise
+equivalent non-culling `FLAT_CLOUDS` pipeline; the main cloud draw is unchanged.
+The receiver now also rejects alpha-only/black invalid capture samples before
+mixing with analytic sky, so a malformed cloud target cannot suppress the sky lobe
+and make the independently composed voxel-world reflection look absent. Generated
+MSL remains one cloud `texture2d` sample, one vertex reflection-volume sample,
+zero fragment `texture3d`, and `10/10` user varyings. Runtime visual acceptance and
+GPU delta remain HUMAN PENDING.
+
+#### Reverse-Z captured-cloud recovery — STATIC PASS, HUMAN JUMP/WALK PENDING
+
+Повторная runtime-проверка V8 воспроизвела жалобу: cloud-only draw отправлялся,
+target создавался и Advanced/voxel admission проходили, но в broad capture облаков
+в воде не было. Причина оказалась не в strength или voxel field. Minecraft 26.2
+использует reverse-Z `GREATER_THAN_OR_EQUAL`, а отдельный reflection target очищал
+depth в `1.0`. Поэтому вся настоящая cloud geometry проигрывала depth test. Target
+теперь очищается в `0.0`; unit contract фиксирует reverse-Z clear вместе с
+transparent-black cloud clear.
+
+После восстановления geometry средняя premultiplied alpha Minecraft clouds всё ещё
+почти исчезала после water Fresnel/composition. Receiver теперь применяет bounded
+coverage remap только к уже захваченной валидной cloud alpha: края с fog остаются
+прозрачными, пустой target не создаёт цвет, а mid-opacity silhouette становится
+читаемым. Coarse voxel world reflection не усиливалась: production strength/roughness
+остались `0.75/0.28`, planar terrain replay по-прежнему выключен. Попытка поднять
+cloud target с `1/4` до `1/2` разрешения удалена: один полный `1800+3000` screening
+дал `57.262 FPS`, GPU p95 `17.2704 ms` против baseline около `67.3 FPS / 14.28 ms`.
+Финальный target сохранил прежний quarter-resolution budget (`427x240` при сцене
+`1708x960`).
+
+Generated MSL после финального shader edit: vertex SHA-256
+`7120b44b6c012b478575cf3f14cab2f8a37f56fd92b4c29d2f06ad0de1235bb8`,
+fragment SHA-256
+`21d00d3efc6c39eeaa5ac6900a6032928cc5064756f4ba26dcaaaaa336968188`,
+размер `15,327/153,412`, user varyings `10/10`, одна syntactic vertex reflection
+sample site; fragment не получил `texture3d` и по-прежнему читает один готовый
+cloud `texture2d` sample. `realWorldVertexReflectionUnitTest`,
+`rendererArchitectureUnitTest` и полный `./gradlew test build --no-daemon`
+прошли; полный build выполнил 97 задач.
+
+Финальные deterministic `300+300` captures, `3024x1964`, Advanced/Balanced,
+MetalFX/VSync OFF, field READY, cloud target `427x240`, все `COMPLETE`:
+
+- broad: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T101559Z-g0f12d16847a6-dirty-cloud-v12-quarter-broad-off.png`;
+- top-down: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102156Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-topdown-v1-off.png`;
+- low/red: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102257Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-low-red-v1-off.png`;
+- grazing: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102348Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-grazing-v1-off.png`;
+- dawn: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102440Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-dawn-elevated-v1-off.png`.
+
+Agent fixture review: cloud shapes снова видимы в broad/low/grazing, strongest at
+grazing; top-down сохраняет дно и прозрачность; red landmark не превращается в
+общую красную/жёлтую заливку; dawn horizon остаётся локализованными направленными
+полосами, а не полноэкранным orange wash. Белых столбов, oil rings или непрозрачной
+cloud film не обнаружено. Это SDR full-frame review, не точная HDR-приёмка дисплея.
+
+Автоматический `reflection-house-voxel-motion-v1` на финальном quarter source
+завершился `COMPLETE`; screen recording сохранён в
+`run/lighting-reference/cloud-reflection-v12-quarter/motion/reflection-house-voxel-motion-v12.mov`.
+На видимых-water участках 20-block orbit + yaw/pitch cloud layer не уезжает отдельно
+от отражённого кадра и не исчезает отдельно от воды. Recenter сохранил 384 секции,
+достроил 128 и вернул field в READY. Полные чёрные кадры записи затрагивают весь
+экран при прохождении benchmark camera через geometry/window transition и не
+являются cloud-only popping. Route не моделирует прыжки и ручную ходьбу, поэтому
+это lifecycle/orbit evidence, а не human jump/walk signoff.
+
+Clean Tier C A/B, два независимых `1800+3000` run на immutable
+`reflection-house-voxel-v1`, Advanced/Balanced, MetalFX/VSync OFF, detail OFF,
+field READY, `COMPLETE`, zero timing drops:
+
+| state | source / artifact | run FPS | mean FPS | run GPU p95 ms | mean GPU p95 ms |
+|---|---|---:|---:|---:|---:|
+| V8 broken baseline `0f12d16` | `055976bf...` / `09793870...` | 67.449 / 67.143 | 67.296 | 14.2505 / 14.3070 | 14.2788 |
+| fixed quarter `dea4961` | `fee00a27...` / `ee82aa7b...` | 67.026 / 66.758 | 66.892 | 14.3301 / 14.3755 | 14.3528 |
+
+Цена исправления: `-0.60% FPS`, `+0.0740 ms / +0.52% GPU p95`. Это включает
+реально проходящую depth cloud geometry и coverage composition, а не пустой target
+baseline; результат остаётся внутри visual-task допуска. Accepted receipts сохранены
+в `run/logs/metallum-benchmarks/20260826T100756Z-...cloud-v8-tierc-run1...`,
+`20260826T101028Z-...cloud-v8-tierc-run2...`,
+`20260826T103404Z-...cloud-v12-final-tierc-run1...` и
+`20260826T103646Z-...cloud-v12-final-tierc-run2...`.
+
+Финальная low/red ablation с `--water-reflection-quality confidence-off`
+(`20260826T104444Z-...cloud-v12-low-red-confidence-off...`) не дала заметного
+полезного усиления world silhouette относительно production capture, но отключает
+защиту от ранее наблюдавшихся цветных horizon bands. В production не переносить:
+coarse environment уже читается в low/grazing участках воды, а риск вернуть
+цветную «грязь» не оправдан.
+
+**Решение:** сохранить reverse-Z fix + bounded captured coverage на прежнем
+quarter-resolution target. `STATIC VISUAL CAPTURES PASSED`; clean Tier C performance
+`PROVEN`; automated orbit/lifecycle `SUPPORTED`; ручные jump/slow-fast walk/back/yaw
+остаются `HUMAN MOTION ACCEPTANCE PENDING`. Не возвращать half-resolution target и
+не усиливать globally coarse voxel RGB: оба пути либо слишком дороги, либо возвращают
+цветную грязь вместо отражения.
+
+---
+
+## 2026-08-26 — Movement/recenter allocation-tail repair — SUPPORTED, Tier C pending
+
+**Наблюдаемая проблема:** при ходьбе с поворотами F3 показывал frame max
+`104–228 ms`, allocation rate `600–1438 MiB/s` и циклически заполненный heap при
+текущем GPU около `16 ms`. Статический кадр симптом не воспроизводил. Это указывало
+на CPU producer/GC, активируемый перемещением, а не на steady GPU stage.
+
+**Атрибуция:** отдельный JFR motion diagnostic (не FPS evidence) показал, что
+`VoxelShapeEncoder.encode` и создание его immutable результата давали `44.91%` и
+`7.32%` allocation pressure. Sodium voxel extractor вызывал этот allocating API для
+каждого из 4096 блоков заново принятой секции, включая воздух. Один encode создавал
+coverage/output arrays, box/list objects, result и повторные defensive array copies.
+Камерный guarded recenter одновременно имел независимый burst: render thread сразу
+материализовал/помечал на rebuild все `8^3 = 512` секций frozen reflection field,
+хотя task submission ниже уже декларировал предел 8 секций на кадр.
+
+**Исправление:** Sodium section extraction теперь использует один caller-owned
+scratch на всю секцию, пропускает AIR, имеет allocation-free full-cube path и не
+создаёт per-block `EncodedShape`/coverage/optical arrays. Immutable reference API и
+его bit-exact tests сохранены. Default material descriptors переиспользуются, а
+transient optical byte пакуется без descriptor allocation. Guarded reflection
+replacement сохраняет 384 перекрывающиеся секции при обычном 32-block recenter,
+собирает только 128 входящих и ограничивает materialization/rebuild теми же 8
+секциями на кадр; предыдущий READY field остаётся активным до готовности замены.
+
+**Повторный JFR diagnostic:** на том же route/settings `VoxelShapeEncoder.encode`,
+`EncodedShape`, encoder `double[]` и default material descriptors исчезли из top
+allocation sites. Capture duration изменился `46 -> 43 s`, поэтому абсолютные числа
+не считаются throughput A/B. GC pauses изменились `134 -> 94` (rate примерно
+`2.91 -> 2.19/s`), total pause `689 -> 530 ms` (примерно `14.98 -> 12.33 ms/s`),
+maximum `26.2 -> 17.8 ms`. Это `SUPPORTED` causal evidence; JFR меняет workload и
+не является production performance acceptance.
+
+**Runtime smoke:** final `300+300` motion/recenter run
+`20260825T201816Z-g0559db72df6c-dirty-movement-stutter-fix-committed-smoke-off`
+завершился `COMPLETE`, Advanced/Balanced, MetalFX/VSync OFF, Built-in Retina
+`3024x1964`, active L3/L5/L6, zero timing drops. В measured window CPU submission
+max `35.38 ms`, present max `44.97 ms`; recenter зарегистрировал
+`reused_sections=384 pending_sections=128` и стал READY в ту же секунду. Это short
+functional/tail smoke, не Tier C FPS evidence и не основание заявлять PROVEN win.
+
+**Проверки и статус:** `voxelOccupancyUnitTest`, `localVoxelShadowUnitTest`,
+`frozenReflectionFieldUnitTest` и `rendererArchitectureUnitTest` прошли. Кодовый
+источник массовых movement allocations устранён без изменения voxel occupancy,
+optical/material или reflection-quality contracts. Окончательный статус остаётся
+`SUPPORTED`; для `PROVEN` performance acceptance нужны clean same-source Tier C A/B,
+а для пользовательского симптома — ручная ходьба туда-обратно после перезапуска.
+
+---
+
+## 2026-08-25 — G1 isolated field infrastructure
+
+**Статус:** `SUPPORTED_PENDING_ABSOLUTE_FLOOR`; implementation `88f9dda`
+сохранён, `g2_allowed=false`.
+
+Старый L7 не переносился целиком. Новый namespace содержит только topology
+`3 × 32^3`, spacing `2/4/8`, bounded candidate accounting, render-thread
+generation/reset, private `RGBA16Float + R8Unorm` textures, coverage-aware mips,
+versioned ABI, deferred release hook и one-shot capture. Appearance estimator,
+Sodium radiance extractor, directional probe, receiver и terrain bindings не
+используются. Фактический Metal allocation `1,277,952 bytes` против
+арифметических `1,011,123` и лимита `25,165,824`; полный `check` прошёл 98 задач.
+
+Contemporaneous 600+600 A/B recovery control -> G1:
+
+- FPS `27.390 -> 27.337` (`-0.20%`);
+- 1% low `21.705 -> 20.749` (`-4.40%`);
+- GPU p95 `40.445 -> 40.033 ms` (`-1.02%`).
+
+Относительный gate проходит, GI_OFF telemetry и production work строго нулевые.
+Но валидный G1 Tier C Overworld run дал `27.430 FPS`, ниже отдельно утверждённых
+28 FPS. Поэтому `.accepted.json` receipt не трактуется как product acceptance и
+переход к G2 заблокирован до нового Tier C подтверждения либо явного решения
+пользователя.
+
+---
+
+## 2026-08-25 — G2 accepted semantic material/emission field
+
+**Статус:** `PASS_STRUCTURALLY_OFF_DIAGNOSTIC`; implementation `d750491`
+сохранён. G3 не начат.
+
+G2 получает occupancy/medium, diffuse albedo, emission RGB/intensity,
+шесть face weights, validity/provenance и dominant palette ID только из
+accepted Sodium output. Mutable live world, brightness/lightmap и L3/L4
+источники не читаются. Неизвестные и stale sections остаются UNKNOWN;
+resource/material/world/clipmap/content epochs разделены. Весь mixin set
+структурно закрыт без `METALLUM_GI_G2_CAPTURE=1` и exact version gate.
+
+Частный Metal context хранит семь planes, делает conditional-mean mips без
+`coverage^2` и даёт one-shot raw debug slice. Actual M1 Pro census:
+`4,128,768` private texture bytes, `9,666,560` native peak и `18,022,528`
+conservative end-to-end peak при бюджете `25,165,824`. Source и bundled
+Metal validation прошли; полный project `check` — 105 tasks. Тест 10 000
+publications завершился с одним resident tag и нулём active leases.
+
+Предварительная same-source/artifact 600+600 пара на native HDR
+3024x1964, Advanced/Balanced:
+
+- structural-off: `27.331 FPS`, 1% low `21.650`, GPU p95 `40.734 ms`;
+- capture-on: `27.434 FPS`, 1% low `23.249`, GPU p95 `39.595 ms`;
+- delta: `+0.37%` FPS, `+7.39%` 1% low, `-1.139 ms` GPU p95.
+
+Enabled run принял 768 snapshots, имел zero stale/outside/capacity rejects, peak
+13 candidates / 204,984 bytes и zero active candidates при shutdown. Это Tier B
+dirty-worktree screening, а не Tier C claim. Качество и resolution не снижались;
+production GI resources/passes/bindings остались нулевыми. G2 сохранён только
+как diagnostic infrastructure; существующий G1 floor gate по-прежнему блокирует
+любую новую production-GI стадию.
+
+---
+
+## 2026-08-27 — G4 frozen one-bounce transport — COMPLETE FIELD ONLY
+
+**Решение:** `PASS_FIELD_ONLY_ONE_BOUNCE`; implementation `460d294` сохранён.
+Это принятие private diagnostic field, не production receiver, не визуальная
+приёмка и не Tier C. G5 остаётся заблокирован.
+
+G4 строит один frozen near cascade `32^3` с cell size 2 blocks. Он читает только
+accepted G2 material/geometry и завершённый G3 direct-irradiance source, один раз
+вычисляет `L_bounce0 = rho/pi * E_direct`, затем выполняет один детерминированный
+Jacobi gather по 26 направлениям и 8 distances. Результат хранится в private L1
+SH + confidence; terrain, image, fragment и render-pass bindings отсутствуют.
+Supercover visibility допускает transfer только через authoritative AIR,
+нормировка form factor сохраняет global energy bound, а второй bounce запрещён.
+
+Source-compiled и bundled-metallib Metal Validation дали одинаковый raw digest
+`310720372c19146c4b1a83e5c031e6696dfed41c37f4a67fc42e85d929d0025a`.
+Полный end-to-end census G2+G3+G4 равен `22,637,928` bytes при лимите
+`25,165,824`; G4 создаёт 5 private ресурсов и 2 compute passes, а field-only
+source-chain запрещает production consumer.
+
+Чистый Tier B run `20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off`
+прошёл на Apple M1 Pro, built-in Retina `3024x1964`, HDR,
+Advanced/Balanced, native resolution, MetalFX/VSync OFF. После 600 warmup кадров
+он завершил два точных 300-frame measured windows:
+
+- G3: 192/192 bricks, 0 pending/discarded, ровно 24 active injection frames;
+- G4: один build и один `GI_TRANSPORT` dispatch в warmup;
+- transport p95/max: `0.923291/0.923291 ms`, ниже gates `4.0/6.0 ms`;
+- measured dispatch growth: `0`; timing drops: `0`; renderer fallbacks: `0`;
+- descriptive whole-frame: `43.391665 FPS`, 1%/0.1% lows
+  `35.724/34.014 FPS`, без production A/B claim.
+
+Fail-closed telemetry до принятого прогона поймала две реальные проблемы
+доказательного контура. Первый v2 receipt был отвергнут, потому что старое окно
+не могло доказать pre-attachment memory/work для G4 contract v3. Следующий clean
+run `44dae31` завершился `FAIL` с ложным `frozen G3/G2 source drifted`: logical
+native G3 epoch сравнивался с process-local registry epoch из другого домена.
+`77f8938` разделил домены и сохранил отбрасывание настоящей post-freeze мутации;
+`460d294` дополнительно заморозил `OFF` до source capture. Отклонённый clean run
+сохранён отдельно без summary и не используется как положительное evidence.
+
+Пять same-stem артефактов финального run хэшированы, summary канонически
+пересчитывается из raw, а transcript связывает exact clean commit/source,
+artifact, route, fixture, settings и launch/final artifact blocks. Вывод этапа:
+стоимость одного bounded field build поддержана Tier B, steady-state work в
+measurement отсутствует. Влияние на изображение и production performance этим
+этапом намеренно не проверялись.
+
+## 2026-08-28 — L8 water profiles by Visual Style — AUTOMATED PASS, HUMAN PENDING
+
+Water appearance is now an explicit `WaterStyleProfile` under the existing three
+`VisualStyle` presets. `VANILLA` bypasses L8 water waves/optics; `NATURAL` keeps the
+vanilla texture and biome tint with only weak waves and environment highlights;
+`REALISM` enables the complete reflection/refraction/transmission/absorption/caustic
+response with a finer, less viscous multi-scale wave field.
+
+The stable policy id uses the previously unused `materialContract.w`; the 480-byte
+environment packet layout is unchanged and its material contract version is now 2.
+There are no new resources, passes, PSO variants, readbacks, or render-loop allocations.
+Default-off planar and voxel reflection experiments remain orthogonal and are not
+enabled by style selection. Coarse-reflection body attenuation now follows the actual
+reflection weight/confidence, preventing low-confidence shoreline darkening.
+
+Visual-style, ABI/material, generated GLSL -> SPIR-V/MSL, caustic, reflection, shadow,
+and runtime target suites pass. Three-style live image review is still required before
+claiming visual acceptance.
+
+---
+
+## 2026-09-01 — Stage SSR-3: Screen-Space Reflections (SSR) на Apple M1 Pro — PASS
+
+**Статус:** подтверждённая экономическая состоятельность и визуальное качество на Apple Silicon.
+
+### Контекст и стенд
+- GPU: Apple M1 Pro.
+- Дисплей: встроенный Retina, `3024×1964 @ 120 Hz`, exclusive fullscreen.
+- Настройки: HDR scene output (`native-hdr-fancy-v1`), Advanced lighting (`balanced`), Fancy, render/simulation `16/12`, VSync off, MetalFX off.
+- Маршрут: `reflection-water-view-a`, 300 warmup + 300 measured frames (Tier B screening).
+- Baseline (`OFF`): GPU p50/p95/p99 `29.8451 / 32.6670 / 33.1626 ms`, 35.719 FPS.
+- Candidate (`SCREEN_SPACE`): GPU p50/p95/p99 `29.7169 / 29.9837 / 30.0916 ms`, 35.175 FPS.
+- Дельта GPU p95: `-2.6833 ms` (отсутствие регрессии, соблюдение стоп-гейта плана $\le 5.0\%$).
+- CPU p95: `7.8847 -> 5.0156 ms` (нет аллокаций в render loop, ресурсы освобождаются через `MetalDestructionQueue`).
+
+### Архитектура и алгоритм
+1. **Захват сцены (`ScreenSpaceReflectionRenderer`)**:
+   - Аппаратный blit-захват цвета (`RGBA16Float`) и буфера глубины (`Depth32Float`) непосредственно перед полупрозрачным рендером воды (`ChunkSectionLayerGroup.TRANSLUCENT`).
+   - Безопасное отложенное уничтожение текстур при ресайзе через `MetalDestructionQueue` для исключения race conditions с in-flight command buffers на GPU.
+2. **Трассировка в шейдере (`metallumTraceScreenSpaceReflectionV1`)**:
+   - 16 линейных шагов view-space raymarching с субпиксельным дизерингом для устранения ступенчатости.
+   - 4 итерации бинарного поиска для субпиксельной точности контакта геометрии ($\approx 25$ см в мире).
+   - Адаптивный тест физической толщины ($\text{thickness} = \max(1.2, \text{stepStride} \times 0.75)$).
+   - Учёт анимированной нормали волн Minecraft в направлении луча и смещении UV для реалистичной ряби.
+   - Физический диэлектрический Френель: $F = 0.04 + 0.96 \cdot (1 - \vec{N} \cdot \vec{V})^3 \in [0.04, 0.85]$.
+3. **Sodium GUI**:
+   - Полноценный селектор `WaterReflectionMode` (`OFF`, `VOXELS`, `SCREEN_SPACE`) на выделенной странице `Metallum Reflections` с английской и русской локализацией.
+
+---

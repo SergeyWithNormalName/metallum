@@ -1,8 +1,8 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.hdr.SodiumHdrSemantic;
-import com.metallum.client.sodium.SodiumRainExposureSnapshot;
-import com.metallum.client.sodium.SodiumRainExposureSnapshotAccess;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import net.caffeinemc.mods.sodium.client.model.color.ColorProvider;
 import net.caffeinemc.mods.sodium.client.model.quad.ModelQuadView;
 import net.caffeinemc.mods.sodium.client.model.quad.properties.ModelQuadFacing;
@@ -37,13 +37,6 @@ abstract class DefaultFluidRendererHdrMixin {
     @Unique
     private FluidState metallum$fluidState;
 
-    /**
-     * Captured once per fluid block from the remesh-time motion-blocking heightmap. It is not
-     * equivalent to propagated skylight, which can remain bright under a roof or in a cave.
-     */
-    @Unique
-    private boolean metallum$fluidSkyExposed = true;
-
     @Inject(method = "render", at = @At("HEAD"), remap = false)
     private void metallum$captureFluidEmission(
             final LevelSlice slice,
@@ -60,12 +53,6 @@ abstract class DefaultFluidRendererHdrMixin {
     ) {
         this.metallum$fluidState = fluidState;
         this.metallum$fluidLightEmission = fluidState.createLegacyBlock().getLightEmission();
-        SodiumRainExposureSnapshot snapshot =
-                ((SodiumRainExposureSnapshotAccess) (Object) slice).metallum$getRainExposureSnapshot();
-        // Fail open when Sodium's asynchronous snapshot is unavailable: preserve the exact
-        // vanilla light coordinate rather than darkening a potentially open water surface.
-        this.metallum$fluidSkyExposed = snapshot == null
-                || snapshot.canSeeSky(pos.getX(), pos.getY() + 1, pos.getZ());
     }
 
     @Inject(
@@ -89,20 +76,40 @@ abstract class DefaultFluidRendererHdrMixin {
     ) {
         boolean water = this.metallum$fluidLightEmission == 0
                 && fluidIsWater(this.metallum$fluidState);
-        if (water && !this.metallum$fluidSkyExposed) {
-            // Advanced water optics use the sky coordinate as their exposure signal. Clear only
-            // its upper lightmap half for a roofed/cave column; block-light remains untouched.
-            for (ChunkVertexEncoder.Vertex vertex : this.vertices) {
-                vertex.light &= 0x0000ffff;
-            }
-        }
+        // Preserve Sodium's propagated vanilla skylight. A binary motion-blocking heightmap
+        // test here used to clear the sky half for every water quad below any overhead block,
+        // projecting an exact block-shaped dark patch onto otherwise continuous water.
         SodiumHdrSemantic.tagQuad(
                 this.vertices,
                 this.metallum$fluidLightEmission,
                 this.metallum$fluidLightEmission > 0,
                 water
                         ? SodiumHdrSemantic.SURFACE_CLASS_WATER
-                        : SodiumHdrSemantic.SURFACE_CLASS_NONE
+                        : SodiumHdrSemantic.SURFACE_CLASS_NONE,
+                false,
+                0,
+                reflectionFace(facing),
+                GiReceiverRuntime.isRequested() ? giAxisFace(facing) : 0
+        );
+    }
+
+    @Unique
+    private static int reflectionFace(final ModelQuadFacing facing) {
+        if (facing == null || !facing.isAligned()) {
+            return 0;
+        }
+        var normal = facing.getAlignedNormal();
+        return VoxelReflectionFace.forNormal(normal.x(), normal.y(), normal.z());
+    }
+
+    @Unique
+    private static int giAxisFace(final ModelQuadFacing facing) {
+        if (facing == null || !facing.isAligned()) {
+            return 0;
+        }
+        var normal = facing.getAlignedNormal();
+        return VoxelReflectionFace.forAxisAlignedUnitNormal(
+                normal.x(), normal.y(), normal.z()
         );
     }
 

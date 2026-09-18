@@ -1,6 +1,11 @@
 package com.metallum.client.benchmark;
 
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
+import com.metallum.client.metalfx.BenchmarkScalingMode;
+import com.metallum.client.gi.live.GiLiveGpuResources;
+import com.metallum.client.gi.source.GiDirectSourceGpuResources;
+
+import java.util.List;
 
 public final class BenchmarkWindowContractTests {
     private BenchmarkWindowContractTests() {
@@ -10,6 +15,10 @@ public final class BenchmarkWindowContractTests {
         acceptsHiDpiLogicalWindowForExactBackingFramebuffer();
         rejectsWrongBackingFramebuffer();
         rejectsNonLiveLogicalWindow();
+        retriesInactiveBenchmarkWindowFocusWithoutSpammingActiveRuns();
+        closesNativeTimingOnTheTickAfterTheLastMeasuredSubmission();
+        emitsFrozenEvidenceOnlyAfterRouteApply();
+        acceptsOnlyOneFrozenOffModeForG4();
         acceptsRequiredOnGlassGeneratedDelta();
         rejectsInsufficientOrRegressingGeneratedCounter();
         derivesMonotonicFiTransportCounterDelta();
@@ -18,6 +27,21 @@ public final class BenchmarkWindowContractTests {
         acceptsQuantizedProMotionCadenceByAggregateMean();
         rejectsSlowOrSparseFiCadenceAndLateTails();
         validatesOnlyRuntimeGateFallbackReasons();
+        requiresStableG6OrbitGenerationAndLatencyEvidence();
+        requiresIndependentG6MutationGenerationAndSampleEvidence();
+        acceptsG6ClearWithoutRestoringRouteClock();
+        requiresNewCurrentG6TerrainBindingAfterChunkReload();
+        scopesG6TerrainQueueGateToBindingRecovery();
+        validatesExactG6MatrixFinalCensus();
+        keepsTeleportAllCascadeStabilizationSeparateFromTheNearSla();
+        keepsNetherReturnFullFieldSerializationBounded();
+        requiresSufficientG6MatrixRecoveryWindows();
+        requiresSufficientG6MatrixScrollWindows();
+        acceptsNearOnlyCoverageForRapidScrollAndTeleportOutHandoff();
+        requiresExactGiVisualProbeScheduleAndSeparatedTransportPath();
+        requiresExactAndCausalGiVisualProbeDirectReceipt();
+        requiresSampleableColoredGiVisualProbeFieldReceipt();
+        boundsGiVisualProbeStaleFieldRetry();
         System.out.println("Benchmark window contract tests passed");
     }
 
@@ -37,6 +61,47 @@ public final class BenchmarkWindowContractTests {
         require(!MetalFxBenchmarkController.hasExactTargetFramebuffer(
                         3024, 1964, 3024, 1964, 0, 982),
                 "zero-width logical window must fail the benchmark contract");
+    }
+
+    private static void retriesInactiveBenchmarkWindowFocusWithoutSpammingActiveRuns() {
+        require(MetalFxBenchmarkController.shouldRequestBenchmarkWindowFocus(false, 0)
+                        && MetalFxBenchmarkController.shouldRequestBenchmarkWindowFocus(false, 30)
+                        && !MetalFxBenchmarkController.shouldRequestBenchmarkWindowFocus(false, 29),
+                "an inactive benchmark window must receive bounded focus retries");
+        require(!MetalFxBenchmarkController.shouldRequestBenchmarkWindowFocus(true, 0)
+                        && !MetalFxBenchmarkController.shouldRequestBenchmarkWindowFocus(true, 30),
+                "an already active benchmark window must not receive focus requests");
+    }
+
+    private static void closesNativeTimingOnTheTickAfterTheLastMeasuredSubmission() {
+        require(MetalFxBenchmarkController.shouldCloseBenchmarkTiming(true, 0),
+                "the first MEASURE_END boundary tick must close native timing");
+        require(!MetalFxBenchmarkController.shouldCloseBenchmarkTiming(false, 0)
+                        && !MetalFxBenchmarkController.shouldCloseBenchmarkTiming(true, 1),
+                "native timing must close neither on MEASURE_START nor twice");
+    }
+
+    private static void emitsFrozenEvidenceOnlyAfterRouteApply() {
+        require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(false, false, true),
+                "server freeze evidence must not precede ROUTE_APPLY");
+        require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, false, false),
+                "server freeze evidence requires an observed frozen server");
+        require(MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, false, true),
+                "server freeze evidence must follow ROUTE_APPLY after server confirmation");
+        require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, true, true),
+                "server freeze evidence must be emitted exactly once");
+    }
+
+    private static void acceptsOnlyOneFrozenOffModeForG4() {
+        require(MetalFxBenchmarkController.isFrozenG4Sequence(
+                        List.of(BenchmarkScalingMode.OFF)),
+                "one OFF segment must be the only frozen G4 sequence");
+        require(!MetalFxBenchmarkController.isFrozenG4Sequence(List.of())
+                        && !MetalFxBenchmarkController.isFrozenG4Sequence(List.of(
+                        BenchmarkScalingMode.OFF, BenchmarkScalingMode.OFF))
+                        && !MetalFxBenchmarkController.isFrozenG4Sequence(List.of(
+                        BenchmarkScalingMode.QUALITY)),
+                "G4 admitted a missing, changing, or scaled benchmark sequence");
     }
 
     private static void acceptsRequiredOnGlassGeneratedDelta() {
@@ -143,6 +208,346 @@ public final class BenchmarkWindowContractTests {
                         FrameInterpolationRuntimeStatus.Reason.COORDINATOR_NOT_INSTALLED
                 ),
                 "unsupported or uninstalled FI was mislabeled as a runtime safe fallback");
+    }
+
+    private static void requiresIndependentG6MutationGenerationAndSampleEvidence() {
+        require(MetalFxBenchmarkController.g6MatrixMutationRecovered(41L, 42L, 7L, 8L),
+                "one new field generation and one class sample must close a G6 mutation");
+        require(!MetalFxBenchmarkController.g6MatrixMutationRecovered(41L, 41L, 7L, 8L),
+                "a prior mutation's generation must not close the next G6 mutation");
+        require(!MetalFxBenchmarkController.g6MatrixMutationRecovered(41L, 42L, 7L, 7L),
+                "a generation advance without the expected latency sample must fail");
+        require(!MetalFxBenchmarkController.g6MatrixMutationRecovered(41L, 43L, 7L, 9L),
+                "coalesced or unrelated extra samples must not qualify one matrix mutation");
+    }
+
+    private static void requiresStableG6OrbitGenerationAndLatencyEvidence() {
+        require(MetalFxBenchmarkController.g6MatrixOrbitStable(
+                        41L, 41L, 2L, 2L, 3L, 3L, 4L, 4L, 5L, 5L),
+                "camera-only orbit must preserve field generation and every latency class");
+        require(!MetalFxBenchmarkController.g6MatrixOrbitStable(
+                        41L, 42L, 2L, 2L, 3L, 3L, 4L, 4L, 5L, 5L),
+                "an orbit-triggered field rebuild must fail the stationary-source control");
+        require(!MetalFxBenchmarkController.g6MatrixOrbitStable(
+                        41L, 41L, 2L, 2L, 3L, 3L, 4L, 5L, 5L, 5L),
+                "an orbit-triggered latency sample must fail the stationary-source control");
+    }
+
+    private static void acceptsG6ClearWithoutRestoringRouteClock() {
+        require(MetalFxBenchmarkController.g6MatrixClearVisible(true, 0.0F),
+                "CLEAR must become visible after its single weather mutation");
+        require(!MetalFxBenchmarkController.g6MatrixClearVisible(false, 0.0F)
+                        && !MetalFxBenchmarkController.g6MatrixClearVisible(true, 0.25F),
+                "CLEAR must still reject another dimension or incomplete weather clearing");
+    }
+
+    private static void requiresNewCurrentG6TerrainBindingAfterChunkReload() {
+        require(MetalFxBenchmarkController.g6MatrixTerrainReloadRecovered(
+                        100L, 3L, 101L, 3L, 3L, 1, true, true, true),
+                "F3+A must observe a newer exact current terrain bind on the same device");
+        require(!MetalFxBenchmarkController.g6MatrixTerrainReloadRecovered(
+                        100L, 3L, 100L, 3L, 3L, 1, true, true, true),
+                "a pre-F3+A terrain receipt must not qualify the reload");
+        require(!MetalFxBenchmarkController.g6MatrixTerrainReloadRecovered(
+                        100L, 3L, 101L, 4L, 4L, 1, true, true, true),
+                "F3+A must not silently cross a device generation");
+        require(!MetalFxBenchmarkController.g6MatrixTerrainReloadRecovered(
+                        100L, 3L, 101L, 3L, 3L, 0, true, true, true),
+                "a fallback terrain bind must fail the F3+A receipt");
+    }
+
+    private static void scopesG6TerrainQueueGateToBindingRecovery() {
+        require(MetalFxBenchmarkController.g6MatrixTerrainQueueGateSatisfied(false, false),
+                "field/dimension recovery must not wait on an unrelated terrain queue");
+        require(MetalFxBenchmarkController.g6MatrixTerrainQueueGateSatisfied(true, true)
+                        && !MetalFxBenchmarkController.g6MatrixTerrainQueueGateSatisfied(
+                        true, false),
+                "terrain reload recovery must still require a drained terrain queue");
+    }
+
+    private static void validatesExactG6MatrixFinalCensus() {
+        MetalFxBenchmarkController.G6MatrixFinalCensus clean = g6FinalCensus(
+                0L, 100L, true, 24_000_000L, 1L, true);
+        require(clean.queueConverged() && clean.accountingStable()
+                        && clean.latencyCensusComplete() && clean.passed(),
+                "an exact drained/stable/all-SLA final census must pass");
+        require(!g6FinalCensus(1L, 100L, true, 24_000_000L, 1L, true).passed()
+                        && !g6FinalCensus(
+                        0L, 99L, true, 24_000_000L, 1L, true).passed()
+                        && !g6FinalCensus(
+                        0L, 100L, true, 24_000_001L, 1L, true).passed()
+                        && !g6FinalCensus(
+                        0L, 100L, true, 24_000_000L, 0L, true).passed()
+                        && !g6FinalCensus(
+                        0L, 100L, true, 24_000_000L, 1L, false).passed(),
+                "pending/misalgebra/accounting/sample/SLA failures must remain fail-closed");
+    }
+
+    private static MetalFxBenchmarkController.G6MatrixFinalCensus g6FinalCensus(
+            final long queuePending,
+            final long queueQueued,
+            final boolean queueAlgebra,
+            final long accountedCurrent,
+            final long fullResetSamples,
+            final boolean fullResetSla
+    ) {
+        return new MetalFxBenchmarkController.G6MatrixFinalCensus(
+                queuePending, 0L, queueQueued, 90L, 10L, queueAlgebra,
+                accountedCurrent, 24_000_000L, 24_000_000L,
+                1L, 1L, 2L, true,
+                2L, 2L, 3L, true,
+                3L, 8L, 12L, true,
+                fullResetSamples, 20L, 30L, fullResetSla
+        );
+    }
+
+    private static void requiresSufficientG6MatrixRecoveryWindows() {
+        require(g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1630, 1830,
+                        2170, 2430, 2620, 3090),
+                "the canonical G6 matrix must satisfy every recovery window floor");
+        require(!g6RecoveryWindows(
+                        490, 759, 1030, 1230, 1430, 1630, 1830,
+                        2170, 2430, 2620, 3090)
+                        && !g6RecoveryWindows(
+                        490, 760, 1029, 1230, 1430, 1630, 1830,
+                        2170, 2430, 2620, 3090),
+                "both reload recovery windows must preserve the 270-frame floor");
+        require(!g6RecoveryWindows(
+                        490, 760, 1030, 1229, 1430, 1630, 1830,
+                        2170, 2430, 2620, 3090)
+                        && !g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1429, 1630, 1830,
+                        2170, 2430, 2620, 3090)
+                        && !g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1629, 1830,
+                        2170, 2430, 2620, 3090)
+                        && !g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1630, 1829,
+                        2170, 2430, 2620, 3090),
+                "static and clear-to-stream recovery windows must preserve 200 frames");
+        require(!g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1630, 1830,
+                        2170, 2429, 2620, 3090)
+                        && !g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1630, 1830,
+                        2170, 2430, 2619, 3090)
+                        && !g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1630, 1830,
+                        2170, 2430, 2620, 3089)
+                        && !g6RecoveryWindows(
+                        490, 760, 1030, 1230, 1430, 1630, 1830,
+                        2170, 2430, 2620, 3131),
+                "teleport/reset handoff must preserve 260/190 frames and dimension windows 470");
+    }
+
+    private static void requiresSufficientG6MatrixScrollWindows() {
+        require(MetalFxBenchmarkController.g6MatrixScrollWindowsSufficient(
+                        1830, 40, 8, 2170),
+                "canonical rapid scroll must preserve near-step and final convergence windows");
+        require(!MetalFxBenchmarkController.g6MatrixScrollWindowsSufficient(
+                        1830, 39, 8, 2170)
+                        && !MetalFxBenchmarkController.g6MatrixScrollWindowsSufficient(
+                        1830, 61, 8, 2340)
+                        && !MetalFxBenchmarkController.g6MatrixScrollWindowsSufficient(
+                        1830, 40, 8, 2169)
+                        && !MetalFxBenchmarkController.g6MatrixScrollWindowsSufficient(
+                        1830, 40, 7, 2170),
+                "rapid scroll accepted an unsafe cadence, tail, or topology");
+    }
+
+    private static void keepsTeleportAllCascadeStabilizationSeparateFromTheNearSla() {
+        int teleport = MetalFxBenchmarkController
+                .g6MatrixAllCascadeStabilizationTimeoutFrames(true, false);
+        int dimension = MetalFxBenchmarkController
+                .g6MatrixAllCascadeStabilizationTimeoutFrames(false, true);
+        int regular = MetalFxBenchmarkController
+                .g6MatrixAllCascadeStabilizationTimeoutFrames(false, false);
+        require(teleport == 260 && dimension == 470 && regular == 180,
+                "reset actions lost their harness-only all-cascade stabilization budgets");
+    }
+
+    private static void keepsNetherReturnFullFieldSerializationBounded() {
+        require(!MetalFxBenchmarkController.g6MatrixPreActionCleanWaitExpired(3090, 3090)
+                        && !MetalFxBenchmarkController.g6MatrixPreActionCleanWaitExpired(3154, 3090)
+                        && MetalFxBenchmarkController.g6MatrixPreActionCleanWaitExpired(3155, 3090),
+                "NETHER_RETURN full-field serialization lost its inclusive 64-frame bound");
+    }
+
+    private static void acceptsNearOnlyCoverageForRapidScrollAndTeleportOutHandoff() {
+        require(MetalFxBenchmarkController.g6MatrixRecoveryCoverageReady(1, true, true)
+                        && MetalFxBenchmarkController.g6MatrixRecoveryCoverageReady(3, true, true)
+                        && !MetalFxBenchmarkController.g6MatrixRecoveryCoverageReady(2, false, true),
+                "rapid scroll and TELEPORT_OUT handoff did not require exact near coverage");
+        require(MetalFxBenchmarkController.g6MatrixRecoveryCoverageReady(7, false, false)
+                        && !MetalFxBenchmarkController.g6MatrixRecoveryCoverageReady(7, true, false)
+                        && !MetalFxBenchmarkController.g6MatrixRecoveryCoverageReady(1, false, false),
+                "TELEPORT_RETURN or dimension recovery accepted a partial or in-flight field");
+    }
+
+    private static void requiresExactGiVisualProbeScheduleAndSeparatedTransportPath() {
+        require(MetalFxBenchmarkController.visualProbeScheduleIsExact(
+                        300, 450, 690, 540, 690,
+                        0.75D, 12.0F, 3.0F, 120, new int[] {570, 600, 630, 660}),
+                "GI visual probe must retain its four scheduled motion captures");
+        require(!MetalFxBenchmarkController.visualProbeScheduleIsExact(
+                        300, 450, 690, 540, 691,
+                        0.75D, 12.0F, 3.0F, 120, new int[] {570, 600, 630, 660}),
+                "GI visual probe accepted a changed movement interval");
+        require(!MetalFxBenchmarkController.visualProbeScheduleIsExact(
+                        300, 450, 690, 540, 690,
+                        0.0D, 12.0F, 3.0F, 120, new int[] {570, 600, 630, 660}),
+                "GI visual probe accepted a motion schedule without translation");
+        require(MetalFxBenchmarkController.visualProbeOneBouncePathIsSeparated()
+                        && MetalFxBenchmarkController.visualProbeTransportRayIsExact(),
+                "GI visual probe must prove an occluded direct path and a lattice-valid red bounce");
+        require(!MetalFxBenchmarkController.visualProbeDirectDdaPathClear(
+                        82, 77, -110, 80, 75, -112)
+                        && MetalFxBenchmarkController.visualProbeDirectDdaPathClear(
+                        84, 77, -110, 80, 75, -112)
+                        && MetalFxBenchmarkController.visualProbeSupercoverPathClear(
+                        82, 77, -110, 84, 77, -110)
+                        && MetalFxBenchmarkController.visualProbeLegacyDiagonalPathIsBlocked(),
+                "GI visual probe must use the exact k=2 receiver shadow, red direct path, and open transport cell");
+        require(!MetalFxBenchmarkController.visualProbeReadinessDeadlineExpired(560, 300)
+                        && MetalFxBenchmarkController.visualProbeReadinessDeadlineExpired(561, 300),
+                "GI visual probe readiness barrier must close before the first absolute capture");
+    }
+
+    private static void requiresSampleableColoredGiVisualProbeFieldReceipt() {
+        GiLiveGpuResources.DebugProbeSample[] samples = {
+                debugProbeSample(0, 82, 76, -110, 0.2F, 0.16F, 0.12F),
+                debugProbeSample(0, 82, 77, -110, 0.3F, 0.22F, 0.14F),
+                debugProbeSample(0, 82, 78, -110, 0.1F, 0.08F, 0.05F),
+                debugProbeSample(0, 84, 77, -110, 0.4F, 0.05F, 0.01F),
+                debugProbeSample(0, 81, 76, -111, 0.0F, 0.0F, 0.0F),
+                debugProbeSample(1, 82, 77, -110, 0.01F, 0.01F, 0.01F),
+                debugProbeSample(2, 82, 77, -110, 0.01F, 0.01F, 0.01F),
+        };
+        GiLiveGpuResources.DebugProbeCapture capture = new GiLiveGpuResources.DebugProbeCapture(
+                1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 0L,
+                new int[9], 7, 7, 0x7F, samples
+        );
+        require(MetalFxBenchmarkController.visualProbeGpuFieldProbePasses(capture),
+                "GI visual GPU field receipt must accept a raw red bounce at its white receiver");
+        samples[0] = debugProbeSample(0, 82, 76, -110, 0.0F, 0.0F, 0.0F);
+        samples[2] = debugProbeSample(0, 82, 78, -110, 0.0F, 0.0F, 0.0F);
+        samples[3] = debugProbeSample(0, 84, 77, -110, 0.0F, 0.0F, 0.0F);
+        GiLiveGpuResources.DebugProbeCapture exactReceiverCapture = new GiLiveGpuResources.DebugProbeCapture(
+                1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 0L,
+                new int[9], 7, 7, 0x7F, samples
+        );
+        require(MetalFxBenchmarkController.visualProbeGpuFieldProbePasses(exactReceiverCapture),
+                "GI visual GPU field receipt rejected the exact receiver for adjacent or source controls");
+        samples[1] = debugProbeSample(0, 82, 77, -110, 0.04F, 0.05F, 0.01F);
+        GiLiveGpuResources.DebugProbeCapture nonRedCapture = new GiLiveGpuResources.DebugProbeCapture(
+                1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 0L,
+                new int[9], 7, 7, 0x7F, samples
+        );
+        require(!MetalFxBenchmarkController.visualProbeGpuFieldProbePasses(nonRedCapture),
+                "GI visual GPU field receipt accepted a white receiver without raw red dominance");
+    }
+
+    private static void requiresExactAndCausalGiVisualProbeDirectReceipt() {
+        GiDirectSourceGpuResources.DebugProbeSample[] samples = {
+                directProbeSample(82, 77, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_CONTENT),
+                directProbeSample(84, 77, -110, 0.6F, 0.1F, 0.02F, 1.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_CONTENT),
+                directProbeSample(81, 76, -111, 0.0F, 0.0F, 0.0F, 0.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_CONTENT),
+                directProbeSample(83, 77, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_EMPTY),
+                directProbeSample(80, 75, -112, 0.0F, 0.0F, 0.0F, 0.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_CONTENT),
+                directProbeSample(82, 76, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_CONTENT),
+                directProbeSample(82, 78, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                        GiDirectSourceGpuResources.GEOMETRY_CONTENT)
+        };
+        GiDirectSourceGpuResources.DebugProbeCapture capture = new GiDirectSourceGpuResources.DebugProbeCapture(
+                1L, 1L, 1L, 1L, 1L, 1L, new int[] {0, 0, 0}, 0x7F, samples
+        );
+        require(MetalFxBenchmarkController.visualProbeGpuDirectProbePasses(capture),
+                "G3 direct receipt must accept known EMPTY and causal red source evidence");
+
+        samples[3] = directProbeSample(83, 77, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                GiDirectSourceGpuResources.GEOMETRY_UNKNOWN);
+        require(!MetalFxBenchmarkController.visualProbeGpuDirectProbePasses(new GiDirectSourceGpuResources.DebugProbeCapture(
+                        1L, 1L, 1L, 1L, 1L, 1L, new int[] {0, 0, 0}, 0x7F, samples)),
+                "G3 direct receipt accepted UNKNOWN as empty air");
+
+        samples[3] = directProbeSample(83, 77, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                GiDirectSourceGpuResources.GEOMETRY_FALLBACK);
+        require(!MetalFxBenchmarkController.visualProbeGpuDirectProbePasses(new GiDirectSourceGpuResources.DebugProbeCapture(
+                        1L, 1L, 1L, 1L, 1L, 1L, new int[] {0, 0, 0}, 0x7F, samples)),
+                "G3 direct receipt accepted FALLBACK as empty air");
+
+        samples[3] = directProbeSample(83, 77, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                GiDirectSourceGpuResources.GEOMETRY_EMPTY);
+        samples[0] = directProbeSample(82, 77, -110, 0.01F, 0.0F, 0.0F, 1.0F,
+                GiDirectSourceGpuResources.GEOMETRY_CONTENT);
+        require(!MetalFxBenchmarkController.visualProbeGpuDirectProbePasses(new GiDirectSourceGpuResources.DebugProbeCapture(
+                        1L, 1L, 1L, 1L, 1L, 1L, new int[] {0, 0, 0}, 0x7F, samples)),
+                "G3 direct receipt accepted direct light on the occluded white receiver");
+
+        samples[0] = directProbeSample(82, 77, -110, 0.0F, 0.0F, 0.0F, 0.0F,
+                GiDirectSourceGpuResources.GEOMETRY_CONTENT);
+        samples[1] = directProbeSample(84, 77, -110, 0.0F, 0.0F, 0.0F, 1.0F,
+                GiDirectSourceGpuResources.GEOMETRY_CONTENT);
+        require(!MetalFxBenchmarkController.visualProbeGpuDirectProbePasses(new GiDirectSourceGpuResources.DebugProbeCapture(
+                        1L, 1L, 1L, 1L, 1L, 1L, new int[] {0, 0, 0}, 0x7F, samples)),
+                "G3 direct receipt accepted a zero red reflector");
+    }
+
+    private static GiDirectSourceGpuResources.DebugProbeSample directProbeSample(
+            final int worldX, final int worldY, final int worldZ,
+            final float red, final float green, final float blue, final float alpha,
+            final int geometry
+    ) {
+        return new GiDirectSourceGpuResources.DebugProbeSample(
+                worldX, worldY, worldZ, 0, 0, 0, red, green, blue, alpha, geometry, 1
+        );
+    }
+
+    private static void boundsGiVisualProbeStaleFieldRetry() {
+        require(MetalFxBenchmarkController.visualProbeGpuFieldProbeShouldRetry(-3, 1)
+                        && MetalFxBenchmarkController.visualProbeGpuFieldProbeShouldRetry(-3, 2)
+                        && !MetalFxBenchmarkController.visualProbeGpuFieldProbeShouldRetry(-3, 3)
+                        && !MetalFxBenchmarkController.visualProbeGpuFieldProbeShouldRetry(-2, 1),
+                "GI visual GPU field probe must retry only bounded STALE readbacks, never BUSY polls");
+    }
+
+    private static GiLiveGpuResources.DebugProbeSample debugProbeSample(
+            final int cascade, final int worldX, final int worldY, final int worldZ,
+            final float red, final float green, final float blue
+    ) {
+        return new GiLiveGpuResources.DebugProbeSample(
+                cascade, worldX, worldY, worldZ, 0, 0, 0, 0,
+                new float[] {red, 0.0F, 0.0F, 0.0F, green, 0.0F, 0.0F, 0.0F,
+                        blue, 0.0F, 0.0F, 0.0F},
+                255, 255
+        );
+    }
+
+    private static boolean g6RecoveryWindows(
+            final long chunkReloadFrame,
+            final long resourceReloadFrame,
+            final long dayFrame,
+            final long nightFrame,
+            final long rainFrame,
+            final long clearFrame,
+            final long streamStartFrame,
+            final long teleportFrame,
+            final long teleportReturnFrame,
+            final long netherEnterFrame,
+            final long netherReturnFrame
+    ) {
+        return MetalFxBenchmarkController.g6MatrixRecoveryWindowsSufficient(
+                chunkReloadFrame, resourceReloadFrame, dayFrame, nightFrame,
+                rainFrame, clearFrame, streamStartFrame, teleportFrame,
+                teleportReturnFrame, netherEnterFrame, netherReturnFrame, 3600
+        );
     }
 
     private static void require(final boolean condition, final String message) {

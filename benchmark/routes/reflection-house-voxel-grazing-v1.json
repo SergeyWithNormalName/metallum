@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "reflection-house-voxel-grazing-v1",
+  "fixture": {
+    "id": "reflection-house-voxel-v1",
+    "sha256": "6c2d00ee96ecfead1b0dac27d21b95323b02980e84084e3dd79d718c4045d2bb"
+  },
+  "player": {
+    "name": "MetallumBench",
+    "uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9"
+  },
+  "dimension": "minecraft:overworld",
+  "position": [238.805, 65.0, 140.183],
+  "rotation": {
+    "yaw": -133.5,
+    "pitch": 2.0
+  },
+  "camera": "FIRST_PERSON",
+  "clock": {
+    "total_ticks": 12000,
+    "paused": true
+  },
+  "weather": {
+    "mode": "clear",
+    "frozen": true,
+    "clear_duration_ticks": 6000
+  },
+  "simulation": {
+    "frozen": true
+  },
+  "readiness": {
+    "stable_frames": 120,
+    "timeout_frames": 1800,
+    "position_epsilon": 0.0001,
+    "angle_epsilon": 0.001
+  }
+}

@@ -1,8 +1,10 @@
 package com.metallum.client.voxel;
 
+import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -26,61 +28,89 @@ public final class VoxelShapeEncoder {
             final VoxelSubdivision subdivision,
             final VoxelMaterialDescriptor material
     ) {
-        Objects.requireNonNull(shape, "shape");
-        Objects.requireNonNull(subdivision, "subdivision");
         Objects.requireNonNull(material, "material");
-
+        Scratch scratch = new Scratch();
+        encodeInto(shape, subdivision, scratch);
         int cells = subdivision.cellCount();
-        double[] coverage = new double[cells];
-        int shapeProxyId = VoxelShapeRegistry.FAST_PATH_ID;
-        if (!shape.isEmpty()) {
-            List<Box> boxes = new ArrayList<>();
-            shape.forAllBoxes((minX, minY, minZ, maxX, maxY, maxZ) -> {
-                Box clipped = Box.clipped(minX, minY, minZ, maxX, maxY, maxZ);
-                if (clipped != null) {
-                    boxes.add(clipped);
-                }
-            });
-            for (Box box : boxes) {
-                rasterize(box, subdivision, coverage);
-            }
-            if (!boxes.isEmpty() && !allAlignedToQuarter(boxes)) {
-                List<VoxelShapeRegistry.Box> registryBoxes = new ArrayList<>(boxes.size());
-                for (Box b : boxes) {
-                    registryBoxes.add(new VoxelShapeRegistry.Box(
-                            (float) b.minX, (float) b.minY, (float) b.minZ,
-                            (float) b.maxX, (float) b.maxY, (float) b.maxZ
-                    ));
-                }
-                shapeProxyId = VoxelShapeRegistry.register(registryBoxes);
-            }
-        }
-
-        long occupancyMask = 0L;
         byte[] coverageBytes = new byte[cells];
         byte[] opticalBytes = new byte[cells];
-        double aggregateCoverage = 0.0d;
         for (int index = 0; index < cells; index++) {
-            double fraction = Math.min(1.0d, coverage[index]);
-            aggregateCoverage += fraction;
+            double fraction = Math.min(1.0d, scratch.coverage[index]);
             if (fraction <= EPSILON) {
                 continue;
             }
-            occupancyMask |= 1L << index;
             coverageBytes[index] = (byte) quantizeUp(fraction);
             opticalBytes[index] = (byte) quantizeUp(fraction * material.opacity());
         }
-        aggregateCoverage /= cells;
         return new EncodedShape(
                 subdivision,
                 material,
-                occupancyMask,
-                shapeProxyId,
+                scratch.occupancyMask,
+                scratch.shapeProxyId,
                 coverageBytes,
                 opticalBytes,
-                quantizeUp(aggregateCoverage),
-                quantizeUp(aggregateCoverage * material.opacity())
+                scratch.coverageByte,
+                quantizeUp(scratch.aggregateCoverage * material.opacity())
         );
+    }
+
+    /**
+     * Allocation-bounded encoder used by Sodium section workers. The result remains in the
+     * caller-owned scratch object and is overwritten by the next call.
+     */
+    static void encodeInto(
+            final VoxelShape shape,
+            final VoxelSubdivision subdivision,
+            final Scratch scratch
+    ) {
+        Objects.requireNonNull(shape, "shape");
+        Objects.requireNonNull(subdivision, "subdivision");
+        Objects.requireNonNull(scratch, "scratch");
+
+        int cells = subdivision.cellCount();
+        scratch.reset(cells);
+        if (shape.isEmpty()) {
+            return;
+        }
+        if (shape == Shapes.block()) {
+            Arrays.fill(scratch.coverage, 0, cells, 1.0d);
+            scratch.occupancyMask = subdivision.fullMask();
+            scratch.aggregateCoverage = 1.0d;
+            scratch.coverageByte = 255;
+            return;
+        }
+        shape.forAllBoxes(scratch);
+        if (scratch.boxCount != 0) {
+            for (int boxIndex = 0; boxIndex < scratch.boxCount; boxIndex++) {
+                rasterize(scratch, boxIndex, subdivision);
+            }
+            if (!allAlignedToQuarter(scratch)) {
+                List<VoxelShapeRegistry.Box> registryBoxes = new ArrayList<>(scratch.boxCount);
+                for (int boxIndex = 0; boxIndex < scratch.boxCount; boxIndex++) {
+                    int base = boxIndex * Scratch.BOX_COMPONENTS;
+                    registryBoxes.add(new VoxelShapeRegistry.Box(
+                            (float) scratch.boxBounds[base],
+                            (float) scratch.boxBounds[base + 1],
+                            (float) scratch.boxBounds[base + 2],
+                            (float) scratch.boxBounds[base + 3],
+                            (float) scratch.boxBounds[base + 4],
+                            (float) scratch.boxBounds[base + 5]
+                    ));
+                }
+                scratch.shapeProxyId = VoxelShapeRegistry.register(registryBoxes);
+            }
+        }
+
+        double aggregateCoverage = 0.0d;
+        for (int index = 0; index < cells; index++) {
+            double fraction = Math.min(1.0d, scratch.coverage[index]);
+            aggregateCoverage += fraction;
+            if (fraction > EPSILON) {
+                scratch.occupancyMask |= 1L << index;
+            }
+        }
+        scratch.aggregateCoverage = aggregateCoverage / cells;
+        scratch.coverageByte = quantizeUp(scratch.aggregateCoverage);
     }
 
     /** Compatibility shortcut for callers that only need conservative opaque occupancy. */
@@ -120,10 +150,15 @@ public final class VoxelShapeEncoder {
         return false;
     }
 
-    private static boolean allAlignedToQuarter(final List<Box> boxes) {
-        for (Box b : boxes) {
-            if (!isQuarterMultiple(b.minX) || !isQuarterMultiple(b.minY) || !isQuarterMultiple(b.minZ)
-                    || !isQuarterMultiple(b.maxX) || !isQuarterMultiple(b.maxY) || !isQuarterMultiple(b.maxZ)) {
+    private static boolean allAlignedToQuarter(final Scratch scratch) {
+        for (int boxIndex = 0; boxIndex < scratch.boxCount; boxIndex++) {
+            int base = boxIndex * Scratch.BOX_COMPONENTS;
+            if (!isQuarterMultiple(scratch.boxBounds[base])
+                    || !isQuarterMultiple(scratch.boxBounds[base + 1])
+                    || !isQuarterMultiple(scratch.boxBounds[base + 2])
+                    || !isQuarterMultiple(scratch.boxBounds[base + 3])
+                    || !isQuarterMultiple(scratch.boxBounds[base + 4])
+                    || !isQuarterMultiple(scratch.boxBounds[base + 5])) {
                 return false;
             }
         }
@@ -136,31 +171,41 @@ public final class VoxelShapeEncoder {
     }
 
     private static void rasterize(
-            final Box box,
-            final VoxelSubdivision subdivision,
-            final double[] coverage
+            final Scratch scratch,
+            final int boxIndex,
+            final VoxelSubdivision subdivision
     ) {
+        int base = boxIndex * Scratch.BOX_COMPONENTS;
+        double minXValue = scratch.boxBounds[base];
+        double minYValue = scratch.boxBounds[base + 1];
+        double minZValue = scratch.boxBounds[base + 2];
+        double maxXValue = scratch.boxBounds[base + 3];
+        double maxYValue = scratch.boxBounds[base + 4];
+        double maxZValue = scratch.boxBounds[base + 5];
         int scale = subdivision.scale();
         double cellLength = 1.0d / scale;
         double cellVolume = cellLength * cellLength * cellLength;
-        int minX = firstCell(box.minX, scale);
-        int minY = firstCell(box.minY, scale);
-        int minZ = firstCell(box.minZ, scale);
-        int maxX = lastCell(box.maxX, scale);
-        int maxY = lastCell(box.maxY, scale);
-        int maxZ = lastCell(box.maxZ, scale);
+        int minX = firstCell(minXValue, scale);
+        int minY = firstCell(minYValue, scale);
+        int minZ = firstCell(minZValue, scale);
+        int maxX = lastCell(maxXValue, scale);
+        int maxY = lastCell(maxYValue, scale);
+        int maxZ = lastCell(maxZValue, scale);
         for (int z = minZ; z <= maxZ; z++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int x = minX; x <= maxX; x++) {
-                    double volume = intersectionLength(box.minX, box.maxX, x * cellLength,
+                    double volume = intersectionLength(minXValue, maxXValue, x * cellLength,
                             (x + 1) * cellLength)
-                            * intersectionLength(box.minY, box.maxY, y * cellLength,
+                            * intersectionLength(minYValue, maxYValue, y * cellLength,
                             (y + 1) * cellLength)
-                            * intersectionLength(box.minZ, box.maxZ, z * cellLength,
+                            * intersectionLength(minZValue, maxZValue, z * cellLength,
                             (z + 1) * cellLength);
                     if (volume > EPSILON) {
                         int index = subdivision.cellIndex(x, y, z);
-                        coverage[index] = Math.min(1.0d, coverage[index] + volume / cellVolume);
+                        scratch.coverage[index] = Math.min(
+                                1.0d,
+                                scratch.coverage[index] + volume / cellVolume
+                        );
                     }
                 }
             }
@@ -195,7 +240,7 @@ public final class VoxelShapeEncoder {
         return Math.min(255, Math.max(1, (int) Math.ceil(normalized * 255.0d - EPSILON)));
     }
 
-    /** Immutable encoded output. Arrays are copied at its boundary to preserve determinism. */
+    /** Immutable encoded output. The constructor takes ownership of freshly allocated arrays. */
     public static final class EncodedShape {
         private final VoxelSubdivision subdivision;
         private final VoxelMaterialDescriptor material;
@@ -220,8 +265,8 @@ public final class VoxelShapeEncoder {
             this.material = material;
             this.occupancyMask = occupancyMask;
             this.shapeProxyId = shapeProxyId;
-            this.coverageBytes = coverageBytes.clone();
-            this.opticalBytes = opticalBytes.clone();
+            this.coverageBytes = coverageBytes;
+            this.opticalBytes = opticalBytes;
             this.coverageByte = coverageByte;
             this.opticalByte = opticalByte;
         }
@@ -285,8 +330,41 @@ public final class VoxelShapeEncoder {
         }
     }
 
-    private record Box(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
-        private static Box clipped(
+    static final class Scratch implements Shapes.DoubleLineConsumer {
+        private static final int BOX_COMPONENTS = 6;
+        private static final int INITIAL_BOX_CAPACITY = 16;
+
+        private final double[] coverage = new double[VoxelSubdivision.FOUR.cellCount()];
+        private double[] boxBounds = new double[INITIAL_BOX_CAPACITY * BOX_COMPONENTS];
+        private int boxCount;
+        private long occupancyMask;
+        private int shapeProxyId;
+        private double aggregateCoverage;
+        private int coverageByte;
+
+        long occupancyMask() {
+            return this.occupancyMask;
+        }
+
+        int shapeProxyId() {
+            return this.shapeProxyId;
+        }
+
+        int coverageByte() {
+            return this.coverageByte;
+        }
+
+        private void reset(final int cells) {
+            Arrays.fill(this.coverage, 0, cells, 0.0d);
+            this.boxCount = 0;
+            this.occupancyMask = 0L;
+            this.shapeProxyId = VoxelShapeRegistry.FAST_PATH_ID;
+            this.aggregateCoverage = 0.0d;
+            this.coverageByte = 0;
+        }
+
+        @Override
+        public void consume(
                 final double minX,
                 final double minY,
                 final double minZ,
@@ -300,12 +378,22 @@ public final class VoxelShapeEncoder {
             double clippedMaxX = Math.min(1.0d, maxX);
             double clippedMaxY = Math.min(1.0d, maxY);
             double clippedMaxZ = Math.min(1.0d, maxZ);
-            return clippedMaxX - clippedMinX > EPSILON
-                    && clippedMaxY - clippedMinY > EPSILON
-                    && clippedMaxZ - clippedMinZ > EPSILON
-                    ? new Box(clippedMinX, clippedMinY, clippedMinZ,
-                    clippedMaxX, clippedMaxY, clippedMaxZ)
-                    : null;
+            if (clippedMaxX - clippedMinX <= EPSILON
+                    || clippedMaxY - clippedMinY <= EPSILON
+                    || clippedMaxZ - clippedMinZ <= EPSILON) {
+                return;
+            }
+            int base = this.boxCount * BOX_COMPONENTS;
+            if (base == this.boxBounds.length) {
+                this.boxBounds = Arrays.copyOf(this.boxBounds, this.boxBounds.length * 2);
+            }
+            this.boxBounds[base] = clippedMinX;
+            this.boxBounds[base + 1] = clippedMinY;
+            this.boxBounds[base + 2] = clippedMinZ;
+            this.boxBounds[base + 3] = clippedMaxX;
+            this.boxBounds[base + 4] = clippedMaxY;
+            this.boxBounds[base + 5] = clippedMaxZ;
+            this.boxCount++;
         }
     }
 }

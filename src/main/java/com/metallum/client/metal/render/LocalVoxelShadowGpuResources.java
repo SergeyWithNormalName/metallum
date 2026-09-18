@@ -9,6 +9,8 @@ import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.LocalShadowSourceClass;
 import com.metallum.client.lighting.ShadowEmitterFootprint;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLBlitCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
@@ -140,6 +142,18 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
+    record DescriptorEdgeCoverage(int edge8, int edge16, int edge32, int edge64) {
+        DescriptorEdgeCoverage {
+            if (edge8 < 0 || edge16 < 0 || edge32 < 0 || edge64 < 0) {
+                throw new IllegalArgumentException("Negative L6 descriptor edge coverage");
+            }
+        }
+
+        int total() {
+            return this.edge8 + this.edge16 + this.edge32 + this.edge64;
+        }
+    }
+
     record UploadBudget(int maxPages, long maxBytes) {
         UploadBudget {
             if (maxPages <= 0 || maxBytes < LocalVoxelShadowAtlasLayout.pagePayloadBytes(64)) {
@@ -162,7 +176,6 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     private static final double EDGE_64_PROJECTED_RATIO = 0.35;
     private static final double UPGRADE_GUARD = 1.20;
     private static final double DOWNGRADE_GUARD = 0.70;
-
     private final long generation;
     private final LocalVoxelShadowLayout.Budget budget;
     private final MetalGpuBuffer paramsRing;
@@ -325,10 +338,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return Math.addExact(
                 Math.addExact(
                         LocalVoxelShadowLayout.PARAMS_BYTES,
-                        Math.multiplyExact(
-                                (long) budget.maxEntityProxies(),
-                                LocalVoxelShadowLayout.PROXY_STRIDE_BYTES
-                        )
+                        LocalVoxelShadowLayout.PROXY_PACKET_BYTES
                 ),
                 descriptorSlotBytes(budget)
         );
@@ -368,10 +378,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 (long) slot * LocalVoxelShadowLayout.PARAMS_BYTES,
                 LocalVoxelShadowLayout.PARAMS_BYTES
         ).order(ByteOrder.nativeOrder());
-        long proxySlotBytes = Math.multiplyExact(
-                (long) this.budget.maxEntityProxies(),
-                LocalVoxelShadowLayout.PROXY_STRIDE_BYTES
-        );
+        long proxySlotBytes = LocalVoxelShadowLayout.PROXY_PACKET_BYTES;
         ByteBuffer proxies = this.proxyRing.sliceStorage(
                 (long) slot * proxySlotBytes,
                 proxySlotBytes
@@ -398,7 +405,6 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 this.budget.totalVisibilityAtlasBytes()
                         / LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
         );
-
         int proxyCount = packFrameParameters(
                 params,
                 proxies,
@@ -414,6 +420,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 this.budget.maxEntityProxies(),
                 this.budget.maxSteps(),
                 Boolean.getBoolean("metallum.shadow.debug.visualize")
+        );
+        packProxyMasks(
+                proxies, lights, proxySnapshot, proxyCount,
+                frame.currentCameraPosition()
         );
 
         if (Boolean.getBoolean("metallum.shadow.debug") && (frame.frameId() % 60 == 0 || frame.frameId() < 20)) {
@@ -753,10 +763,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 || this.prepared.submitIndex() != submitIndex) {
             throw new IllegalStateException("L6 bindings are not ready for this frame");
         }
-        long proxySlotBytes = Math.multiplyExact(
-                (long) this.budget.maxEntityProxies(),
-                LocalVoxelShadowLayout.PROXY_STRIDE_BYTES
-        );
+        long proxySlotBytes = LocalVoxelShadowLayout.PROXY_PACKET_BYTES;
         encoder.setBuffer(
                 this.visibilityAtlas.nativeHandle(), 0L,
                 VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT,
@@ -774,13 +781,24 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 VoxelShadowBindingAbi.PROXY_BUFFER_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
+        int paramsStages = vertexFieldParamsStageMask(
+                VertexReflectionExperiment.isLayoutEnabled() || GiReceiverRuntime.isRequested()
+        );
         encoder.setBuffer(
                 this.paramsRing.nativeHandle(),
                 (long) inFlightSlot * LocalVoxelShadowLayout.PARAMS_BYTES,
                 VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT,
-                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                paramsStages
         );
         bindVoxelLevels(encoder);
+    }
+
+    static int vertexFieldParamsStageMask(final boolean vertexFieldRuntimeEnabled) {
+        // Vertex reflection and G5 both reconstruct an exact world point from this packet's
+        // current camera block/fraction. Their generated MSL owns slot 16; binding only the
+        // fragment stage leaves that vertex read undefined/zero.
+        return MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                | (vertexFieldRuntimeEnabled ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0);
     }
 
     @Override
@@ -923,6 +941,49 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return new DescriptorCoverage(
                 ready, stale, approximateDirect, building, failClosed
         );
+    }
+
+    DescriptorEdgeCoverage descriptorEdgeCoverage() {
+        FrameContext context = this.frameContext;
+        PreparedFrame current = this.prepared;
+        if (context == null || current == null
+                || context.submitIndex() != current.submitIndex()) {
+            return new DescriptorEdgeCoverage(0, 0, 0, 0);
+        }
+        ByteBuffer descriptors = descriptorSlot(context.slot());
+        int edge8 = 0;
+        int edge16 = 0;
+        int edge32 = 0;
+        int edge64 = 0;
+        for (int index = 0; index < current.descriptorLights(); index++) {
+            int offset = index * LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES;
+            int state = descriptors.getInt(
+                    offset + LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_OFFSET
+            );
+            if (state != LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY
+                    && state != LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED) {
+                continue;
+            }
+            int edge = descriptors.getInt(
+                    offset + LocalVoxelShadowAtlasLayout.DESCRIPTOR_PAGE_EDGE_OFFSET
+            );
+            switch (edge) {
+                case 8 -> edge8++;
+                case 16 -> edge16++;
+                case 32 -> edge32++;
+                case 64 -> edge64++;
+                default -> throw new IllegalStateException(
+                        "Cached L6 descriptor has unsupported page edge " + edge
+                );
+            }
+        }
+        DescriptorEdgeCoverage coverage = new DescriptorEdgeCoverage(
+                edge8, edge16, edge32, edge64
+        );
+        if (coverage.total() != current.shadowedLocalLights()) {
+            throw new IllegalStateException("L6 descriptor edge census lost a cached light");
+        }
+        return coverage;
     }
 
     static int cacheWorkerCount(final LightingPreset preset) {
@@ -2753,6 +2814,115 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return count;
     }
 
+    /**
+     * Packs one conservative entity-proxy candidate mask per L3 light after the fixed proxy
+     * array. A receiver which contributes to a point light is inside that light's sphere, and
+     * the sphere is convex, so a proxy outside the sphere cannot intersect the light segment.
+     * The shader still performs its exact segment/AABB test for every retained candidate.
+     */
+    static void packProxyMasks(
+            final ByteBuffer packet,
+            final List<AdvancedLight> lights,
+            final EntityShadowProxySnapshot snapshot,
+            final int proxyCount,
+            final FrameState.CameraPosition camera
+    ) {
+        Objects.requireNonNull(packet, "packet");
+        Objects.requireNonNull(lights, "lights");
+        Objects.requireNonNull(camera, "camera");
+        if (packet.capacity() < LocalVoxelShadowLayout.PROXY_PACKET_BYTES
+                || lights.size() > LocalVoxelShadowLayout.MAX_SHADOW_DESCRIPTORS
+                || proxyCount < 0 || proxyCount > LocalVoxelShadowLayout.MAX_ENTITY_PROXIES
+                || proxyCount > (snapshot == null ? 0 : snapshot.proxies().size())) {
+            throw new IllegalArgumentException("Invalid L6 proxy-mask packet");
+        }
+        if (proxyCount == 0) {
+            return;
+        }
+
+        List<EntityShadowProxy> snapshotProxies = snapshot.proxies();
+        for (int lightIndex = 0; lightIndex < lights.size(); lightIndex++) {
+            AdvancedLight light = lights.get(lightIndex);
+            int mask = 0;
+            for (int proxyIndex = 0; proxyIndex < proxyCount; proxyIndex++) {
+                EntityShadowProxy proxy = snapshotProxies.get(proxyIndex);
+                if (proxy.stableId() != light.stableId()
+                        && proxyMayIntersectLightSphere(light, proxy, camera)) {
+                    mask |= 1 << proxyIndex;
+                }
+            }
+            packet.putInt(
+                    LocalVoxelShadowLayout.PROXY_MASKS_OFFSET_BYTES
+                            + lightIndex * LocalVoxelShadowLayout.PROXY_MASK_STRIDE_BYTES,
+                    mask
+            );
+        }
+    }
+
+    private static boolean proxyMayIntersectLightSphere(
+            final AdvancedLight light,
+            final EntityShadowProxy proxy,
+            final FrameState.CameraPosition camera
+    ) {
+        float lightX = relativeFloat(light.x(), camera.x(), "proxy-mask light x");
+        float lightY = relativeFloat(light.y(), camera.y(), "proxy-mask light y");
+        float lightZ = relativeFloat(light.z(), camera.z(), "proxy-mask light z");
+        float minimumX = proxy.minRelativeX(camera.x());
+        float minimumY = proxy.minRelativeY(camera.y());
+        float minimumZ = proxy.minRelativeZ(camera.z());
+        float maximumX = proxy.maxRelativeX(camera.x());
+        float maximumY = proxy.maxRelativeY(camera.y());
+        float maximumZ = proxy.maxRelativeZ(camera.z());
+
+        double roundingPadding = 16.0 * Math.max(
+                Math.max(Math.ulp(lightX), Math.ulp(lightY)),
+                Math.max(
+                        Math.max(Math.ulp(lightZ), Math.ulp(minimumX)),
+                        Math.max(
+                                Math.max(Math.ulp(minimumY), Math.ulp(minimumZ)),
+                                Math.max(
+                                        Math.max(Math.ulp(maximumX), Math.ulp(maximumY)),
+                                        Math.ulp(maximumZ)
+                                )
+                        )
+                )
+        );
+        double expandedRadius = Math.nextUp(
+                (double) light.radius() + 0.02 + roundingPadding
+        );
+        double deltaX = axisDistance(lightX, minimumX, maximumX);
+        double deltaY = axisDistance(lightY, minimumY, maximumY);
+        double deltaZ = axisDistance(lightZ, minimumZ, maximumZ);
+        return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
+                <= expandedRadius * expandedRadius;
+    }
+
+    private static float relativeFloat(
+            final double world,
+            final double camera,
+            final String label
+    ) {
+        double value = world - camera;
+        if (!Double.isFinite(value) || value < -Float.MAX_VALUE || value > Float.MAX_VALUE) {
+            throw new IllegalArgumentException(label + " is not float-representable");
+        }
+        return (float) value;
+    }
+
+    private static double axisDistance(
+            final float point,
+            final float minimum,
+            final float maximum
+    ) {
+        if (point < minimum) {
+            return (double) minimum - point;
+        }
+        if (point > maximum) {
+            return (double) point - maximum;
+        }
+        return 0.0;
+    }
+
     private void bindVoxelLevels(final MTLRenderCommandEncoder encoder) {
         int[] occupancySlots = VoxelShadowBindingAbi.occupancyTextureSlots();
         int[] opticalSlots = VoxelShadowBindingAbi.opticalTextureSlots();
@@ -3325,7 +3495,11 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
-    private record Descriptor(int state, long atlasOffset, int pageEdge) {
+    private record Descriptor(
+            int state,
+            long atlasOffset,
+            int pageEdge
+    ) {
         static Descriptor approximateDirect() {
             return new Descriptor(
                     LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT,

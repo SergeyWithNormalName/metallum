@@ -1,0 +1,147 @@
+{
+  "captureId": "radiance_live_v3_20260821_142648",
+  "dimensionId": "minecraft:overworld",
+  "worldGeneration": 2,
+  "cameraPosition": [147, 66, -17],
+  "cascades": [
+    {
+      "index": 0,
+      "worldSpanBlocks": 64,
+      "cellSizeBlocks": 1,
+      "surfaceColumnsTotal": 4096,
+      "surfaceColumnsValid": 4096,
+      "surfaceColumnsUnavailable": 0,
+      "surfaceColumnsOccupied": 4096,
+      "surfaceColumnsEmpty": 0,
+      "requestedSections": 125,
+      "publishedContentSections": 58,
+      "knownEmptySections": 20,
+      "unavailableSections": 47,
+      "outsideHeightSections": 0,
+      "generationMismatchSections": 0,
+      "validCells": 206586,
+      "invalidCells": 55558,
+      "occupiedCells": 110738,
+      "emptyValidCells": 95848,
+      "emissiveCells": 20,
+      "zeroRadianceCells": 192189,
+      "nonZeroRadianceCells": 14397,
+      "luminanceHistogram": {
+        "zero": 192189,
+        "gt0_le0_01": 253,
+        "gt0_01_le0_05": 2472,
+        "gt0_05_le0_2": 7381,
+        "gt0_2_le1_0": 4156,
+        "gt1_0": 135
+      },
+      "radiance": {
+        "min": 0.0,
+        "mean": 0.053524308,
+        "max": 4.4728184
+      },
+      "opacity": {
+        "min": 0.0,
+        "mean": 0.50253356,
+        "max": 1.0
+      }
+    },
+    {
+      "index": 1,
+      "worldSpanBlocks": 128,
+      "cellSizeBlocks": 2,
+      "surfaceColumnsTotal": 4096,
+      "surfaceColumnsValid": 4096,
+      "surfaceColumnsUnavailable": 0,
+      "surfaceColumnsOccupied": 4096,
+      "surfaceColumnsEmpty": 0,
+      "requestedSections": 729,
+      "publishedContentSections": 249,
+      "knownEmptySections": 79,
+      "unavailableSections": 401,
+      "outsideHeightSections": 0,
+      "generationMismatchSections": 0,
+      "validCells": 135912,
+      "invalidCells": 126232,
+      "occupiedCells": 74992,
+      "emptyValidCells": 60920,
+      "emissiveCells": 185,
+      "zeroRadianceCells": 123915,
+      "nonZeroRadianceCells": 11997,
+      "luminanceHistogram": {
+        "zero": 123915,
+        "gt0_le0_01": 1329,
+        "gt0_01_le0_05": 1723,
+        "gt0_05_le0_2": 4241,
+        "gt0_2_le1_0": 4626,
+        "gt1_0": 78
+      },
+      "radiance": {
+        "min": 0.0,
+        "mean": 0.053109836,
+        "max": 4.4728184
+      },
+      "opacity": {
+        "min": 0.0,
+        "mean": 0.4950085,
+        "max": 1.0
+      }
+    },
+    {
+      "index": 2,
+      "worldSpanBlocks": 256,
+      "cellSizeBlocks": 4,
+      "surfaceColumnsTotal": 4096,
+      "surfaceColumnsValid": 4096,
+      "surfaceColumnsUnavailable": 0,
+      "surfaceColumnsOccupied": 4096,
+      "surfaceColumnsEmpty": 0,
+      "requestedSections": 4352,
+      "publishedContentSections": 1315,
+      "knownEmptySections": 137,
+      "unavailableSections": 2900,
+      "outsideHeightSections": 0,
+      "generationMismatchSections": 0,
+      "validCells": 87680,
+      "invalidCells": 174464,
+      "occupiedCells": 62585,
+      "emptyValidCells": 25095,
+      "emissiveCells": 1067,
+      "zeroRadianceCells": 70102,
+      "nonZeroRadianceCells": 17578,
+      "luminanceHistogram": {
+        "zero": 70102,
+        "gt0_le0_01": 6201,
+        "gt0_01_le0_05": 3116,
+        "gt0_05_le0_2": 4023,
+        "gt0_2_le1_0": 4211,
+        "gt1_0": 27
+      },
+      "radiance": {
+        "min": 0.0,
+        "mean": 0.053510115,
+        "max": 3.35598
+      },
+      "opacity": {
+        "min": 0.0,
+        "mean": 0.5920246,
+        "max": 1.0
+      }
+    }
+  ],
+  "provenanceCounters": {
+    "acceptedSectionsExtracted": 4335,
+    "acceptedSectionsPublished": 5238,
+    "sectionsConsumed": 1858,
+    "blocksEvaluated": 17756160,
+    "fallbackColors": 0,
+    "fallbackLights": 0,
+    "moddedFallbacks": 0,
+    "emissionHits": 23392,
+    "missingSections": 3348,
+    "surfaceLightNeighborSamples": 75308064,
+    "surfaceLightExposedFaces": 6640581,
+    "surfaceLightMissingNeighbors": 0,
+    "surfaceLightOpaqueSelfZeroButNeighborLit": 576773
+  },
+  "fromAcceptedSodiumLevelSlice": true
+}

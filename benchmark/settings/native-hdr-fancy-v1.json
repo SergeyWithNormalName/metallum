@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "id": "native-hdr-fancy-v1",
   "options": {
     "version": 4903,
@@ -135,5 +135,10 @@
       "sodium"
     ],
     "sodium_chunk_builder_threads": 4
+  },
+  "renderer_properties": {
+    "improvedLighting": "true",
+    "lightingPreset": "balanced",
+    "globalIllumination": "off"
   }
 }

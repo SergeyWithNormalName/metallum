@@ -18,6 +18,9 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * state from the render thread.
  */
 public final class SodiumVoxelSectionExtractor {
+    private static final ThreadLocal<VoxelShapeEncoder.Scratch> SHAPE_SCRATCH =
+            ThreadLocal.withInitial(VoxelShapeEncoder.Scratch::new);
+
     private SodiumVoxelSectionExtractor() {
     }
 
@@ -40,6 +43,7 @@ public final class SodiumVoxelSectionExtractor {
         byte[] chromaticIds = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
         short[] shapeProxyIds = new short[VoxelSectionSnapshot.BLOCK_COUNT];
         BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
+        VoxelShapeEncoder.Scratch shapeScratch = SHAPE_SCRATCH.get();
 
         for (int localIndex = 0; localIndex < VoxelSectionSnapshot.BLOCK_COUNT; localIndex++) {
             int localX = localIndex & 15;
@@ -52,6 +56,13 @@ public final class SodiumVoxelSectionExtractor {
             try {
                 BlockState state = worldSlice.getBlockState(worldX, worldY, worldZ);
                 VoxelMaterialDescriptor material = materialFor(state);
+                if (material.materialClass() == VoxelMaterialClass.AIR) {
+                    occupancyMasks[localIndex] = 0L;
+                    optical[localIndex] = (byte) material.packedUnsignedByte();
+                    chromaticIds[localIndex] = (byte) VoxelChromaticFilter.NEUTRAL_ID;
+                    shapeProxyIds[localIndex] = (short) VoxelShapeRegistry.FAST_PATH_ID;
+                    continue;
+                }
                 VoxelShape shape = state.getBlock() instanceof VegetationBlock
                         ? Shapes.empty()
                         : state.getShape(worldSlice, position);
@@ -61,17 +72,17 @@ public final class SodiumVoxelSectionExtractor {
                     // WATER material rather than accidentally becoming transparent air.
                     shape = Shapes.or(shape, state.getFluidState().getShape(worldSlice, position));
                 }
-                VoxelShapeEncoder.EncodedShape encoded = VoxelShapeEncoder.encode(
+                VoxelShapeEncoder.encodeInto(
                         shape,
                         VoxelSubdivision.FOUR,
-                        material
+                        shapeScratch
                 );
-                occupancyMasks[localIndex] = encoded.occupancyMask();
-                optical[localIndex] = effectiveOptical(material, encoded);
+                occupancyMasks[localIndex] = shapeScratch.occupancyMask();
+                optical[localIndex] = effectiveOptical(material, shapeScratch.coverageByte());
                 chromaticIds[localIndex] = (byte) VoxelChromaticFilter.idFor(
                         state, material.materialClass()
                 );
-                shapeProxyIds[localIndex] = (short) encoded.shapeProxyId();
+                shapeProxyIds[localIndex] = (short) shapeScratch.shapeProxyId();
             } catch (RuntimeException ignored) {
                 // A modded shape is allowed to fail locally. Keep the L5 producer safe and
                 // conservative without propagating a failure into Sodium's accepted geometry.
@@ -128,13 +139,13 @@ public final class SodiumVoxelSectionExtractor {
      */
     private static byte effectiveOptical(
             final VoxelMaterialDescriptor material,
-            final VoxelShapeEncoder.EncodedShape encoded
+            final int coverageByte
     ) {
-        float coverage = encoded.coverageByte() / 255.0f;
+        float coverage = coverageByte / 255.0f;
         float effectiveOpacity = coverage * material.opacity();
-        return (byte) new VoxelMaterialDescriptor(
+        return (byte) VoxelMaterialDescriptor.packedUnsignedByte(
                 material.materialClass(),
                 1.0f - effectiveOpacity
-        ).packedUnsignedByte();
+        );
     }
 }

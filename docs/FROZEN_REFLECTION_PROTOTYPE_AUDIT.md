@@ -1,0 +1,167 @@
+# Frozen world-space reflection prototype audit
+
+## Scope and safety boundary
+
+This prototype is an opt-in, **snapshot-built** world-space reflection field for
+the material-gated terrain receiver. It is not planar reflection, a dynamic cubemap,
+a screen-space reflection system, or a replacement for L3/L5/L6 lighting. It has
+no per-frame capture/update path. The active field is immutable while READY, but
+the controller can build and atomically publish a replacement after the camera
+leaves its per-axis guard region. Calling it permanently frozen is therefore
+inaccurate.
+
+The runtime switch requires both `METALLUM_VERTEX_REFLECTION_EXPERIMENT=1` and
+`-Dmetallum.vertex.reflection.runtime=true`.  Normal benchmark runs force the
+environment switch off.  This keeps the prototype quarantined until visual and
+benchmark acceptance are recorded.
+
+## Forensic findings
+
+The abandoned experiment contained two invalid native ownership paths:
+
+1. It wrote a CPU `replaceRegion` into a private Metal texture.  The recorded
+   AGX crash occurred in that upload path.
+2. It passed a Metal object through a generic Swift `setBuffer` bridge.  The
+   recorded `swift_unknownObjectRetain` crash showed that the object ABI was not
+   safe at that boundary.
+
+Both paths were removed.  Java now retains only an opaque native context, and
+Swift owns all Metal textures, sampler, parameter buffer, staging buffers, and
+compute pipelines. The dedicated native binding function sets vertex
+texture/sampler slot 10 and vertex buffer slot 27; no `MTLBuffer` object crosses
+the generic object bridge.
+
+## Frozen field contract
+
+The field is a 128-block cube around an accepted camera origin. Its 64³ source
+lattice corresponds to 2-block cells and requires an authoritative outcome for
+all 8³ chunk sections before it can upload:
+
+- published content is copied from the Sodium worker result only after that
+  result is accepted;
+- known-empty sections are represented as valid black source cells;
+- unavailable, discarded, or failed work invalidates the collection rather than
+  inventing black radiance;
+- edits inside the READY domain do not live-update it;
+- crossing a 32-block per-axis guard starts a complete replacement build while
+  the previous READY field remains bound;
+- X/Y/Z recenter independently, which prevents rebuild oscillation on stable
+  axes.
+
+Each native build copies the accepted source snapshot through correctly
+row-aligned shared staging into native-owned private storage and prepares the
+radiance mip chain in a separate command buffer. Completion publishes the new
+field atomically. There is no per-frame CPU texture readback, reflection upload,
+or reflection resource creation.
+
+## Shader contract
+
+The reflection flavor is present in Sodium solid, cutout, and translucent
+Advanced terrain pipelines. The trace is still material-gated before its first
+texture read. The single source of receiver truth is
+`SurfaceMaterialPolicy.voxelReflectionMode`, also exposed by the G2
+`GiSemanticMaterial` family:
+
+- water, metal and explicitly smooth dielectric are intrinsic receivers;
+- rain-exposed dielectric, stone and wood are receivers only while the smoothed
+  L8 wetness value is non-zero;
+- glass keeps its separate transparent composition, and porous materials remain
+  outside the accepted prefiltered roughness band.
+
+The six signed-axis face order is the existing G2 `GiSemanticPacking` order.
+During a reflection-enabled remesh, ordinary opaque-alpha terrain stores its
+1--6 face code in a reserved `242..247` vertex-alpha sentinel. The reflection
+vertex flavor decodes that value and restores alpha to `1.0` before material or
+tint evaluation. Unlike the former light-only carrier, this survives compact
+light relights and does not depend on block-light nibbles. Non-opaque vertex
+colors retain the clamp-safe intra-texel block-light fallback; a conflicting
+modded light value now loses only the voxel direction while preserving the L8
+material class and analytic optics. This preserves the compact vertex stride and
+gives metal, smooth and wet non-horizontal faces a world-space trace normal.
+Invalid or missing face data fails closed before any volume sample.
+
+The first material-receiver implementation accidentally tested the pre-packing
+semantic value again after promoting a valid non-emissive material to the compact
+exact marker. That made the face-carrier write unreachable and caused glossy
+iron to show only ordinary L8/GGX lighting instead of the voxel term. A later
+fallback also cleared the whole material class when one low light nibble could
+not carry a face. The packer now retains one explicit `materialSurface` decision,
+prefers the relight-stable alpha carrier, and keeps analytic material optics even
+when the compatibility light carrier fails. Six-face, conflict, and light-only
+relight regressions cover the final compact material/color/light values.
+
+The current topology is a bounded 40-step vertex cone trace over one
+native-owned radiance texture. Generated MSL contains one syntactic 3D sample
+instruction inside that loop, so it may execute up to 40 samples per affected
+receiver vertex. Wet-only vertices also read the existing L8 environment packet
+at vertex buffer slot 26 solely to branch around the trace while dry. There is
+no Cartesian moment texture in the current implementation.
+
+Minecraft cloud geometry in water reflections has an independent live Sodium
+toggle. Disabling it removes the voxel mode's cloud-only reflected capture; in
+full planar mode it keeps reflected sky/terrain but skips the cloud draw. The
+bound fragment fallback remains transparent, so disabling the capture cannot
+leave a stale reflected cloud sample.
+
+The refined carrier exports two `float4` varyings:
+
+- coarse world RGB plus confidence;
+- the flat vertex trace direction plus roughness.
+
+The fragment performs zero 3D reads. It reflects the per-fragment view vector
+about the existing material normal (including procedural water waves), evaluates
+bounded alignment against the interpolated trace direction, and applies
+confidence, roughness and material Fresnel. Coarse world RGB replaces the
+analytic environment only by that bounded weight; it is not added as diffuse
+illumination. Field radiance retains local visibility in covered/cave scenes,
+while the analytic sky fallback keeps its old skylight gate. Only water's
+transmitted/body term and alpha receive complementary Fresnel energy. Sun and
+local-light GGX remain separate.
+
+Diagnostic contribution-only output is opaque and contains only
+`coarseRGB * confidence * directionalResponse`; it is not final water color.
+
+Receiver isolation remains:
+
+- the general environment/diffuse term never consumes coarse world RGB;
+- the analytic environment remains the zero-confidence fallback;
+- unsupported glass/porous materials and dry ordinary terrain branch around all
+  reflection texture reads.
+
+The field deliberately reports zero confidence where it has no valid support,
+so it cannot be mistaken for an irradiance cache or provide fabricated
+far-field detail.
+
+## Admission and verification status
+
+`BenchmarkLightingAdmission` now rejects Advanced benchmark claims if config
+defaults were used, requested/resolved lighting disagrees, fallback occurred, or
+any observed frame lacks the L3/L5/L6 health contract.  The benchmark script
+uses this strict schema and disables the reflection experiment by default.
+
+The following automated checks passed after the native repair:
+
+```text
+./gradlew compileJava frozenReflectionFieldUnitTest \
+  realWorldVertexReflectionUnitTest benchmarkLightingAdmissionUnitTest \
+  frozenReflectionNativeValidation advancedDirectLightingShaderUnitTest \
+  rendererArchitectureUnitTest --console=plain
+./gradlew compileRadianceClipmapMetal buildMacNative compileTestJava
+./gradlew forcedSourceStartupValidation
+bash -n scripts/run_metal_benchmark.sh
+```
+
+`frozenReflectionNativeValidation` performs a source-fallback Java/FFM/Swift/
+Metal run, waits for the one-shot build, and binds the resources through a real
+render encoder.  It validates the repaired native boundary, not the visual
+appearance.
+
+The original water receiver refinement has generated-MSL, deterministic fixture,
+motion-route, and Tier C timing receipts recorded in `OptimizationHistory.md`.
+Those timings do not admit the expanded solid/cutout material scope. The R2
+integration currently has source, CPU policy, generated-MSL and stage-binding
+proof only; it still requires the dry A/B gate plus lake/wet-ground/metal/cave/
+rain visual scenes before changing the default-OFF state. A Metal GPU
+capture/counter-capable target would still be needed to turn the varying change
+into a measured register/occupancy claim; source length and varying counts alone
+do not prove occupancy.

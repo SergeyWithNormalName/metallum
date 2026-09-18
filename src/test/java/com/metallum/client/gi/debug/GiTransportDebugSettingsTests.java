@@ -1,0 +1,68 @@
+package com.metallum.client.gi.debug;
+
+import com.metallum.client.gi.transport.GiTransportRuntime;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+/** Persistence and presentation contracts for the restart-gated G4 Sodium debug option. */
+public final class GiTransportDebugSettingsTests {
+    private GiTransportDebugSettingsTests() {
+    }
+
+    public static void main(final String[] arguments) throws Exception {
+        Path directory = Files.createTempDirectory("metallum-g4-debug-");
+        Path settings = directory.resolve("debug.properties");
+        try {
+            require(!GiTransportDebugSettings.load(settings),
+                    "missing G4 debug settings did not default to disabled");
+            require(GiTransportDebugSettings.save(settings, true)
+                            && GiTransportDebugSettings.load(settings),
+                    "G4 debug enabled state did not round-trip");
+            require(GiTransportDebugSettings.save(settings, false)
+                            && !GiTransportDebugSettings.load(settings),
+                    "G4 debug disabled state did not round-trip");
+
+            require(GiTransportDebugHud.lines(snapshot(false, false,
+                            GiTransportRuntime.AdmissionState.WAITING)).size() == 1,
+                    "G4 pre-restart HUD must remain a single explicit status line");
+            require(GiTransportDebugHud.lines(snapshot(true, true,
+                            GiTransportRuntime.AdmissionState.READY)).size() == 7,
+                    "G4 READY HUD lost immutable population diagnostics");
+            require(GiTransportDebugHud.lines(snapshot(true, false,
+                            GiTransportRuntime.AdmissionState.INVALID)).size() == 4,
+                    "G4 INVALID HUD lost its fail-closed reason");
+
+            short[] red = new short[32 * 32 * 32 * 4];
+            short[] green = new short[red.length];
+            short[] blue = new short[red.length];
+            int center = (((16 * 32) + 16) * 32 + 16) * 4;
+            red[center] = Float.floatToFloat16(2.0f);
+            int[] colors = GiTransportDebugHud.buildIndirectDcSlice(red, green, blue);
+            require(colors[16 * 32 + 16] == 0xffff0000,
+                    "G4 captured SH DC preview lost its red channel");
+        } finally {
+            Files.deleteIfExists(settings);
+            Files.deleteIfExists(directory);
+        }
+        System.out.println("G4 Sodium debug settings tests passed");
+    }
+
+    private static GiTransportRuntime.DebugSnapshot snapshot(
+            final boolean requested,
+            final boolean sourceReady,
+            final GiTransportRuntime.AdmissionState state
+    ) {
+        return new GiTransportRuntime.DebugSnapshot(
+                requested, sourceReady, sourceReady, state, "test reason", true,
+                state == GiTransportRuntime.AdmissionState.READY,
+                1L, 12L, 3L, 2_916_480L, -32, -64, -96
+        );
+    }
+
+    private static void require(final boolean condition, final String message) {
+        if (!condition) {
+            throw new AssertionError(message);
+        }
+    }
+}

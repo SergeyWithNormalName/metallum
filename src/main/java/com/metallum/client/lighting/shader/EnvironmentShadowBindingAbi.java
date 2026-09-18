@@ -29,13 +29,16 @@ public final class EnvironmentShadowBindingAbi {
     /** Reserved L4 tail promoted to the versioned, allocation-free L8 material environment. */
     public static final int MATERIAL_WEATHER_AND_TIME_OFFSET = 352;
     public static final int MATERIAL_CONTRACT_OFFSET = 368;
-    public static final int MATERIAL_CONTRACT_VERSION = 1;
+    /** Version 2 assigns materialContract.w to the stable Visual Style water policy id. */
+    public static final int MATERIAL_CONTRACT_VERSION = 2;
 
     /** CLOUD-1: Vanilla-synchronized cloud shadow parameters appended to environment packet. */
     public static final int CLOUD_OFFSET_AND_GRID_SIZE_OFFSET = CloudShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET; // 384
     public static final int CLOUD_PARAMS_OFFSET = CloudShadowBindingAbi.CLOUD_PARAMS_OFFSET;                             // 400
-    public static final int CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET = CloudShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET; // 416
+    public static final int CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET = CloudShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET; // 416
     public static final int CLOUD_CONTRACT_OFFSET = CloudShadowBindingAbi.CLOUD_CONTRACT_OFFSET;                         // 432
+    public static final int SKY_REFLECTION_COLOR_AND_HORIZON_STRENGTH_OFFSET = CloudShadowBindingAbi.SKY_REFLECTION_COLOR_AND_HORIZON_STRENGTH_OFFSET; // 448
+    public static final int HORIZON_REFLECTION_COLOR_AND_CLOUD_FOG_END_OFFSET = CloudShadowBindingAbi.HORIZON_REFLECTION_COLOR_AND_CLOUD_FOG_END_OFFSET; // 464
     public static final int CLOUD_CONTRACT_VERSION = CloudShadowBindingAbi.VERSION;
 
     private static final int[] SHADOW_TEXTURE_SLOTS = {

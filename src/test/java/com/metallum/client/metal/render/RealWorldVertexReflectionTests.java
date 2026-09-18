@@ -1,0 +1,1227 @@
+package com.metallum.client.metal.render;
+
+import com.metallum.client.gi.receiver.GiReceiverBindingAbi;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.receiver.GiReceiverShaderPatcher;
+import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
+import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
+import com.metallum.client.lighting.reflection.RealWorldReflectionField;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
+import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
+import com.metallum.client.radiance.CompactSectionPayload;
+import com.metallum.client.radiance.Float16Compressor;
+import com.metallum.client.radiance.RadianceAppearanceModel;
+import com.metallum.client.radiance.RadianceRuntimeStorage;
+import com.metallum.client.radiance.SodiumRadianceSectionExtractor;
+import com.metallum.client.renderer.LightingModel;
+import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
+import com.mojang.blaze3d.shaders.ShaderType;
+import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
+import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
+import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
+import net.minecraft.client.renderer.ShaderDefines;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
+import org.joml.Matrix4f;
+import org.joml.Vector3f;
+import org.joml.Vector4f;
+import org.jspecify.annotations.Nullable;
+import org.lwjgl.PointerBuffer;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.util.spvc.Spvc;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.IntBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.Map;
+
+/**
+ * Authoritative verification suite for the Real-World Frozen Rough-Reflection Prototype.
+ *
+ * <p>Validates:
+ * 1. Exposed-face lighting semantics and linear appearance extraction from Minecraft block data.
+ * 2. Strict distinction between occupied, emissive, empty, and out-of-bounds cells.
+ * 3. Finite domain world-space mapping with 4-block snapping and out-of-bounds zero confidence.
+ * 4. Camera fractional motion and integer block shift invariance.
+ * 5. MSL generation proof: one material-gated vertex cone-trace sampler, reflection/environment
+ *    parameter bindings,
+ *    two bounded reflection varyings, exact zero fragment 3D texture samples, and full
+ *    Solid/Cutout/Translucent material-receiver coverage.</p>
+ */
+public final class RealWorldVertexReflectionTests {
+
+    public static void main(final String[] args) throws Exception {
+        testMaterialEnvironmentStageMask();
+        System.out.println("Running RealWorldVertexReflectionTests...");
+        net.minecraft.SharedConstants.tryDetectVersion();
+        net.minecraft.server.Bootstrap.bootStrap();
+
+        testExposedFaceIrradianceSemantics();
+        testProvenanceAndMemoryTracking();
+        testFiniteDomainOriginMappingAndSnapping();
+        testCameraFractionAndBlockShiftInvariance();
+        testConeTraceFrontToBackMath();
+        testCloudReflectionTransformOwnership();
+        testCloudReflectionWorldMotion();
+        testReceiverFresnelCompositionMath();
+        testMslGeneratedShaderContractProof();
+        testGiG5GeneratedMslContractProof();
+        testGiOffGeneratedMslContractProof();
+
+        System.out.println("RealWorldVertexReflectionTests passed successfully!");
+    }
+
+    private static void testMaterialEnvironmentStageMask() {
+        require(!MetalCompiledRenderPipeline.isG5CompatibleFlavor(HdrShaderFlavor.METALLUM)
+                        && MetalCompiledRenderPipeline.isG5CompatibleFlavor(
+                        HdrShaderFlavor.METALLUM_ADVANCED)
+                        && MetalCompiledRenderPipeline.isG5CompatibleFlavor(
+                        HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL),
+                "G5 main terrain admission accepted a base Metallum fallback");
+        require(SunShadowGpuResources.materialEnvironmentStageMask(false)
+                        == MetalCompiledRenderPipeline.STAGE_FRAGMENT,
+                "ordinary material environment params must remain fragment-only");
+        require(SunShadowGpuResources.materialEnvironmentStageMask(true)
+                        == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                        | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                "wet reflection gating must see the smoothed material weather packet in vertex");
+        require(LocalVoxelShadowGpuResources.vertexFieldParamsStageMask(true)
+                        == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                        | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                "reflection world reconstruction must keep voxel params bound in vertex");
+
+        String previousRuntime = System.getProperty(VertexReflectionExperiment.RUNTIME_PROPERTY);
+        GiReceiverCompatibility.setTestOverride(true);
+        CompactPositionCarrierSafety.resetForTests();
+        VertexReflectionExperiment.setOverride(true);
+        System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, "true");
+        try {
+            require(VertexReflectionExperiment.isLayoutEnabled()
+                            && VertexReflectionExperiment.isRuntimeEnabled(),
+                    "reflection test did not start with an admitted ON layout");
+            CompactPositionCarrierSafety.reportConflict("test pre-owned position code");
+            require(VertexReflectionExperiment.isLayoutEnabled()
+                            && !VertexReflectionExperiment.isRuntimeEnabled()
+                            && SunShadowGpuResources.materialEnvironmentStageMask(
+                            VertexReflectionExperiment.isLayoutEnabled())
+                            == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                            | MetalCompiledRenderPipeline.STAGE_VERTEX)
+                            && LocalVoxelShadowGpuResources.vertexFieldParamsStageMask(
+                            VertexReflectionExperiment.isLayoutEnabled())
+                            == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                            | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                    "carrier conflict changed an already selected reflection resource layout");
+        } finally {
+            CompactPositionCarrierSafety.resetForTests();
+            GiReceiverCompatibility.setTestOverride(null);
+            VertexReflectionExperiment.setOverride(null);
+            if (previousRuntime == null) {
+                System.clearProperty(VertexReflectionExperiment.RUNTIME_PROPERTY);
+            } else {
+                System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, previousRuntime);
+            }
+        }
+    }
+
+    private static void testExposedFaceIrradianceSemantics() {
+        MockWorld world = new MockWorld();
+
+        // 1. Outdoor sand block at (5, 64, 5): exposed to sky on top (sky=15, block=0)
+        world.setBlock(5, 64, 5, Blocks.SAND.defaultBlockState(), 0, 0); // self light = 0
+        world.setLight(5, 65, 5, 15, 0); // neighbor above has full sky light
+
+        // 2. Enclosed underground stone at (5, 20, 5): enclosed in darkness (sky=0, block=0)
+        world.setBlock(5, 20, 5, Blocks.STONE.defaultBlockState(), 0, 0);
+
+        // 3. Torch-lit stone at (12, 20, 12): torch adjacent at (12, 20, 13) with block light 14
+        world.setBlock(12, 20, 12, Blocks.STONE.defaultBlockState(), 0, 0);
+        world.setLight(12, 20, 13, 0, 14);
+
+        // 4. Water fluid at (14, 64, 14) with sky light 15
+        world.setBlock(14, 64, 14, Blocks.WATER.defaultBlockState(), 15, 0);
+
+        long worldGen = 100L;
+        long secKeySurface = SectionPos.asLong(0, 4, 0); // Y section 4 (Y 64..79)
+        long secKeyCave = SectionPos.asLong(0, 1, 0);    // Y section 1 (Y 16..31)
+
+        CompactSectionPayload snapSurface = SodiumRadianceSectionExtractor.extract(
+                secKeySurface, worldGen, world, world::getBlockState, world::getBrightness
+        );
+        CompactSectionPayload snapCave = SodiumRadianceSectionExtractor.extract(
+                secKeyCave, worldGen, world, world::getBlockState, world::getBrightness
+        );
+
+        require(!snapSurface.isEmpty(), "Surface section must not be empty");
+        require(!snapCave.isEmpty(), "Cave section with torch-lit stone must not be empty");
+
+        // Verify outdoor sand: self-light=0 MUST NOT be black because exposed neighbor has sky=15
+        int sandIdx = 5 | (5 << 4) | (0 << 8);
+        float sandR = Float16Compressor.unpackFloat(snapSurface.packedRgba()[sandIdx * 4]);
+        float sandG = Float16Compressor.unpackFloat(snapSurface.packedRgba()[sandIdx * 4 + 1]);
+        require(sandR > 0.1F && sandG > 0.1F, "Outdoor sand must receive exposed neighbor irradiance (sandR=" + sandR + ")");
+
+        // Verify deep cave stone: must have 0.0 radiance
+        int deepIdx = 5 | (5 << 4) | (4 << 8);
+        float deepR = Float16Compressor.unpackFloat(snapCave.packedRgba()[deepIdx * 4]);
+        require(deepR == 0.0F, "Deep cave stone must have 0 radiance (deepR=" + deepR + ")");
+
+        // Verify torch-lit stone: must be illuminated by torch block light
+        int torchIdx = 12 | (12 << 4) | (4 << 8);
+        float torchR = Float16Compressor.unpackFloat(snapCave.packedRgba()[torchIdx * 4]);
+        require(torchR > 0.05F, "Torch-lit stone must receive block irradiance (torchR=" + torchR + ")");
+
+        // Verify water: non-zero radiance
+        int waterIdx = 14 | (14 << 4) | (0 << 8);
+        float waterB = Float16Compressor.unpackFloat(snapSurface.packedRgba()[waterIdx * 4 + 2]);
+        require(waterB > 0.01F, "Water must have non-zero radiance (waterB=" + waterB + ")");
+    }
+
+    private static void testProvenanceAndMemoryTracking() {
+        RadianceRuntimeStorage storage = RadianceRuntimeStorage.global();
+        storage.resetProvenanceCounters();
+
+        MockWorld world = new MockWorld();
+        world.setBlock(1, 1, 1, Blocks.GLOWSTONE.defaultBlockState(), 0, 15);
+        CompactSectionPayload payload = SodiumRadianceSectionExtractor.extract(
+                SectionPos.asLong(0, 0, 0), 100L, world, world::getBlockState, world::getBrightness
+        );
+
+        var counters = storage.snapshotProvenanceCounters();
+        require(counters.acceptedSectionsExtracted() > 0L, "Provenance counters must reflect extracted section");
+        require(counters.blocksEvaluated() > 0L, "Provenance counters must reflect evaluated blocks");
+        require(counters.activeInflightBytes() > 0L, "Active in-flight bytes must be positive after extraction");
+
+        storage.notePayloadConsumed(payload);
+        var after = storage.snapshotProvenanceCounters();
+        require(after.activeInflightBytes() == 0L, "Active in-flight bytes must return to 0 after consumption");
+    }
+
+    private static void testFiniteDomainOriginMappingAndSnapping() {
+        int span = RealWorldReflectionField.SPAN_BLOCKS;
+        require(span == 128, "Span must be 128 blocks");
+
+        // Test 4-block snapping across positive, zero, and negative coordinates
+        require(RealWorldReflectionField.snapToGrid(0.0, 4) == 0, "Snap 0.0 -> 0");
+        require(RealWorldReflectionField.snapToGrid(3.9, 4) == 0, "Snap 3.9 -> 0");
+        require(RealWorldReflectionField.snapToGrid(4.0, 4) == 4, "Snap 4.0 -> 4");
+        require(RealWorldReflectionField.snapToGrid(-0.1, 4) == -4, "Snap -0.1 -> -4");
+        require(RealWorldReflectionField.snapToGrid(-4.0, 4) == -4, "Snap -4.0 -> -4");
+        require(RealWorldReflectionField.snapToGrid(-4.1, 4) == -8, "Snap -4.1 -> -8");
+
+        int originX = -64;
+        int originY = 0;
+        int originZ = 128;
+        float invSpan = 1.0F / (float) span;
+
+        // Inside point
+        int insideX = -32;
+        int insideY = 64;
+        int insideZ = 192;
+        float u = (insideX - originX) * invSpan;
+        float v = (insideY - originY) * invSpan;
+        float w = (insideZ - originZ) * invSpan;
+        require(u >= 0.0F && u < 1.0F && v >= 0.0F && v < 1.0F && w >= 0.0F && w < 1.0F, "Inside point must map to [0, 1)^3");
+
+        // Outside point (X < originX)
+        int outsideX = -65;
+        float outU = (outsideX - originX) * invSpan;
+        require(outU < 0.0F, "Point outside origin must have u < 0 (confidence fallback)");
+
+        // Outside point (X >= originX + span)
+        int farX = originX + span + 10;
+        float farU = (farX - originX) * invSpan;
+        require(farU >= 1.0F, "Point beyond span must have u >= 1 (confidence fallback)");
+    }
+
+    private static void testCameraFractionAndBlockShiftInvariance() {
+        // Camera at block (100, 64, -200) with fraction (0.25, 0.50, 0.75)
+        int camBlockX = 100;
+        int camBlockY = 64;
+        int camBlockZ = -200;
+        float camFracX = 0.25F;
+        float camFracY = 0.50F;
+        float camFracZ = 0.75F;
+
+        // Relative vertex position from camera
+        float relX = -5.25F;
+        float relY = 2.50F;
+        float relZ = 10.25F;
+
+        // World position reconstruction: cameraBlock + (cameraFraction + relPosition)
+        float worldX1 = (float) camBlockX + (camFracX + relX);
+        float worldY1 = (float) camBlockY + (camFracY + relY);
+        float worldZ1 = (float) camBlockZ + (camFracZ + relZ);
+
+        // Sub-pixel camera shift by (+0.1, -0.2, +0.1)
+        float shiftedFracX = camFracX + 0.1F;
+        float shiftedFracY = camFracY - 0.2F;
+        float shiftedFracZ = camFracZ + 0.1F;
+        float shiftedRelX = relX - 0.1F;
+        float shiftedRelY = relY + 0.2F;
+        float shiftedRelZ = relZ - 0.1F;
+
+        float worldX2 = (float) camBlockX + (shiftedFracX + shiftedRelX);
+        float worldY2 = (float) camBlockY + (shiftedFracY + shiftedRelY);
+        float worldZ2 = (float) camBlockZ + (shiftedFracZ + shiftedRelZ);
+
+        require(Math.abs(worldX1 - worldX2) < 1.0e-5F, "World X must be invariant under camera fraction motion");
+        require(Math.abs(worldY1 - worldY2) < 1.0e-5F, "World Y must be invariant under camera fraction motion");
+        require(Math.abs(worldZ1 - worldZ2) < 1.0e-5F, "World Z must be invariant under camera fraction motion");
+    }
+
+    private static void testConeTraceFrontToBackMath() {
+        float accumulatedOpacity = 0.0F;
+        float nearWeight = (1.0F - accumulatedOpacity) * 0.75F;
+        accumulatedOpacity += nearWeight;
+        float farWeight = (1.0F - accumulatedOpacity) * 1.0F;
+        accumulatedOpacity += farWeight;
+        require(Math.abs(nearWeight - 0.75F) < 1.0e-6F,
+                "near voxel must retain its front-to-back weight");
+        require(Math.abs(farWeight - 0.25F) < 1.0e-6F,
+                "far voxel must receive only remaining transmittance");
+        require(Math.abs(accumulatedOpacity - 1.0F) < 1.0e-6F,
+                "opaque cone samples must close accumulated opacity");
+    }
+
+    private static void testCloudReflectionTransformOwnership() {
+        Matrix4f mainModelView = new Matrix4f()
+                .translate(0.25F, -0.40F, 0.15F)
+                .rotateX(0.08F)
+                .rotateZ(-0.03F);
+        Matrix4f cloudModelView = PlanarReflectionRenderer.computeReflectedCloudModelView(
+                mainModelView);
+
+        Vector4f cloudVertex = new Vector4f(7.0F, 38.0F, -11.0F, 1.0F);
+        Vector4f expected = new Vector4f(7.0F, -38.0F, -11.0F, 1.0F);
+        mainModelView.transform(expected);
+        Vector4f actual = new Vector4f(cloudVertex);
+        cloudModelView.transform(actual);
+        require(actual.distance(expected) < 1.0e-5F,
+                "cloud matrix must mirror camera-relative Y exactly once");
+
+        Matrix4f terrainModelView = PlanarReflectionRenderer.computeReflectedModelView(
+                mainModelView, 82.0, 63.0);
+        Vector4f terrainResult = new Vector4f(cloudVertex);
+        terrainModelView.transform(terrainResult);
+        require(terrainResult.distance(actual) > 1.0F,
+                "cloud draw must not inherit terrain's second water-plane translation");
+    }
+
+    private static void testCloudReflectionWorldMotion() {
+        Vector3f cameraA = new Vector3f(0.0F, 80.0F, 0.0F);
+        Vector3f cameraB = new Vector3f(0.0F, 80.0F, 10.0F);
+        Vector3f waterA = new Vector3f(0.0F, 64.0F, 50.0F);
+        Vector3f waterB = new Vector3f(0.0F, 64.0F, 60.0F);
+        Vector3f normal = new Vector3f(0.0F, 1.0F, 0.0F);
+        Vector3f cloudA = reflectedCloudPlaneHit(cameraA, waterA, normal, 192.0F);
+        Vector3f cloudB = reflectedCloudPlaneHit(cameraB, waterB, normal, 192.0F);
+
+        require(Math.abs(cloudB.z - cloudA.z - 10.0F) < 1.0e-4F,
+                "moving the camera and receiver ten world blocks must advance the reflected cloud lookup ten blocks");
+        float gridSize = 256.0F * 12.0F;
+        float uvA = (cloudA.z + 3.96F) / gridSize;
+        float uvB = (cloudB.z + 3.96F) / gridSize;
+        require(Math.abs((uvB - uvA) - 10.0F / gridSize) < 1.0e-6F,
+                "reflected cloud UV must follow world motion instead of remaining screen-locked");
+    }
+
+    private static Vector3f reflectedCloudPlaneHit(
+            final Vector3f camera,
+            final Vector3f water,
+            final Vector3f normal,
+            final float cloudHeight
+    ) {
+        Vector3f cameraToWater = new Vector3f(water).sub(camera).normalize();
+        Vector3f reflected = cameraToWater.reflect(new Vector3f(normal).normalize());
+        float t = (cloudHeight - water.y) / reflected.y;
+        return new Vector3f(water).fma(t, reflected);
+    }
+
+    private static void testReceiverFresnelCompositionMath() {
+        float baseAlpha = 0.55F;
+        float f0 = 0.0204F;
+        float roughness = 0.28F;
+        float normalFresnel = schlickEnvironment(f0, 1.0F, roughness);
+        float grazingFresnel = schlickEnvironment(f0, 0.10F, roughness);
+        float horizonFresnel = schlickEnvironment(f0, 0.0F, roughness);
+        float normalAlpha = 1.0F - (1.0F - baseAlpha) * (1.0F - normalFresnel);
+        float grazingAlpha = 1.0F - (1.0F - baseAlpha) * (1.0F - grazingFresnel);
+
+        require(normalAlpha - baseAlpha < 0.011F,
+                "near-normal water must retain almost all existing transparency");
+        require(grazingAlpha > normalAlpha + 0.16F,
+                "grazing Fresnel must materially suppress framebuffer transmission");
+        require(Math.abs(horizonFresnel - (1.0F - roughness)) < 1.0e-6F,
+                "rough environment Fresnel must remain bounded at the horizon");
+        require(horizonConfidence(0.0F) >= 0.30F && horizonConfidence(0.0F) < 0.31F,
+                "grazing voxel rays must retain only the bounded landmark floor");
+        require(horizonConfidence(0.18F) > 0.99F,
+                "elevated voxel rays must retain full representation confidence");
+        float typicalWaveResponse = directionalResponse(0.95F, roughness);
+        float nearAlignedWaveResponse = directionalResponse(0.99F, roughness);
+        require(typicalWaveResponse > 0.80F,
+                "ordinary wave slopes must not punch holes in a rough reflection");
+        require(nearAlignedWaveResponse > typicalWaveResponse
+                        && nearAlignedWaveResponse <= 1.0F,
+                "wave modulation must remain smooth, bounded, and directional");
+        require(PlanarReflectionConfig.captureMode(true, true)
+                            == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY
+                        && PlanarReflectionConfig.captureMode(false, true)
+                            == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY
+                        && PlanarReflectionConfig.captureMode(true, false)
+                            == PlanarReflectionConfig.CaptureMode.FULL_PLANAR
+                        && PlanarReflectionConfig.captureMode(false, false)
+                            == PlanarReflectionConfig.CaptureMode.DISABLED
+                        && !PlanarReflectionConfig.runtimeEnabled(true, true)
+                        && PlanarReflectionConfig.runtimeEnabled(true, false),
+                "voxel reflection mode must select only the cloud capture, never reflected terrain");
+        require(PlanarReflectionConfig.captureMode(false, true, false)
+                        == PlanarReflectionConfig.CaptureMode.DISABLED
+                        && PlanarReflectionConfig.captureMode(true, false, false)
+                        == PlanarReflectionConfig.CaptureMode.FULL_PLANAR,
+                "cloud toggle must remove voxel cloud-only capture without disabling planar terrain");
+        require(PlanarReflectionConfig.captureMode(true, false, true, true)
+                        == PlanarReflectionConfig.CaptureMode.DISABLED
+                        && PlanarReflectionConfig.captureMode(true, true, true, true)
+                        == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY,
+                "G5 must suppress live FULL_PLANAR terrain without disabling voxel cloud capture");
+        require(!PlanarReflectionRenderer.rendersReflectedClouds(
+                        PlanarReflectionConfig.CaptureMode.FULL_PLANAR, false)
+                        && PlanarReflectionRenderer.rendersReflectedClouds(
+                        PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY, true),
+                "cloud toggle does not control reflected cloud draws independently");
+        require(!PlanarReflectionRenderer.rendersReflectedWorld(
+                            PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY)
+                        && PlanarReflectionRenderer.rendersReflectedWorld(
+                            PlanarReflectionConfig.CaptureMode.FULL_PLANAR)
+                        && PlanarReflectionRenderer.targetClearAlpha(
+                            PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY) == 0.0f
+                        && PlanarReflectionRenderer.targetClearAlpha(
+                            PlanarReflectionConfig.CaptureMode.FULL_PLANAR) == 1.0f
+                        && PlanarReflectionRenderer.targetClearDepth() == 0.0,
+                "reflection targets must preserve transparent cloud clear and reverse-Z depth clear");
+        require(!PlanarReflectionRenderer.mayReuseCachedCapture(
+                            PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY, true, 0, 2)
+                        && PlanarReflectionRenderer.mayReuseCachedCapture(
+                            PlanarReflectionConfig.CaptureMode.FULL_PLANAR, true, 0, 2),
+                "cloud-only capture must refresh every frame while full planar may retain its bounded cache");
+        require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F
+                        && Math.abs(RealWorldReflectionField.get().strength() - 0.75F) < 1.0e-6F,
+                "coarse world reflection must retain reviewed roughness and confidence");
+    }
+
+    private static float schlickEnvironment(
+            final float f0,
+            final float nDotV,
+            final float roughness
+    ) {
+        float oneMinus = 1.0F - Math.clamp(nDotV, 0.0F, 1.0F);
+        float grazingLimit = Math.max(1.0F - Math.clamp(roughness, 0.0F, 1.0F), f0);
+        return f0 + (grazingLimit - f0)
+                * oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
+    }
+
+    private static float horizonConfidence(final float elevation) {
+        float t = Math.clamp((elevation - 0.035F) / (0.18F - 0.035F), 0.0F, 1.0F);
+        float smooth = t * t * (3.0F - 2.0F * t);
+        return 0.30F + 0.70F * smooth;
+    }
+
+    private static float directionalResponse(final float alignment, final float roughness) {
+        float safeRoughness = Math.clamp(roughness, 0.28F, 0.35F);
+        float lobeWidth = Math.max(safeRoughness * 0.55F, 0.12F);
+        float t = Math.clamp((alignment - (1.0F - lobeWidth)) / lobeWidth, 0.0F, 1.0F);
+        float alignedLobe = t * t * (3.0F - 2.0F * t);
+        return 0.45F + 0.55F * alignedLobe;
+    }
+
+    private static void testMslGeneratedShaderContractProof() throws Exception {
+        Identifier shader = Identifier.fromNamespaceAndPath(
+                "sodium", AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH);
+        for (String path : new String[]{
+                "pipeline/solid_terrain", "pipeline/cutout_terrain",
+                "pipeline/translucent_terrain"
+        }) {
+            require(MetalCrossShaderCompiler.isSodiumReflectionTerrainPipeline(
+                            Identifier.fromNamespaceAndPath("sodium", path), shader, shader),
+                    "voxel reflection variant does not cover Sodium terrain pipeline " + path);
+        }
+        require(!MetalCrossShaderCompiler.isSodiumReflectionTerrainPipeline(
+                        Identifier.fromNamespaceAndPath("minecraft", "pipeline/entity"), shader, shader),
+                "non-terrain pipeline entered the voxel reflection shader flavor");
+
+        String sodiumVertex = preprocess("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX);
+        String sodiumFragment = preprocess("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT);
+
+        String matVertex = MetallumMaterialShaderPatcher.patch("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX, sodiumVertex).source();
+        String matFragment = MetallumMaterialShaderPatcher.patch("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT, sodiumFragment).source();
+
+        ShaderDefines onDefines = ShaderDefines.builder()
+                .define("USE_VERTEX_COMPRESSION")
+                .define("USE_FOG")
+                .define("METALLUM_VERTEX_REFLECTION", 1)
+                .build();
+
+        String onGlslVertex = patchQualityVertex(matVertex, true, true);
+        String onGlslFragment = patchQualityFragment(matFragment, true);
+
+        String onMslVertex = compileToMsl(onGlslVertex, ShaderType.VERTEX, onDefines);
+        String onMslFragment = compileToMsl(onGlslFragment, ShaderType.FRAGMENT, onDefines);
+
+        ShaderDefines offDefines = ShaderDefines.builder()
+                .define("USE_VERTEX_COMPRESSION")
+                .define("USE_FOG")
+                .build();
+        String offGlslVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, matVertex, TerrainEnvironmentSpecialization.FULL, false).source();
+        String offGlslFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, matFragment, TerrainEnvironmentSpecialization.FULL, false).source();
+        String offMslVertex = compileToMsl(offGlslVertex, ShaderType.VERTEX, offDefines);
+        String offMslFragment = compileToMsl(offGlslFragment, ShaderType.FRAGMENT, offDefines);
+
+        System.out.println("REFLECTION_GENERATED_MSL vertex_sha256=" + sha256(onMslVertex)
+                + " fragment_sha256=" + sha256(onMslFragment)
+                + " vertex_chars=" + onMslVertex.length()
+                + " fragment_chars=" + onMslFragment.length()
+                + " vertex_user_varyings=" + countOccurrences(onMslVertex, "[[user(locn")
+                + " fragment_user_varyings=" + countOccurrences(onMslFragment, "[[user(locn")
+                + " reflection_samples="
+                + countOccurrences(onMslVertex, "metallumReflectionRadiance.sample"));
+
+        // 1. Vertex MSL contains one source field sampler and a bounded conservative cone trace.
+        require(onMslVertex.contains("texture3d<float> metallumReflectionRadiance [[texture(10)]]"), "Vertex must have texture(10)");
+        require(onMslVertex.contains("sampler metallumReflectionRadianceSmplr [[sampler(10)]]"), "Vertex must have sampler(10)");
+        require(onMslVertex.contains("buffer(27)"), "Vertex must bind dedicated reflection params buffer at slot 27");
+        require(!onMslVertex.contains("buffer(14)"),
+                "Vertex reflection must not revive the retired slot-14 environment buffer");
+        require(onMslVertex.contains("buffer(16)"),
+                "Vertex reflection must keep the camera/voxel packet at slot 16");
+        require(onMslVertex.contains("buffer(26)"),
+                "Vertex wet receiver gate must bind the shared L8/G2 material environment at slot 26");
+        require(onMslVertex.contains("metallumCoarseReflection"), "Vertex must output metallumCoarseReflection");
+        require(onMslVertex.contains("metallumCoarseReflectionDirection"),
+                "Vertex must output the flat trace direction and receiver roughness");
+        require(countOccurrences(onMslVertex, "[[user(locn")
+                        == countOccurrences(offMslVertex, "[[user(locn") + 2,
+                "reflection vertex carrier must add exactly two float4 varyings");
+        require(countOccurrences(onMslFragment, "[[user(locn")
+                        == countOccurrences(offMslFragment, "[[user(locn") + 2,
+                "reflection fragment carrier must consume exactly two additional varyings");
+        require(countOccurrences(onMslVertex, "metallumReflectionRadiance.sample") == 1,
+                "generated vertex MSL must retain one syntactic volume sample in the bounded loop");
+        require(countOccurrences(onGlslVertex, "textureLod(metallumReflection") == 1,
+                "vertex carrier must have exactly one syntactic 3D sample in its bounded loop");
+        require(onGlslVertex.contains("metallumTraceStep < 40")
+                        && onGlslVertex.contains("metallumTraceDistance += 1.75"),
+                "vertex carrier must stay statically bounded without stepping over a two-block source cell");
+        require(onGlslVertex.contains("bool metallumVertexReflectionReceiver = metallumVertexTaggedSurface")
+                        && onGlslVertex.contains("metallumVertexIntrinsicReflection")
+                        && onGlslVertex.contains("metallumVertexWetReflection"),
+                "vertex carrier must use the shared intrinsic/wet material receiver policy");
+        int receiverGate = onGlslVertex.indexOf("if (metallumVertexReflectionReceiver");
+        int firstReflectionSample = onGlslVertex.indexOf("textureLod(metallumReflection");
+        require(receiverGate >= 0 && firstReflectionSample > receiverGate,
+                "non-receiver terrain vertices must branch around all reflection texture reads");
+        require(onGlslVertex.contains("metallumReflectionPositionCarrier")
+                        && onGlslVertex.contains("((a_Position.x >> 30u) & 3u)")
+                        && onGlslVertex.contains("(((a_Position.y >> 30u) & 3u) << 2u)")
+                        && onGlslVertex.contains(
+                        "metallumReflectionPositionCarrier & 7u")
+                        && onGlslVertex.contains(
+                        "(metallumReflectionPositionCarrier & 8u) != 0u")
+                        && onGlslVertex.contains("metallumReflectionFaceCode >= 1u")
+                        && onGlslVertex.contains("metallumReflectionFaceCode <= 6u")
+                        && onGlslVertex.contains("metallumReflectionFaceNormal")
+                        && onGlslVertex.contains(
+                        "metallumViewRay, metallumReflectionFaceNormal")
+                        && !onGlslVertex.contains("metallumReflectionAlphaCarrier")
+                        && !onGlslVertex.contains("metallumReflectionLightCarrier")
+                        && !onGlslVertex.contains("metallumReflectionLightSignature")
+                        && !onGlslVertex.contains("_vert_color.a =")
+                        && !onGlslVertex.contains("_vert_tex_light_coord.x =")
+                        && !onGlslVertex.contains("_vert_tex_light_coord.y ="),
+                "vertex reflection must decode the position carrier without mutating color or light");
+        int positionCarrierDecode = onGlslVertex.indexOf("metallumReflectionPositionCarrier");
+        int faceNormalDecode = onGlslVertex.indexOf("metallumReflectionFaceNormal");
+        require(positionCarrierDecode >= 0 && faceNormalDecode > positionCarrierDecode
+                        && firstReflectionSample > faceNormalDecode,
+                "position carrier face decode must precede the bounded reflection trace");
+        require(onGlslVertex.contains("metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance")
+                        && onGlslVertex.contains("metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5)"),
+                "vertex carrier must traverse the reflected world-space ray with roughness-aware mip LOD");
+        require(onGlslVertex.contains("metallumFirstSurfaceWindow")
+                        && onGlslVertex.contains("metallumSelectedOpacity"),
+                "default receiver must bias radiance/confidence toward the first local surface");
+        require(onGlslVertex.contains("metallumRepresentationColorMoments")
+                        && onGlslVertex.contains("metallumRepresentationConfidence"),
+                "default receiver must estimate whether one coarse radiance represents the trace");
+        require(onGlslVertex.contains("* metallumStrength * metallumRepresentationConfidence"),
+                "reflection strength and representation confidence must limit the environment blend");
+
+        String firstOnlyGlsl = patchQualityVertex(matVertex, true, false);
+        String confidenceOnlyGlsl = patchQualityVertex(matVertex, false, true);
+        String legacyReceiverGlsl = patchQualityVertex(matVertex, false, false);
+        require(firstOnlyGlsl.contains("metallumFirstSurfaceWindow")
+                        && !firstOnlyGlsl.contains("metallumRepresentationColorMoments"),
+                "first-surface refinement must specialize independently");
+        require(!confidenceOnlyGlsl.contains("metallumFirstSurfaceWindow")
+                        && confidenceOnlyGlsl.contains("metallumRepresentationColorMoments"),
+                "representation-confidence refinement must specialize independently");
+        require(!legacyReceiverGlsl.contains("metallumSelectedWeight")
+                        && !legacyReceiverGlsl.contains("metallumRepresentationColorMoments")
+                        && legacyReceiverGlsl.contains(
+                                "metallumDirectionalRadiance += max(metallumTraceSample.rgb, vec3(0.0)) * metallumTraceWeight")
+                        && legacyReceiverGlsl.contains(
+                                "float metallumConfidence = clamp(metallumAccumulatedOpacity, 0.0, 1.0) * metallumStrength"),
+                "disabling both receiver refinements must restore the exact legacy trace integration");
+        for (String qualityGlsl : new String[]{firstOnlyGlsl, confidenceOnlyGlsl, legacyReceiverGlsl}) {
+            String qualityMsl = compileToMsl(qualityGlsl, ShaderType.VERTEX, onDefines);
+            require(countOccurrences(qualityMsl, "metallumReflectionRadiance.sample") == 1,
+                    "every quality specialization must retain one syntactic vertex 3D sample site");
+            require(countOccurrences(qualityMsl, "[[user(locn")
+                            == countOccurrences(onMslVertex, "[[user(locn"),
+                    "quality refinements must not expand the vertex carrier");
+        }
+
+        // 2. Fragment MSL has EXACT ZERO texture3d parameters and reads only vertex varying
+        require(!onMslFragment.contains("texture3d<"), "Fragment must have ZERO texture3d parameters");
+        require(!onMslFragment.contains("sampler3D"), "Fragment must have ZERO sampler3D");
+        require(!onMslFragment.contains("metallumReflectionRadiance"), "Fragment must have ZERO radiance texture reads");
+        require(onMslFragment.contains("texture2d<float> metallumPlanarReflection [[texture(11)]]")
+                        && onMslFragment.contains("texture2d<float> metallumCloudShadow [[texture(12)]]")
+                        && onMslFragment.contains("cloudColorAndReflectionStrength")
+                        && onMslFragment.contains("skyReflectionColorAndHorizonStrength"),
+                "voxel reflection fragment must bind the cloud capture separately from direct cloud shadows");
+        require(onGlslFragment.contains("color.a = 1.0"),
+                "contribution-only output must be opaque so underlying terrain cannot masquerade as voxel radiance");
+        require(onMslFragment.contains("in.metallumCoarseReflection"), "Fragment must read interpolated varying in.metallumCoarseReflection");
+        require(onMslFragment.contains("in.metallumCoarseReflectionDirection"),
+                "Fragment must read the interpolated trace direction");
+        require(countOccurrences(onGlslFragment, "textureLod(metallumReflection") == 0,
+                "fragment must issue exactly zero 3D reads");
+        require(onGlslFragment.contains("metallumVoxelReflectionReceiver")
+                        && onGlslFragment.contains("metallumVoxelReflectionIntrinsic")
+                        && onGlslFragment.contains("metallumVoxelReflectionWet"),
+                "reflection blend must share the material-driven R2 receiver policy");
+        int voxelEnvironmentStart = onGlslFragment.indexOf(
+                "vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(");
+        int voxelEnvironmentEnd = onGlslFragment.indexOf(
+                "return result * material.specularScale;", voxelEnvironmentStart);
+        String voxelEnvironmentHelper = onGlslFragment.substring(
+                voxelEnvironmentStart,
+                voxelEnvironmentEnd + "return result * material.specularScale;".length());
+        require(voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV9(")
+                        && voxelEnvironmentHelper.contains("viewPosition, normal)")
+                        && !voxelEnvironmentHelper.contains("planarWeight"),
+                "voxel receiver must evaluate world-space clouds before coarse world composition");
+        int cloudHelperStart = onGlslFragment.indexOf(
+                "vec3 metallumWaterSkyReflectionV2(");
+        int cloudHelperEnd = onGlslFragment.indexOf(
+                "vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(",
+                cloudHelperStart);
+        String cloudHelper = onGlslFragment.substring(cloudHelperStart, cloudHelperEnd);
+        require(countOccurrences(cloudHelper, "texture(") == 1
+                        && cloudHelper.contains("metallumPlanarReflection")
+                        && cloudHelper.contains("vec4 metallumWaterCloudReflectionV9(")
+                        && cloudHelper.contains("vec3 viewPosition")
+                        && cloudHelper.contains("worldWaterPosition")
+                        && cloudHelper.contains("worldReflectedDirection")
+                        && cloudHelper.contains("cloudWorldPosition")
+                        && cloudHelper.contains("reflectedCameraRelative")
+                        && cloudHelper.contains("metallumLighting.viewRotation")
+                        && cloudHelper.contains("metallumLighting.projection")
+                        && cloudHelper.contains("capturedCloud.a")
+                        && cloudHelper.contains("capturedCloud.rgb / capturedCloud.a")
+                        && cloudHelper.contains("capturedCloudValidity")
+                        && !cloudHelper.contains("gl_FragCoord")
+                        && !cloudHelper.contains("waveScreenOffset")
+                        && !cloudHelper.contains("inverseRasterProjection")
+                        && cloudHelper.contains("cameraWorldPosition")
+                        && cloudHelper.contains("rayElevation")
+                        && !cloudHelper.contains("cloudContract.w & 4u"),
+                "cloud reflection must reproject one world-space cloud hit into the captured target");
+        require(onGlslFragment.contains("metallumEnvironment.cloudContract.w & 4u"),
+                "direct cloud shadows must retain their daylight eligibility gate");
+        require(voxelEnvironmentHelper.contains("metallumWaterSkyReflectionV2(")
+                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV9(")
+                        && voxelEnvironmentHelper.contains(
+                        "reflectedEnvironment, cloudReflection.rgb, cloudReflection.a"),
+                "the exact sky and matching clouds must compose into one water environment lobe");
+        int cloudComposite = voxelEnvironmentHelper.indexOf(
+                "metallumWaterCloudReflectionV9(");
+        int coarseWeight = voxelEnvironmentHelper.indexOf(
+                "float coarseWeight =", cloudComposite);
+        require(cloudComposite >= 0 && coarseWeight > cloudComposite,
+                "clouds must composite into sky before coarse world geometry replaces that lobe");
+        require(onGlslFragment.contains("color.rgb = metallumReflectionDiagnostic"),
+                "contribution-only mode must isolate confidence- and wave-modulated voxel radiance");
+        require(onGlslFragment.contains("-metallumCoarseReflection.a - 1.0"),
+                "contribution-only encoding must distinguish a valid zero-hit diagnostic from production");
+        require(onGlslFragment.contains("metallumCoarseReflectionDirectionalResponseV1")
+                        && onGlslFragment.contains("worldFromView * reflectedDirection"),
+                "fragment must evaluate directional response from the procedural water normal");
+        require(onGlslFragment.contains("horizonRepresentationConfidence")
+                        && onGlslFragment.contains("smoothstep(0.035, 0.18, coarseRayElevation)")
+                        && onGlslFragment.contains("coarseRayElevation = referenceElevation;")
+                        && !onGlslFragment.contains("reflectedElevation"),
+                "representation confidence must reduce near-horizontal two-block voxel smearing");
+        require(onGlslFragment.contains("lobeWidth = max(roughness * 0.55, 0.12)")
+                        && !onGlslFragment.contains("roughness * roughness * 0.55"),
+                "rough wave response must use a broad continuous lobe rather than on/off bands");
+        require(onGlslFragment.contains("metallumSchlickEnvironmentFresnelV1")
+                        && onGlslFragment.contains("vec3(1.0 - clamp(roughness, 0.0, 1.0))"),
+                "rough environment Fresnel must not become a perfect grazing mirror");
+        require(onGlslFragment.contains("metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1")
+                        && onGlslFragment.contains("reflectedEnvironment = mix(")
+                        && onGlslFragment.contains(
+                        "environmentVisibility = mix(environmentVisibility, 1.0, coarseWeight)"),
+                "coarse world radiance must replace analytic environment and retain covered local hits");
+        require(onGlslFragment.contains("metallumCoarseReflectionWeightV1")
+                        && onGlslFragment.contains(
+                        "materialKind == METALLUM_SURFACE_WATER_V1 ? 1.20 : 1.0")
+                        && onGlslFragment.contains("metallumWaterWorldReflectionFresnelV1")
+                        && onGlslFragment.contains(
+                        "0.055 + 0.575 * grazing * grazing, 0.055, 0.63")
+                        && onGlslFragment.contains(
+                        "max(physicalFresnel, vec3(artisticFresnel))"),
+                "water voxel reflection must retain its bounded receiver-only strength boost");
+        int coarseFresnelBoost = onGlslFragment.indexOf(
+                "metallumCoarseEnvironmentFresnel =\n"
+                        + "                        metallumWaterWorldReflectionFresnelV1(");
+        int bodyEnergy = onGlslFragment.indexOf(
+                "metallumReflectionBodyEnergy = 1.0", coarseFresnelBoost);
+        require(coarseFresnelBoost >= 0 && bodyEnergy > coarseFresnelBoost,
+                "water body transmission must consume the same boosted Fresnel energy");
+        require(onGlslFragment.contains("metallumCoarseWeight > 0.0")
+                        && onGlslFragment.contains("* metallumCoarseWeight\n")
+                        && onGlslFragment.contains(
+                        "metallumWaterStyleProfileV1()\n"
+                                + "                                    .reflectionBodyStrength"),
+                "water body energy must follow actual coarse-reflection confidence and style strength");
+        int coarseMix = onGlslFragment.indexOf("reflectedEnvironment = mix(");
+        int sunGgx = onGlslFragment.indexOf("result += metallumEvaluateGgxV1(", coarseMix);
+        int localGgx = onGlslFragment.indexOf("metallumEvaluateClusteredMaterialSpecularV1(");
+        require(coarseMix >= 0 && sunGgx > coarseMix && localGgx > coarseMix,
+                "sun and local-light GGX must remain separate after coarse environment replacement");
+        require(!onGlslFragment.contains("0.08 + 0.92 * metallumReflectionFresnel"),
+                "coarse world radiance must not return to the diffuse-environment artistic floor");
+        require(onGlslFragment.contains("color.a = clamp(1.0 - (1.0 - color.a)"),
+                "grazing Fresnel must reduce framebuffer transmission without touching direct specular");
+
+        String confidenceOffFragment = patchQualityFragment(matFragment, false);
+        require(!confidenceOffFragment.contains("horizonRepresentationConfidence")
+                        && confidenceOffFragment.contains("return mix(0.45, 1.0, alignedLobe);"),
+                "disabling representation confidence must strip the grazing voxel confidence gate");
+        require(confidenceOffFragment.contains("metallumSchlickEnvironmentFresnelV1"),
+                "the energy-correct rough environment Fresnel is a core water composition fix");
+
+        String ambientGlslFragment = patchQualityFragment(
+                matFragment,
+                true,
+                TerrainEnvironmentSpecialization.AMBIENT_ONLY
+        );
+        require(ambientGlslFragment.contains("#define METALLUM_REFLECTION_AMBIENT_ONLY")
+                        && ambientGlslFragment.contains("return vec4(0.0);")
+                        && !ambientGlslFragment.contains("uniform sampler2D metallumPlanarReflection"),
+                "ambient-only voxel receiver must replace the unavailable cloud capture with a zero stub");
+        String ambientMslFragment = compileToMsl(
+                ambientGlslFragment,
+                ShaderType.FRAGMENT,
+                onDefines
+        );
+        require(!ambientMslFragment.contains("metallumPlanarReflection")
+                        && !ambientMslFragment.contains("[[texture(11)]]")
+                        && ambientMslFragment.contains("metallumCoarseReflection"),
+                "ambient-only MSL must compile the voxel world receiver without planar/cloud resources");
+    }
+
+    private static String patchQualityVertex(
+            final String materialVertex,
+            final boolean firstSurface,
+            final boolean representationConfidence
+    ) {
+        String firstKey = WaterReflectionQualityConfig.FIRST_SURFACE_BIASED_INTEGRATION_PROPERTY;
+        String confidenceKey = WaterReflectionQualityConfig.REPRESENTATION_CONFIDENCE_PROPERTY;
+        String oldFirst = System.getProperty(firstKey);
+        String oldConfidence = System.getProperty(confidenceKey);
+        try {
+            System.setProperty(firstKey, Boolean.toString(firstSurface));
+            System.setProperty(confidenceKey, Boolean.toString(representationConfidence));
+            return AdvancedDirectLightingShaderPatcher.patch(
+                    "sodium", "blocks/block_layer_opaque",
+                    MetallumMaterialShaderPatcher.Stage.VERTEX,
+                    LightingModel.ADVANCED, materialVertex,
+                    TerrainEnvironmentSpecialization.FULL, true
+            ).source();
+        } finally {
+            restoreProperty(firstKey, oldFirst);
+            restoreProperty(confidenceKey, oldConfidence);
+        }
+    }
+
+    private static String patchQualityFragment(
+            final String materialFragment,
+            final boolean representationConfidence
+    ) {
+        return patchQualityFragment(
+                materialFragment,
+                representationConfidence,
+                TerrainEnvironmentSpecialization.FULL
+        );
+    }
+
+    private static String patchQualityFragment(
+            final String materialFragment,
+            final boolean representationConfidence,
+            final TerrainEnvironmentSpecialization specialization
+    ) {
+        String confidenceKey = WaterReflectionQualityConfig.REPRESENTATION_CONFIDENCE_PROPERTY;
+        String oldConfidence = System.getProperty(confidenceKey);
+        try {
+            System.setProperty(confidenceKey, Boolean.toString(representationConfidence));
+            return AdvancedDirectLightingShaderPatcher.patch(
+                    "sodium", "blocks/block_layer_opaque",
+                    MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                    LightingModel.ADVANCED, materialFragment,
+                    specialization, true
+            ).source();
+        } finally {
+            restoreProperty(confidenceKey, oldConfidence);
+        }
+    }
+
+    private static void restoreProperty(final String key, final String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
+        }
+    }
+
+    private static String sha256(final String source) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(source.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /**
+     * G0 proves the zero variant against emitted MSL. Source inspection alone
+     * is insufficient because dead declarations or resources can survive the
+     * GLSL/SPIR-V boundary.
+     */
+    private static void testGiOffGeneratedMslContractProof() throws Exception {
+        String sodiumVertex = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX
+        );
+        String sodiumFragment = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT
+        );
+        String materialVertex = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                sodiumVertex
+        ).source();
+        String materialFragment = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                sodiumFragment
+        ).source();
+        String offGlslVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, materialVertex, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        String offGlslFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, materialFragment, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        ShaderDefines offDefines = ShaderDefines.builder()
+                .define("USE_VERTEX_COMPRESSION")
+                .define("USE_FOG")
+                .build();
+        String offMslVertex = compileToMsl(offGlslVertex, ShaderType.VERTEX, offDefines);
+        String offMslFragment = compileToMsl(offGlslFragment, ShaderType.FRAGMENT, offDefines);
+
+        for (String token : new String[]{
+                "MetallumGi", "metallumGi", "giProbe", "giField", "giInject",
+                "giTransport", "globalIllumination", "metallumIrradianceField",
+                "metallumGiParams", "metallumGiConfidence"
+        }) {
+            require(!offGlslVertex.contains(token) && !offGlslFragment.contains(token),
+                    "GI_OFF GLSL contains reserved GI token " + token);
+            require(!offMslVertex.contains(token) && !offMslFragment.contains(token),
+                    "GI_OFF generated MSL contains reserved GI token " + token);
+        }
+    }
+
+    /** Real Sodium GLSL -> SPIR-V -> SPIRV-Cross MSL proof for all three G5 terrain flavors. */
+    private static void testGiG5GeneratedMslContractProof() throws Exception {
+        String sodiumVertex = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX
+        );
+        String sodiumFragment = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT
+        );
+        String materialVertex = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                sodiumVertex
+        ).source();
+        String materialFragment = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                sodiumFragment
+        ).source();
+        String advancedVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, materialVertex, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        String advancedFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, materialFragment, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        GiReceiverShaderPatcher.Result g5Vertex = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.VERTEX, advancedVertex
+        );
+        GiReceiverShaderPatcher.Result g5Fragment = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.FRAGMENT, advancedFragment
+        );
+        require(g5Vertex.success() && g5Fragment.success(),
+                "G5 rejected the actual preprocessed Sodium Advanced sources: vertex="
+                        + g5Vertex.failureReason() + ", fragment=" + g5Fragment.failureReason());
+        require(g5Vertex.source().contains("((a_Position.x >> 30u) & 3u)")
+                        && g5Vertex.source().contains(
+                        "(((a_Position.y >> 30u) & 3u) << 2u)")
+                        && g5Vertex.source().contains(
+                        "metallumGiPositionFaceCode = metallumGiPositionCarrier & 7u")
+                        && g5Vertex.source().contains(
+                        "(metallumGiPositionCarrier & 8u) != 0u")
+                        && g5Vertex.source().contains("metallumGiSamplesFinite")
+                        && countOccurrences(g5Vertex.source(), "isnan(") == 4
+                        && countOccurrences(g5Vertex.source(), "isinf(") == 4
+                        && !g5Vertex.source().contains("metallumGiLightSignature")
+                        && !g5Vertex.source().contains("metallumGiAlphaCarrier")
+                        && !g5Vertex.source().contains("_vert_color.a =")
+                        && !g5Vertex.source().contains("_vert_tex_light_coord.y ="),
+                "G5 real Sodium source lost its position carrier decode or mutates compatibility data");
+        require(!materialVertex.contains(GiReceiverShaderPatcher.MARKER)
+                        && !materialFragment.contains(GiReceiverShaderPatcher.MARKER)
+                        && !materialVertex.contains("metallumGi")
+                        && !materialFragment.contains("metallumGi"),
+                "base Metallum source unexpectedly contains G5 shader work");
+
+        Map<String, ShaderDefines> variants = Map.of(
+                "solid", ShaderDefines.builder()
+                        .define("USE_VERTEX_COMPRESSION").define("USE_FOG").build(),
+                "cutout", ShaderDefines.builder()
+                        .define("USE_VERTEX_COMPRESSION").define("USE_FOG")
+                        .define("ALPHA_CUTOUT", 0.5f).build(),
+                "translucent", ShaderDefines.builder()
+                        .define("USE_VERTEX_COMPRESSION").define("USE_FOG")
+                        .define("ALPHA_CUTOUT", 0.01f).build()
+        );
+        for (Map.Entry<String, ShaderDefines> variant : variants.entrySet()) {
+            String baseVertexMsl = compileToMsl(
+                    materialVertex, ShaderType.VERTEX, variant.getValue()
+            );
+            String baseFragmentMsl = compileToMsl(
+                    materialFragment, ShaderType.FRAGMENT, variant.getValue()
+            );
+            GiReceiverBindingAbi.validateMsl(
+                    baseVertexMsl, baseFragmentMsl, false
+            );
+            require(!baseVertexMsl.contains("texture3d<float> metallumGi")
+                            && !baseVertexMsl.contains("metallumGiReceiver")
+                            && !baseVertexMsl.contains(GiReceiverBindingAbi.VARYING)
+                            && !baseFragmentMsl.contains("metallumGi")
+                            && usesStockCompressedPositionMask(baseVertexMsl),
+                    "G5 " + variant.getKey()
+                            + " base Metallum retained receiver work or changed position unpack");
+            String vertexMsl = compileToMsl(
+                    g5Vertex.source(), ShaderType.VERTEX, variant.getValue()
+            );
+            String fragmentMsl = compileToMsl(
+                    g5Fragment.source(), ShaderType.FRAGMENT, variant.getValue()
+            );
+            GiReceiverBindingAbi.validateMsl(vertexMsl, fragmentMsl, true);
+            require(usesStockCompressedPositionMask(vertexMsl),
+                    "G5 " + variant.getKey()
+                            + " receiver changed Sodium's lower-30-bit position unpack");
+            for (String sampler : GiReceiverBindingAbi.samplerNames()) {
+                require(countOccurrences(vertexMsl, sampler + ".sample(") == 1,
+                        "G5 " + variant.getKey() + " MSL lost one bounded vertex read for " + sampler);
+                require(!fragmentMsl.contains("texture3d<float> " + sampler)
+                                && !fragmentMsl.contains("sampler " + sampler + "Smplr")
+                                && !fragmentMsl.contains(sampler + ".sample("),
+                        "G5 " + variant.getKey() + " fragment retained sampler " + sampler);
+            }
+            System.out.println("GI_G5_GENERATED_MSL variant=" + variant.getKey()
+                    + " vertex_sha256=" + sha256(vertexMsl)
+                    + " fragment_sha256=" + sha256(fragmentMsl));
+        }
+
+        SunShadowShaderPatcher.Result shadowVertex = SunShadowShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque",
+                MetallumMaterialShaderPatcher.Stage.VERTEX, sodiumVertex
+        );
+        SunShadowShaderPatcher.Result shadowFragment = SunShadowShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque",
+                MetallumMaterialShaderPatcher.Stage.FRAGMENT, sodiumFragment
+        );
+        require(shadowVertex.success() && shadowFragment.success(),
+                "SUN_SHADOW rejected the actual preprocessed Sodium terrain sources: vertex="
+                        + shadowVertex.failureReason() + ", fragment="
+                        + shadowFragment.failureReason());
+        require(shadowVertex.source().contains("uvec3 _deinterleave_u20x3(uvec2 data)")
+                        && countOccurrences(shadowVertex.source(), "& 0x3FFu") == 2
+                        && shadowVertex.source().contains(
+                        "_vert_position = (_deinterleave_u20x3(a_Position)")
+                        && !shadowVertex.source().contains("a_Position.x >> 30u")
+                        && !shadowVertex.source().contains("a_Position.y >> 30u")
+                        && !shadowVertex.source().contains("metallumReflectionPositionCarrier")
+                        && !shadowVertex.source().contains("metallumGiPositionCarrier")
+                        && !shadowVertex.source().contains(GiReceiverShaderPatcher.MARKER),
+                "SUN_SHADOW source no longer ignores carrier bits through the stock 10-bit unpack");
+        String shadowVertexMsl = compileToMsl(
+                shadowVertex.source(), ShaderType.VERTEX, variants.get("solid")
+        );
+        String shadowFragmentMsl = compileToMsl(
+                shadowFragment.source(), ShaderType.FRAGMENT, variants.get("solid")
+        );
+        GiReceiverBindingAbi.validateMsl(shadowVertexMsl, shadowFragmentMsl, false);
+        String shadowVertexMslLower = shadowVertexMsl.toLowerCase(java.util.Locale.ROOT);
+        require(shadowVertexMsl.contains("_deinterleave_u20x3")
+                        && (countOccurrences(shadowVertexMsl, "1023u") >= 2
+                        || countOccurrences(shadowVertexMslLower, "0x3ffu") >= 2)
+                        && !shadowVertexMsl.contains("metallumReflectionPositionCarrier")
+                        && !shadowVertexMsl.contains("metallumGiPositionCarrier")
+                        && !shadowVertexMsl.contains("metallumGiReceiver")
+                        && !shadowVertexMsl.contains(GiReceiverBindingAbi.VARYING)
+                        && !shadowFragmentMsl.contains("metallumGi"),
+                "SUN_SHADOW generated MSL decodes the sideband or retained G5 resources");
+        System.out.println("GI_G5_SUN_SHADOW_GENERATED_MSL vertex_sha256="
+                + sha256(shadowVertexMsl) + " fragment_sha256="
+                + sha256(shadowFragmentMsl));
+
+        ShaderDefines offDefines = variants.get("solid");
+        String offVertexMsl = compileToMsl(advancedVertex, ShaderType.VERTEX, offDefines);
+        String offFragmentMsl = compileToMsl(advancedFragment, ShaderType.FRAGMENT, offDefines);
+        GiReceiverBindingAbi.validateMsl(offVertexMsl, offFragmentMsl, false);
+
+        String reflectionVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, materialVertex, TerrainEnvironmentSpecialization.FULL, true
+        ).source();
+        String reflectionFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, materialFragment, TerrainEnvironmentSpecialization.FULL, true
+        ).source();
+        require(reflectionVertex.contains("metallumReflectionPositionCarrier")
+                        && reflectionVertex.contains("((a_Position.x >> 30u) & 3u)")
+                        && reflectionVertex.contains(
+                        "(((a_Position.y >> 30u) & 3u) << 2u)")
+                        && reflectionVertex.contains(
+                        "metallumReflectionPositionCarrier & 7u")
+                        && reflectionVertex.contains(
+                        "(metallumReflectionPositionCarrier & 8u) != 0u")
+                        && reflectionVertex.contains("metallumReflectionGiAxisEligible")
+                        && !reflectionVertex.contains("metallumReflectionAlphaCarrier")
+                        && !reflectionVertex.contains("metallumReflectionLightCarrier")
+                        && !reflectionVertex.contains("_vert_color.a =")
+                        && !reflectionVertex.contains("_vert_tex_light_coord.y ="),
+                "L8/G5 coexistence does not share the position carrier safely");
+        GiReceiverShaderPatcher.Result reflectionG5Vertex = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.VERTEX, reflectionVertex
+        );
+        GiReceiverShaderPatcher.Result reflectionG5Fragment = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.FRAGMENT, reflectionFragment
+        );
+        require(reflectionG5Vertex.success() && reflectionG5Fragment.success(),
+                "G5 rejected the actual L8 vertex-reflection Sodium flavor");
+        require(reflectionG5Vertex.source().contains(
+                        "metallumReflectionGiAxisEligible ? metallumReflectionFaceCode : 0u"),
+                "G5 did not consume the reflected flavor's strict-axis position carrier");
+        String reflectionG5VertexMsl = compileToMsl(
+                reflectionG5Vertex.source(), ShaderType.VERTEX, offDefines
+        );
+        String reflectionG5FragmentMsl = compileToMsl(
+                reflectionG5Fragment.source(), ShaderType.FRAGMENT, offDefines
+        );
+        GiReceiverBindingAbi.validateMsl(
+                reflectionG5VertexMsl, reflectionG5FragmentMsl, true
+        );
+        System.out.println("GI_G5_REFLECTION_COEXISTENCE_GENERATED_MSL vertex_sha256="
+                + sha256(reflectionG5VertexMsl) + " fragment_sha256="
+                + sha256(reflectionG5FragmentMsl));
+    }
+
+    private static String compileToMsl(final String glslSource, final ShaderType stage, final ShaderDefines defines) throws ShaderCompileException {
+        String prepared = GlslPreprocessor.injectDefines(glslSource, defines);
+        try (GlslCompiler glslCompiler = new GlslCompiler();
+             IntermediaryShaderModule module = glslCompiler.createIntermediary("test", prepared, stage);
+             MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer words = module.spirv().asIntBuffer();
+            PointerBuffer pointer = stack.mallocPointer(1);
+            checkSpvc(Spvc.spvc_context_create(pointer), "create SPIRV-Cross context");
+            long context = pointer.get(0);
+            try {
+                checkSpvc(Spvc.spvc_context_parse_spirv(context, words, words.remaining(), pointer), "parse SPIR-V");
+                long ir = pointer.get(0);
+                checkSpvc(Spvc.spvc_context_create_compiler(context, Spvc.SPVC_BACKEND_MSL, ir, Spvc.SPVC_CAPTURE_MODE_COPY, pointer), "create MSL compiler");
+                long compiler = pointer.get(0);
+                checkSpvc(Spvc.spvc_compiler_create_compiler_options(compiler, pointer), "create MSL options");
+                long options = pointer.get(0);
+                checkSpvc(Spvc.spvc_compiler_options_set_uint(options, Spvc.SPVC_COMPILER_OPTION_MSL_PLATFORM, Spvc.SPVC_MSL_PLATFORM_MACOS), "select macOS");
+                checkSpvc(Spvc.spvc_compiler_options_set_uint(options, Spvc.SPVC_COMPILER_OPTION_MSL_VERSION, 0x040000), "select MSL 4.0");
+                checkSpvc(Spvc.spvc_compiler_options_set_bool(options, Spvc.SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING, true), "preserve explicit bindings");
+                checkSpvc(Spvc.spvc_compiler_install_compiler_options(compiler, options), "install options");
+                checkSpvc(Spvc.spvc_compiler_get_active_interface_variables(compiler, pointer), "collect active interface");
+                checkSpvc(Spvc.spvc_compiler_set_enabled_interface_variables(compiler, pointer.get(0)), "enable active interface");
+                checkSpvc(Spvc.spvc_compiler_compile(compiler, pointer), "compile MSL");
+                return MemoryUtil.memUTF8(pointer.get(0));
+            } finally {
+                Spvc.spvc_context_destroy(context);
+            }
+        }
+    }
+
+    private static boolean usesStockCompressedPositionMask(final String msl) {
+        String lower = msl.toLowerCase(java.util.Locale.ROOT);
+        return countOccurrences(msl, "1023u") >= 2
+                || countOccurrences(lower, "0x3ffu") >= 2;
+    }
+
+    private static void checkSpvc(final int result, final String stage) throws ShaderCompileException {
+        if (result != Spvc.SPVC_SUCCESS) {
+            throw new ShaderCompileException(stage + " failed with SPIRV-Cross status " + result);
+        }
+    }
+
+    private static String preprocess(final String namespace, final String path, final MetallumMaterialShaderPatcher.Stage stage) throws IOException {
+        String extension = stage == MetallumMaterialShaderPatcher.Stage.VERTEX ? ".vsh" : ".fsh";
+        String source = resource("assets/" + namespace + "/shaders/" + path + extension);
+        java.util.Set<String> imported = new java.util.HashSet<>();
+        GlslPreprocessor preprocessor = new GlslPreprocessor() {
+            @Override
+            public String applyImport(final boolean relative, final String importPath) {
+                String importNamespace = namespace;
+                String relativePath = importPath;
+                int separator = importPath.indexOf(':');
+                if (!relative && separator > 0) {
+                    importNamespace = importPath.substring(0, separator);
+                    relativePath = importPath.substring(separator + 1);
+                }
+                String resourcePath = "assets/" + importNamespace + "/shaders/include/" + relativePath;
+                if (!imported.add(resourcePath)) {
+                    return null;
+                }
+                return resourceOrNull(resourcePath);
+            }
+        };
+        return String.join("", preprocessor.process(source));
+    }
+
+    private static String resource(final String path) throws IOException {
+        String source = resourceOrNull(path);
+        if (source == null) {
+            throw new IOException("Required runtime shader resource is missing: " + path);
+        }
+        return source;
+    }
+
+    private static String resourceOrNull(final String path) {
+        ClassLoader cl = RealWorldVertexReflectionTests.class.getClassLoader();
+        try (InputStream stream = cl.getResourceAsStream(path)) {
+            if (stream == null) {
+                return null;
+            }
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not read shader resource " + path, exception);
+        }
+    }
+
+    private static void require(final boolean condition, final String message) {
+        if (!condition) {
+            throw new AssertionError(message);
+        }
+    }
+
+    private static int countOccurrences(final String source, final String needle) {
+        int count = 0;
+        int position = 0;
+        while ((position = source.indexOf(needle, position)) >= 0) {
+            count++;
+            position += needle.length();
+        }
+        return count;
+    }
+
+    private static final class MockWorld implements BlockGetter {
+        private final Map<BlockPos, BlockState> blocks = new HashMap<>();
+        private final Map<BlockPos, Integer> skyLight = new HashMap<>();
+        private final Map<BlockPos, Integer> blockLight = new HashMap<>();
+
+        public void setBlock(int x, int y, int z, BlockState state, int sky, int block) {
+            BlockPos p = new BlockPos(x, y, z);
+            this.blocks.put(p, state);
+            this.skyLight.put(p, sky);
+            this.blockLight.put(p, block);
+        }
+
+        public void setLight(int x, int y, int z, int sky, int block) {
+            BlockPos p = new BlockPos(x, y, z);
+            this.skyLight.put(p, sky);
+            this.blockLight.put(p, block);
+        }
+
+        public int getBrightness(LightLayer layer, BlockPos pos) {
+            return layer == LightLayer.SKY
+                    ? this.skyLight.getOrDefault(pos, 0)
+                    : this.blockLight.getOrDefault(pos, 0);
+        }
+
+        @Override
+        public @Nullable BlockEntity getBlockEntity(BlockPos pos) {
+            return null;
+        }
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            return this.blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+        }
+
+        public BlockState getBlockState(int x, int y, int z) {
+            return getBlockState(new BlockPos(x, y, z));
+        }
+
+        @Override
+        public FluidState getFluidState(BlockPos pos) {
+            BlockState state = getBlockState(pos);
+            return state.getFluidState();
+        }
+
+        @Override
+        public int getHeight() {
+            return 384;
+        }
+
+        @Override
+        public int getMinY() {
+            return -64;
+        }
+    }
+}

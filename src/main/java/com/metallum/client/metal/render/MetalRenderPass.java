@@ -1,6 +1,9 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.hdr.SceneLinearClearColor;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.metallum.client.sodium.SodiumLightSidecar;
@@ -70,7 +73,14 @@ final class MetalRenderPass implements RenderPassBackend {
     private MTLRenderCommandEncoder boundRenderEncoder;
     @Nullable
     private MTLRenderCommandEncoder boundAdvancedRenderEncoder;
+    @Nullable
+    private MTLRenderCommandEncoder boundG5TerrainRenderEncoder;
     private boolean advancedLightingPipeline;
+    private boolean g5TerrainPipeline;
+    private boolean compactPositionCarrierPipeline;
+    private boolean compactPositionDrawGateHeld;
+    private boolean compactPositionDrawPrepared;
+    private long boundCompactPositionRevision = Long.MIN_VALUE;
 
     MetalRenderPass(
             final MetalDevice device,
@@ -136,7 +146,7 @@ final class MetalRenderPass implements RenderPassBackend {
         if (textureView != null && sampler != null) {
             TextureViewAndSampler value = updateTextureBinding(this.samplers, name, textureView, sampler);
             if (commandEncoder.prepareTextureForRead((MetalGpuTexture) textureView.texture())) {
-                invalidateNativeEncoderState();
+                invalidateEncoderState();
             }
             MetalCompiledRenderPipeline.ResourceBinding binding = currentBinding(name);
             if (binding != null
@@ -227,6 +237,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
 
         bindDrawState(enc);
+        rejectAlternateCompactPositionCarrierDraw("drawIndexed");
         drawIndexedNative(enc, nativeIndexBuffer, firstIndex, indexCount, vertexOffset, instanceCount, indexType, firstInstance);
     }
 
@@ -238,6 +249,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        rejectAlternateCompactPositionCarrierDraw("multiDrawIndexed(IntBuffer)");
 
         for (int i = 0; i < drawCount; i++) {
             int firstIndex = drawParameters.get(i * 3);
@@ -262,6 +274,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        rejectAlternateCompactPositionCarrierDraw("multiDrawIndexed(PointerBuffer)");
 
         MetalNativeBridge.MTLRenderCommandEncoder_multiDrawIndexed(
                 enc.handle(),
@@ -282,53 +295,121 @@ final class MetalRenderPass implements RenderPassBackend {
         if (suppressUnsupportedMaterialDraw()) {
             return;
         }
+        MetalGpuBuffer nativeCommandBuffer = (MetalGpuBuffer) commands.buffer();
+        long requiredCommandBytes = requiredIndexedIndirectCommandBytes(drawCount, commands.length());
+        if (requiredCommandBytes == 0L) {
+            return;
+        }
+
+        MetalGpuBuffer indirectBuffer = nativeCommandBuffer;
+        long indirectBufferOffset = commands.offset();
+        if (nativeCommandBuffer.hasCpuVisibleStorage()) {
+            // Snapshot before ending the active render encoder for the upload. The next
+            // render encoder is rebound below and reads only Metallum-owned private memory.
+            GpuBufferSlice snapshot = commandEncoder.snapshotSodiumIndexedIndirectCommands(
+                    nativeCommandBuffer,
+                    indirectBufferOffset,
+                    requiredCommandBytes
+            );
+            indirectBuffer = (MetalGpuBuffer) snapshot.buffer();
+            indirectBufferOffset = snapshot.offset();
+        }
+
+        drawIndexedIndirectOwned(indirectBuffer, indirectBufferOffset, drawCount, 0L);
+    }
+
+    void drawIndexedIndirectOwned(
+            final @NonNull GpuBufferSlice commands,
+            final int drawCount,
+            final long drawnG5CarrierSlices
+    ) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
+        MetalGpuBuffer commandBuffer = (MetalGpuBuffer) commands.buffer();
+        long requiredBytes = requiredIndexedIndirectCommandBytes(drawCount, commands.length());
+        if (requiredBytes == 0L) {
+            return;
+        }
+        if (commandBuffer.hasCpuVisibleStorage()) {
+            throw new IllegalArgumentException("Prepared Sodium indirect commands must use private GPU storage");
+        }
+        drawIndexedIndirectOwned(
+                commandBuffer,
+                commands.offset(),
+                drawCount,
+                drawnG5CarrierSlices
+        );
+    }
+
+    private void drawIndexedIndirectOwned(
+            final MetalGpuBuffer indirectBuffer,
+            final long indirectBufferOffset,
+            final int drawCount,
+            final long drawnG5CarrierSlices
+    ) {
         MTLPrimitiveType primitiveType = primitiveTopology();
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             throw new UnsupportedOperationException("Metal backend does not support triangle fan indirect draws");
         }
-
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
-        MetalGpuBuffer nativeCommandBuffer = (MetalGpuBuffer) commands.buffer();
-        MTLRenderCommandEncoder enc = renderEncoder();
-        bindDrawState(enc);
-
-        long requiredCommandBytes = Math.multiplyExact(
-                (long) drawCount,
-                VkDrawIndexedIndirectCommand.SIZEOF
-        );
-        if (drawCount < 0 || commands.length() < requiredCommandBytes) {
-            throw new IllegalArgumentException("Indexed indirect command slice is too small");
+        boolean carrierGateRequired = GiReceiverRuntime.isRequested()
+                || VertexReflectionExperiment.isLayoutEnabled();
+        if (carrierGateRequired) {
+            CompactPositionCarrierSafety.beginCarrierAwareDraw();
         }
-        MemorySegment cpuCommands = nativeCommandBuffer.cpuVisibleSliceForEncoding(
-                commands.offset(),
-                requiredCommandBytes
-        );
-        if (cpuCommands != null) {
-            // Sodium grows its mapped indirect ring while rendering. On Apple Metal the first
-            // draw that crosses that resize boundary can leave the replacement MTLBuffer with
-            // invalid driver-side indirect-resource state. The command bytes are already visible
-            // to the CPU, so replay them as direct indexed draws in one native call instead of
-            // asking AGX to dereference the indirect MTLBuffer.
-            enc.drawIndexedPrimitivesCpuCommands(
+        this.compactPositionDrawGateHeld = carrierGateRequired;
+        try {
+            MTLRenderCommandEncoder enc = renderEncoder();
+            bindDrawState(enc);
+            prepareCompactPositionCarrierDraw(enc);
+            enc.drawIndexedPrimitivesIndirect(
                     primitiveType,
                     indexType,
                     nativeIndexBuffer.nativeHandle(),
-                    cpuCommands,
+                    indirectBuffer.nativeHandle(),
+                    indirectBufferOffset,
                     drawCount,
                     VkDrawIndexedIndirectCommand.SIZEOF
             );
+            if (this.g5TerrainPipeline) {
+                this.device.reportG5TerrainDraw(enc, drawnG5CarrierSlices);
+            }
+        } finally {
+            this.compactPositionDrawGateHeld = false;
+            if (carrierGateRequired) {
+                CompactPositionCarrierSafety.endCarrierAwareDraw();
+            }
+        }
+    }
+
+    /** Refreshes a terminal safety transition before any carrier-aware native draw is encoded. */
+    private void prepareCompactPositionCarrierDraw(final MTLRenderCommandEncoder encoder) {
+        if (!this.compactPositionCarrierPipeline) {
             return;
         }
+        if (!this.compactPositionDrawGateHeld) {
+            throw new IllegalStateException("Compact-position draw is outside its safety gate");
+        }
+        long currentRevision = CompactPositionCarrierSafety.revision();
+        if (!this.compactPositionDrawPrepared
+                || this.boundCompactPositionRevision != currentRevision) {
+            this.boundCompactPositionRevision = this.device.refreshCompactPositionCarrierBindings(
+                    encoder, this.g5TerrainPipeline
+            );
+            this.compactPositionDrawPrepared = true;
+        }
+    }
 
-        enc.drawIndexedPrimitivesIndirect(
-                primitiveType,
-                indexType,
-                nativeIndexBuffer.nativeHandle(),
-                nativeCommandBuffer.nativeHandle(),
-                commands.offset(),
-                drawCount,
-                VkDrawIndexedIndirectCommand.SIZEOF
-        );
+    static long requiredIndexedIndirectCommandBytes(final int drawCount, final long availableBytes) {
+        if (drawCount < 0) {
+            throw new IllegalArgumentException("Indexed indirect draw count cannot be negative");
+        }
+        long requiredBytes = Math.multiplyExact((long) drawCount, VkDrawIndexedIndirectCommand.SIZEOF);
+        if (availableBytes < requiredBytes) {
+            throw new IllegalArgumentException("Indexed indirect command slice is too small");
+        }
+        return requiredBytes;
     }
 
     @Override
@@ -365,6 +446,7 @@ final class MetalRenderPass implements RenderPassBackend {
                     && this.boundRenderEncoder != enc)) {
                 bindDrawState(enc);
             }
+            rejectAlternateCompactPositionCarrierDraw("drawMultipleIndexed");
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
             drawIndexedNative(enc, nativeIndexBuffer, draw.firstIndex(), draw.indexCount(), draw.baseVertex(), 1, drawIndexType, 0);
         }
@@ -382,6 +464,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
 
         bindDrawState(enc);
+        rejectAlternateCompactPositionCarrierDraw("draw");
 
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             drawTriangleFan(enc, firstVertex, vertexCount, instanceCount, firstInstance);
@@ -418,6 +501,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+        rejectAlternateCompactPositionCarrierDraw("drawIndirect");
 
         enc.drawPrimitivesIndirect(
                 primitiveType,
@@ -425,6 +509,25 @@ final class MetalRenderPass implements RenderPassBackend {
                 commands.offset(),
                 drawCount,
                 VkDrawIndirectCommand.SIZEOF
+        );
+    }
+
+    /**
+     * The exact Sodium carrier contract is admitted only for the owned private indexed-indirect
+     * seam above. Any future renderer route must add an equivalent gated binding proof before it
+     * can execute the carrier-aware PSO.
+     */
+    private void rejectAlternateCompactPositionCarrierDraw(final String route) {
+        if (!this.compactPositionCarrierPipeline) {
+            return;
+        }
+        if (GiReceiverRuntime.isRequested()) {
+            GiReceiverRuntime.admission().reportInvalid(
+                    "G5 carrier-aware terrain reached unsupported draw route " + route
+            );
+        }
+        throw new IllegalStateException(
+                "Compact-position terrain cannot use unsupported draw route " + route
         );
     }
 
@@ -498,6 +601,9 @@ final class MetalRenderPass implements RenderPassBackend {
         boolean reactiveOutput = compiledPipeline != null && compiledPipeline.reactiveOutput(
                 colorAttachment.mtlPixelFormat(), materialSceneAttachment
         );
+        boolean l6TemporalOutput = compiledPipeline != null && compiledPipeline.l6TemporalOutput(
+                colorAttachment.mtlPixelFormat(), materialSceneAttachment
+        );
         SceneLinearClearColor.Rgb linearClear = decodeClearColor
                 ? SceneLinearClearColor.extendedSrgbToLinear(clearColor.x(), clearColor.y(), clearColor.z())
                 : null;
@@ -506,6 +612,7 @@ final class MetalRenderPass implements RenderPassBackend {
                 depthTextureView,
                 semanticOutput,
                 reactiveOutput,
+                l6TemporalOutput,
                 colorTexture.getWidth(0),
                 colorTexture.getHeight(0),
                 clearColorNow,
@@ -693,7 +800,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
         boolean sidecarPipeline = compiledPipeline.usesSodiumLightSidecar();
         if (sidecarPipeline && this.boundRenderEncoder != enc) {
-            this.invalidateNativeEncoderState();
+            this.invalidateEncoderState();
             this.boundRenderEncoder = enc;
         }
 
@@ -724,6 +831,16 @@ final class MetalRenderPass implements RenderPassBackend {
                     colorFormat,
                     materialSceneAttachment
             );
+            this.g5TerrainPipeline = compiledPipeline.selectsG5TerrainReceiver(
+                    colorFormat,
+                    materialSceneAttachment
+            );
+            this.compactPositionCarrierPipeline =
+                    compiledPipeline.selectsCompactPositionCarrierConsumer(
+                            colorFormat,
+                            materialSceneAttachment
+                    );
+            this.compactPositionDrawPrepared = false;
             pipelineDirty = false;
 
             if (useDepth) {
@@ -755,9 +872,18 @@ final class MetalRenderPass implements RenderPassBackend {
             dirtyDescriptorMask = compiledPipeline.allResourceMask();
         }
 
-        if (this.advancedLightingPipeline && this.boundAdvancedRenderEncoder != enc) {
-            this.device.bindAdvancedLighting(enc);
+        boolean g5TerrainBindingMissing = this.g5TerrainPipeline
+                && this.boundG5TerrainRenderEncoder != enc;
+        if (this.advancedLightingPipeline
+                && (this.boundAdvancedRenderEncoder != enc || g5TerrainBindingMissing)) {
+            this.boundCompactPositionRevision =
+                    this.device.bindAdvancedLighting(enc, this.g5TerrainPipeline);
             this.boundAdvancedRenderEncoder = enc;
+            this.compactPositionDrawPrepared = this.compactPositionDrawGateHeld
+                    && this.compactPositionCarrierPipeline;
+            if (this.g5TerrainPipeline) {
+                this.boundG5TerrainRenderEncoder = enc;
+            }
         }
 
         if (scissorDirty) {
@@ -843,12 +969,15 @@ final class MetalRenderPass implements RenderPassBackend {
         return Long.bitCount(dirtyDescriptorMask) >= 2;
     }
 
-    private void invalidateNativeEncoderState() {
+    void invalidateEncoderState() {
         this.pipelineDirty = true;
         this.scissorDirty = true;
         this.vertexBuffersDirty = true;
         this.boundSidecarControlSlot = -1;
         this.boundAdvancedRenderEncoder = null;
+        this.boundG5TerrainRenderEncoder = null;
+        this.compactPositionDrawPrepared = false;
+        this.boundCompactPositionRevision = Long.MIN_VALUE;
         if (this.compiledPipeline != null) {
             this.dirtyDescriptorMask |= this.compiledPipeline.allResourceMask();
         }

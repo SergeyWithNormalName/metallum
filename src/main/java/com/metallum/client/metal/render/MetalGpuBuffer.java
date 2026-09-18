@@ -136,17 +136,8 @@ class MetalGpuBuffer extends GpuBuffer {
         return this.storage.duplicate().order(this.storage.order());
     }
 
-    @Nullable
-    MemorySegment cpuVisibleSliceForEncoding(final long offset, final long length) {
-        ByteBuffer current = this.storage;
-        if (current == null) {
-            return null;
-        }
-        return cpuVisibleSlice(current, offset, length);
-    }
-
-    static MemorySegment cpuVisibleSlice(final ByteBuffer storage, final long offset, final long length) {
-        return MemorySegment.ofBuffer(storage).asSlice(offset, length);
+    boolean hasCpuVisibleStorage() {
+        return this.storage != null;
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {

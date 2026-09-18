@@ -50,12 +50,15 @@ final class MetalGpuTextureView extends GpuTextureView {
         if (this.closed) {
             return;
         }
+        // Publish the terminal state before any deferred-release bookkeeping.  If a future
+        // release hook re-enters close(), it must not queue the native view twice or decrement
+        // the parent texture's view count twice.
+        this.closed = true;
         if (this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
             ((MetalGpuTexture) this.texture()).queueNativeRelease(handle);
         }
-        this.closed = true;
         ((MetalGpuTexture) this.texture()).removeView();
     }
 

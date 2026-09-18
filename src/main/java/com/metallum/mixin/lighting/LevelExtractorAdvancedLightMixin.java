@@ -14,6 +14,8 @@ import com.metallum.client.lighting.EntityShadowProxy;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.MinecraftLightPolicy;
+import com.metallum.client.gi.live.GiLiveRuntime;
+import com.metallum.client.gi.source.GiDynamicSourceCollector;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.voxel.VoxelClipmapController;
 import net.minecraft.client.Camera;
@@ -67,6 +69,17 @@ abstract class LevelExtractorAdvancedLightMixin {
     private long metallum$cameraHeldStableId;
 
     @Unique
+    @Nullable
+    private GiDynamicSourceCollector metallum$giDynamicSources;
+
+    @Unique
+    @Nullable
+    private GiDynamicSourceCollector metallum$giDynamicTickCollector;
+
+    @Unique
+    private long metallum$giDynamicOpenTick = -1L;
+
+    @Unique
     private CameraHeldLightTracker metallum$cameraHeldTracker() {
         CameraHeldLightTracker tracker = this.metallum$cameraHeldLightTracker;
         if (tracker == null) {
@@ -95,6 +108,10 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$entityShadowProxies = null;
         this.metallum$currentCamera = null;
         this.metallum$cameraHeldStableId = 0L;
+        this.metallum$giDynamicSources = null;
+        this.metallum$giDynamicTickCollector = null;
+        this.metallum$giDynamicOpenTick = -1L;
+        GiLiveRuntime.closeDynamicWorld(null);
         CameraHeldLightTracker tracker = this.metallum$cameraHeldLightTracker;
         if (tracker != null) {
             tracker.reset();
@@ -229,6 +246,7 @@ abstract class LevelExtractorAdvancedLightMixin {
                 camera.position().z
         );
         this.metallum$currentCamera = camera;
+        this.metallum$beginGiDynamicSourceTick(token);
         this.metallum$offerCameraHeldLight(camera, deltaTracker, token);
         if (debug && headCount % 60 == 1) {
             com.metallum.Metallum.LOGGER.info(
@@ -282,22 +300,37 @@ abstract class LevelExtractorAdvancedLightMixin {
         }
 
         BoundedDynamicLightCollector collector = this.metallum$dynamicLights;
+        GiDynamicSourceCollector giCollector = this.metallum$giDynamicTickCollector;
         DeltaTracker deltaTracker = this.metallum$dynamicLightDeltaTracker;
-        if (collector != null && deltaTracker != null && currentLevel != null) {
+        if ((collector != null || giCollector != null)
+                && deltaTracker != null && currentLevel != null) {
             try {
-                float partialTick = deltaTracker.getGameTimeDeltaPartialTick(
-                        !currentLevel.tickRateManager().isEntityFrozen(entity)
+                float partialTick = MinecraftLightPolicy.worldSpaceEntityPartialTick(
+                        currentLevel.tickRateManager().runsNormally(),
+                        deltaTracker.getGameTimeDeltaPartialTick(true)
                 );
-                if (MinecraftLightPolicy.cameraHeldStableIdMatches(
+                AdvancedLight light = MinecraftLightPolicy.entity(
+                        entity, partialTick,
+                        collector != null ? collector.world()
+                                : giCollector.snapshot().epoch().world()
+                );
+                if (giCollector != null && light != null) {
+                    giCollector.offer(light);
+                }
+                if (collector != null && MinecraftLightPolicy.cameraHeldStableIdMatches(
                         entity, this.metallum$cameraHeldStableId, collector.world()
                 )) {
                     // The local player's held item was injected before entity culling at the
                     // camera anchor, so this body-space duplicate must not compete with it.
                 } else {
-                    AdvancedLight light = MinecraftLightPolicy.entity(entity, partialTick, collector.world());
                     collector.offer(light);
                 }
             } catch (Throwable failure) {
+                if (giCollector != null) {
+                    this.metallum$giDynamicTickCollector = null;
+                    this.metallum$giDynamicSources = null;
+                    GiLiveRuntime.reportInvalid("dynamic entity source extraction failed");
+                }
                 this.metallum$dynamicLights = null;
                 this.metallum$dynamicLightDeltaTracker = null;
                 AdvancedLightRegistry.global().failClosed(
@@ -345,6 +378,23 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$entityShadowProxies = null;
         this.metallum$currentCamera = null;
         this.metallum$cameraHeldStableId = 0L;
+        GiDynamicSourceCollector giCollector = this.metallum$giDynamicTickCollector;
+        this.metallum$giDynamicTickCollector = null;
+        if (giCollector != null) {
+            try {
+                GiLiveRuntime.publishDynamicSources(
+                        giCollector.finishTick(),
+                        this.metallum$giDynamicOpenTick
+                );
+            } catch (Throwable failure) {
+                GiLiveRuntime.reportInvalid("dynamic-source publication failed");
+                this.metallum$giDynamicSources = null;
+                com.metallum.Metallum.LOGGER.warn(
+                        "G6 dynamic-source publication failed; disabling live GI",
+                        failure
+                );
+            }
+        }
         if (collector != null) {
             try {
                 AdvancedLightRegistry.global().publishDynamicFrame(
@@ -404,6 +454,25 @@ abstract class LevelExtractorAdvancedLightMixin {
     }
 
     @Unique
+    private void metallum$beginGiDynamicSourceTick(final LightWorldToken world) {
+        if (!GiLiveRuntime.isOperational() || this.level == null) return;
+        GiDynamicSourceCollector collector = this.metallum$giDynamicSources;
+        if (collector == null) {
+            collector = new GiDynamicSourceCollector(128, 2L);
+            this.metallum$giDynamicSources = collector;
+        }
+        // This is a real LevelExtractor source-extraction tick, not a server tick and not a
+        // presented-frame count. Frozen gameTime must not suppress offers, movement, removals,
+        // or expiry; MetalFX-generated presents do not execute this extraction lifecycle.
+        long observationTick = collector.nextObservationTick(world);
+        collector.beginTick(world, observationTick);
+        // The collector owns the cadence. A second counter can diverge from its publication
+        // tick and pair a new immutable membership snapshot with an older source tick.
+        this.metallum$giDynamicOpenTick = observationTick;
+        this.metallum$giDynamicTickCollector = collector;
+    }
+
+    @Unique
     private void metallum$offerCameraHeldLight(
             final Camera camera,
             final DeltaTracker deltaTracker,
@@ -433,7 +502,7 @@ abstract class LevelExtractorAdvancedLightMixin {
                             pose,
                             MinecraftLightPolicy.selectedHandSideOffset(player),
                             System.nanoTime()
-                    );
+            );
             AdvancedLight light = MinecraftLightPolicy.cameraHeld(player, partialTick, world, anchor);
             if (light != null) {
                 collector.offer(light);

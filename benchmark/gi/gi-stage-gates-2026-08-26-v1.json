@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "id": "gi-stage-gates-2026-08-26-v1",
+  "decision": "G2_COMPLETE_STRUCTURALLY_OFF",
+  "g0_current": "PASS_RECOVERED_BASELINE",
+  "g1_current": "PASS_ABSOLUTE_FLOOR_REVALIDATED",
+  "g2_current": "PASS_STRUCTURALLY_OFF_DIAGNOSTIC",
+  "g3_allowed": true,
+  "g3_started": false,
+  "evidence_interval_utc": [
+    "2026-08-26T12:34:39Z",
+    "2026-08-26T13:09:16Z"
+  ],
+  "source": {
+    "commit": "6a52f909d98506c01d80103175887d7c5665f916",
+    "source_sha256": "42e110e7adb5a63f4866c343ebd97faa4fee84e12630a3ae405bb3381c9650ba",
+    "artifact_sha256": "802cb8a6e831cd6bc5174fafaab9dd163d523a3d31ee3db4a3f668a29554c1b6",
+    "dirty_worktree": false
+  },
+  "historical_evidence": {
+    "g0": {
+      "path": "benchmark/gi/g0-acceptance-v1.json",
+      "sha256": "27bfb9f8e7c2546e8afbafa41110f4e118c2b6fc738c7af2f21db9ad56234130",
+      "decision": "REJECTED_BASELINE_FLOOR",
+      "preserved": true
+    },
+    "g1": {
+      "path": "benchmark/gi/g1-field-evidence-v1.json",
+      "sha256": "cde2718bcce613c14672df592c08a4d0ce36d1708906d2c9d1b3de17aad3e0df",
+      "decision": "SUPPORTED_PENDING_ABSOLUTE_FLOOR",
+      "relative_gate": "PASS",
+      "preserved": true
+    },
+    "g2": {
+      "path": "benchmark/gi/g2-semantic-evidence-v1.json",
+      "sha256": "0fdd0a3f0b621c721e84022d3ebf38864ccfd5611a9f681d88fcaf6aa50ff163",
+      "decision": "PASS_STRUCTURALLY_OFF_DIAGNOSTIC",
+      "preserved": true
+    }
+  },
+  "profile": {
+    "device": "Apple M1 Pro",
+    "monitor": "Built-in Retina Display",
+    "width": 3024,
+    "height": 1964,
+    "refresh_hz": 120,
+    "output": "native_hdr_scene",
+    "graphics": "fancy",
+    "render_distance": 16,
+    "simulation_distance": 12,
+    "max_fps": 260,
+    "vsync": false,
+    "metalfx": "OFF",
+    "lighting": "advanced",
+    "lighting_preset": "balanced",
+    "settings": "native-hdr-fancy-v1",
+    "fixture": "hdrtest-static-v1"
+  },
+  "g0_recovery": {
+    "classification": "TIER_C_RELEASE_ATTESTED_CURRENT_BASELINE",
+    "decision": "PASS",
+    "g1_allowed": true,
+    "warmup_frames": 1800,
+    "measure_frames": 3000,
+    "windows": 10,
+    "routes": [
+      {
+        "role": "overworld",
+        "route": "gi-g0-overworld-v1",
+        "average_fps_floor": 30.0,
+        "one_percent_low_fps_floor": 20.0,
+        "mean_average_fps": 44.08137115576706,
+        "mean_one_percent_low_fps": 31.946402320349627,
+        "mean_gpu_p95_ms": 24.570022895932198,
+        "runs": [
+          {
+            "receipt": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-overworld-1.accepted.json",
+            "receipt_sha256": "eb4f2a158fb2e1f70e638ecd8771d3a7757d0453a2d29f306232e4d2a00ea028",
+            "summary_sha256": "cc1ef52ea0e15efb0f94b9a3ac18d16ee79f4cfb71ecf5db516feace046f00d2",
+            "average_fps": 44.10438752356525,
+            "one_percent_low_fps": 31.83314304597726,
+            "gpu_p95_ms": 24.582729151006788,
+            "thermal_state": "nominal",
+            "gi_off_verified": true
+          },
+          {
+            "receipt": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-overworld-2.accepted.json",
+            "receipt_sha256": "163dc9ad7606560b4b2f6b5da574e99881f7bfedd82da500e07a0d23be35a0c5",
+            "summary_sha256": "66b50d0723c5a605bd5fc3a8d76e410d69ab128c51db4e083ddeccfcac7018fa",
+            "average_fps": 44.058354787968874,
+            "one_percent_low_fps": 32.059661594721995,
+            "gpu_p95_ms": 24.557316640857607,
+            "thermal_state": "nominal",
+            "gi_off_verified": true
+          }
+        ]
+      },
+      {
+        "role": "sealed_cave",
+        "route": "gi-g0-sealed-cave-v1",
+        "average_fps_floor": 20.0,
+        "one_percent_low_fps_floor": 10.0,
+        "mean_average_fps": 87.76507110135034,
+        "mean_one_percent_low_fps": 50.75073123400503,
+        "mean_gpu_p95_ms": 13.937179173808545,
+        "runs": [
+          {
+            "receipt": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-sealed-cave-1.accepted.json",
+            "receipt_sha256": "dce9a39603fdb570d7bed7480af0f8ccf623ac60a91dbf7e3f082861bdae251f",
+            "summary_sha256": "f4b595efdb8603c413554e562a0c74e4207bf6fbb24f3c6528eb0c4572a91f5d",
+            "average_fps": 87.94903717504413,
+            "one_percent_low_fps": 51.44167661022718,
+            "gpu_p95_ms": 13.872204162180424,
+            "thermal_state": "nominal",
+            "gi_off_verified": true
+          },
+          {
+            "receipt": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-sealed-cave-2.accepted.json",
+            "receipt_sha256": "4985a846eddfd34f95f8f8ab0e02bb4d521f141e045f6ec1f59d3ac284f0215c",
+            "summary_sha256": "64791db27de0f859a4a73fd5d03be2379c80f9cc4e2a2de42585099a312bb89e",
+            "average_fps": 87.58110502765658,
+            "one_percent_low_fps": 50.05978585778289,
+            "gpu_p95_ms": 14.002154185436666,
+            "thermal_state": "nominal",
+            "gi_off_verified": true
+          }
+        ]
+      },
+      {
+        "role": "nether",
+        "route": "gi-g0-nether-v1",
+        "average_fps_floor": 20.0,
+        "one_percent_low_fps_floor": 10.0,
+        "mean_average_fps": 35.72202157058601,
+        "mean_one_percent_low_fps": 28.12857238772572,
+        "mean_gpu_p95_ms": 32.21401872579008,
+        "runs": [
+          {
+            "receipt": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-nether-1.accepted.json",
+            "receipt_sha256": "ecfde4e52f1fb5b6b684d2c9a470a5a3312ab8ae30408564dab4657953cbc7bf",
+            "summary_sha256": "15430e307a4a61144e5a62e24ec65511d1b41c29522768fd4f77627a0904d566",
+            "average_fps": 35.70485343882551,
+            "one_percent_low_fps": 27.837187250708816,
+            "gpu_p95_ms": 32.19106247415766,
+            "thermal_state": "nominal",
+            "gi_off_verified": true
+          },
+          {
+            "receipt": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-nether-2.accepted.json",
+            "receipt_sha256": "65f9216dacbf34f6c5768ec6bc480442ecc9928b31487c17630f2b1e871ee901",
+            "summary_sha256": "2d392e2df7010aa08f1bd633c943f6152cf9048c6cd85dde5648391b07eafd98",
+            "average_fps": 35.7391897023465,
+            "one_percent_low_fps": 28.419957524742617,
+            "gpu_p95_ms": 32.236974977422506,
+            "thermal_state": "nominal",
+            "gi_off_verified": true
+          }
+        ]
+      }
+    ]
+  },
+  "g1_revalidation": {
+    "classification": "TIER_C_ABSOLUTE_FLOOR_REVALIDATION",
+    "decision": "PASS",
+    "g2_allowed": true,
+    "relative_gate_source": "benchmark/gi/g1-field-evidence-v1.json",
+    "relative_gate": "PASS",
+    "conditional_average_fps_floor": 28.0,
+    "conditional_one_percent_low_fps_floor": 20.0,
+    "overworld_receipts": [
+      "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-overworld-1.accepted.json",
+      "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g0-overworld-2.accepted.json"
+    ]
+  },
+  "g2_revalidation": {
+    "classification": "TIER_B_EXTENDED_DIAGNOSTIC_NOT_RELEASE",
+    "decision": "PASS",
+    "enabled_environment": "METALLUM_GI_G2_CAPTURE=1",
+    "gates": {
+      "maximum_average_fps_loss": 2.0,
+      "maximum_one_percent_low_regression_percent": 10.0,
+      "maximum_gpu_p95_regression_ms": 0.2,
+      "maximum_world_opaque_p95_regression_ms": 0.3
+    },
+    "short_screening_negative_evidence": {
+      "classification": "TIER_B_2X2_INSUFFICIENT_TWO_WINDOW_REGRESSION",
+      "control_summaries": [
+        "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-short-control-1.summary.json",
+        "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-short-control-2.summary.json"
+      ],
+      "candidate_summaries": [
+        "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-short-candidate-1.summary.json",
+        "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-short-candidate-2.summary.json"
+      ],
+      "control_summary_sha256": [
+        "671700692c6d1f7e073871c0f9dfd6fec249353899fcfde8215a36623b9fab6e",
+        "844d4a5adfd537df60c1af63e1d1a11c03b1eb1ded14169e9f199dfdc4ee1417"
+      ],
+      "candidate_summary_sha256": [
+        "dd61030b0bdd28c592c1336237a7c4e072c3af98e8723f012effc56d25b6488f",
+        "40588cd78e7276e6a7d2e2cf75d6aefaa229039ef71bf5e97489a4faacb153ed"
+      ],
+      "mean_average_fps_delta_percent": 1.113599901899387,
+      "mean_one_percent_low_delta_percent": 7.366714318082734,
+      "mean_gpu_p95_delta_ms": 0.564604124519974,
+      "pairwise_gpu_p95_regressions": 4,
+      "decision": "FAIL_GPU_P95_THRESHOLD"
+    },
+    "stage_attribution": {
+      "classification": "TIER_B_DETAILED_MARKERS",
+      "control_raw": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-stage-control.raw.jsonl",
+      "control_raw_sha256": "46fa4fa768a8d41b6244713b51d36d23d17e1d4ef613e0c5b118bad9d175311e",
+      "candidate_raw": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-stage-candidate.raw.jsonl",
+      "candidate_raw_sha256": "0ba1979e2dbc712a5fac79769d1d554c86ca270ee0ccce99f43d1b4746c03d98",
+      "world_opaque_control_p95_ms": 18.1019375,
+      "world_opaque_candidate_p95_ms": 18.116021,
+      "world_opaque_p95_delta_ms": 0.014083499999999027,
+      "whole_gpu_p95_delta_ms": -0.3824166487902414,
+      "decision": "PASS_NO_WORLD_OPAQUE_REGRESSION"
+    },
+    "extended_pair": {
+      "order": [
+        "candidate",
+        "control"
+      ],
+      "warmup_frames": 1800,
+      "measure_frames": 3000,
+      "windows": 10,
+      "control": {
+        "summary": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-extended-control.summary.json",
+        "summary_sha256": "8d29bcf539089043fb9030b2433da104e92306b40fa4c23e1a8413b3cd1b504f",
+        "raw": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-extended-control.raw.jsonl",
+        "raw_sha256": "7a357106a4165b2142ca2e95ad38bbbd9e99466e106b1cc1ad9e53107b1e436a",
+        "average_fps": 44.150808469271546,
+        "one_percent_low_fps": 32.52722604693188,
+        "gpu_p95_ms": 24.51783330179751,
+        "thermal_state": "nominal",
+        "dropped_timing_events": 0
+      },
+      "candidate": {
+        "summary": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-extended-candidate.summary.json",
+        "summary_sha256": "deb135626efae3c9256ea8f8d7aa4e6026c0123c36fe1adb7af26e1972c3825e",
+        "raw": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-extended-candidate.raw.jsonl",
+        "raw_sha256": "a219a2939783a7b51c09e6a21d218bbf06d0bf7a439a03408e94b7cb07fcf539",
+        "minecraft_log": "benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/g2-extended-candidate.minecraft.log",
+        "minecraft_log_sha256": "db4c5c1dc23b5e85bcf872f905b67a9d6082909008a04182e28da4af6653ffbc",
+        "average_fps": 44.71806553670843,
+        "one_percent_low_fps": 30.468873606633156,
+        "gpu_p95_ms": 24.410825013183057,
+        "thermal_state": "nominal",
+        "dropped_timing_events": 0
+      },
+      "deltas": {
+        "average_fps_percent": 1.28481694243876,
+        "one_percent_low_percent": -6.328090927055474,
+        "gpu_p95_percent": -0.4364508368143838,
+        "gpu_p95_ms": -0.10700828861445189
+      },
+      "decision": "PASS"
+    },
+    "semantic_capture": {
+      "accepted": 738,
+      "stale": 0,
+      "outside": 0,
+      "capacity_rejected": 0,
+      "discarded": 0,
+      "resident_tags": 738,
+      "active_candidates_at_shutdown": 0,
+      "peak_candidates": 64,
+      "peak_candidate_bytes": 1009152
+    },
+    "production_gi_resources": 0,
+    "production_gi_passes": 0,
+    "production_gi_bindings": 0
+  },
+  "next_stage": {
+    "stage": "G3",
+    "allowed": true,
+    "started": false,
+    "requires_separate_user_request": true
+  }
+}

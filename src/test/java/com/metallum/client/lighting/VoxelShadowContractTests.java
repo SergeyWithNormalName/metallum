@@ -116,12 +116,15 @@ public final class VoxelShadowContractTests {
                         && LocalVoxelShadowLayout.PARAMS_BYTES == 256
                         && LocalVoxelShadowLayout.PARAMS_RING_SLOTS == 3
                         && LocalVoxelShadowLayout.PROXY_STRIDE_BYTES == 32
+                        && LocalVoxelShadowLayout.PROXY_MASK_STRIDE_BYTES == 4
+                        && LocalVoxelShadowLayout.PROXY_MASKS_OFFSET_BYTES == 1_024
+                        && LocalVoxelShadowLayout.PROXY_PACKET_BYTES == 17_408
                         && LocalVoxelShadowLayout.CACHE_FACE_EDGE == 64
                         && LocalVoxelShadowLayout.CACHE_FACE_COUNT == 6
                         && LocalVoxelShadowLayout.CACHE_LAYER_COUNT == 4
                         && LocalVoxelShadowLayout.CACHE_HIT_STRIDE_BYTES == 8,
                 "L6 compile or upload caps changed");
-        require(balanced.paramsRingBytes() == 768L && balanced.proxyRingBytes() == 1_536L
+        require(balanced.paramsRingBytes() == 768L && balanced.proxyRingBytes() == 52_224L
                         && balanced.shadowReferenceRingBytes() == 196_608L
                         && balanced.visibilityCacheBytes() == 67_108_864L
                         && balanced.dynamicShadows().heroSlots() == 2
@@ -130,7 +133,7 @@ public final class VoxelShadowContractTests {
                         && balanced.dynamicShadows().pageBytes() == 196_608L
                         && balanced.dynamicShadows().atlasBytes() == 1_179_648L
                         && balanced.totalVisibilityAtlasBytes() == 68_288_512L
-                        && balanced.totalDedicatedBytes() == 68_487_424L
+                        && balanced.totalDedicatedBytes() == 68_538_112L
                         && performance.visibilityCacheBytes() == 33_554_432L
                         && performance.dynamicShadows().heroSlots() == 1
                         && performance.dynamicShadows().pageEdge() == 16
@@ -2252,6 +2255,7 @@ public final class VoxelShadowContractTests {
         double[] receiverInFront = new double[]{0.5, 0.0, 0.0};
         require(cpuSegmentIntersectsProxy(receiverInFront, lightBehind, min, max),
                 "Ray from in front to light behind must intersect zombie proxy");
+
     }
 
     private static void testNegativeAndLargeWorldCoordinates() {

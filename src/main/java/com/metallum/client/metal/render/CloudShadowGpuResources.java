@@ -17,7 +17,7 @@ import java.util.Objects;
 import java.util.OptionalDouble;
 
 /**
- * Owns GPU resources and preintegrated periodic transmittance for Metallum Cloud Shadows.
+ * Owns the periodic cloud texture: R is preintegrated transmittance, G is base coverage.
  */
 final class CloudShadowGpuResources implements AutoCloseable {
     private final MetalDevice device;
@@ -40,9 +40,9 @@ final class CloudShadowGpuResources implements AutoCloseable {
         this.currentWidth = 256;
         this.currentHeight = 256;
         this.transmittanceTexture = (MetalGpuTexture) device.createTexture(
-                "Metallum cloud transmittance",
+                "Metallum cloud transmittance and coverage",
                 GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
-                GpuFormat.R8_UNORM,
+                GpuFormat.RG8_UNORM,
                 this.currentWidth,
                 this.currentHeight,
                 1,
@@ -57,10 +57,11 @@ final class CloudShadowGpuResources implements AutoCloseable {
                 1,
                 OptionalDouble.empty()
         );
-        this.stagingBuffer = ByteBuffer.allocateDirect(this.currentWidth * this.currentHeight)
+        this.stagingBuffer = ByteBuffer.allocateDirect(this.currentWidth * this.currentHeight * 2)
                 .order(ByteOrder.nativeOrder());
         for (int i = 0; i < this.currentWidth * this.currentHeight; i++) {
             this.stagingBuffer.put((byte) 0xFF);
+            this.stagingBuffer.put((byte) 0x00);
         }
         this.stagingBuffer.flip();
         this.device.commandEncoder.writeToTexture(
@@ -92,6 +93,7 @@ final class CloudShadowGpuResources implements AutoCloseable {
                 this.stagingBuffer.clear();
                 for (int i = 0; i < totalPixels; i++) {
                     this.stagingBuffer.put((byte) 0xFF);
+                    this.stagingBuffer.put((byte) 0x00);
                 }
                 this.stagingBuffer.flip();
                 this.device.commandEncoder.writeToTexture(
@@ -108,6 +110,13 @@ final class CloudShadowGpuResources implements AutoCloseable {
             return;
         }
 
+        // Coverage in G is direction-independent and remains useful for dusk/night water.
+        // Do not keep rebuilding the eight-tap volumetric R channel while direct shadows are
+        // ineligible; a flat generation still refreshes both channels on resource changes.
+        CloudShadowMode generationMode = frameState.directShadowEnabled()
+                ? mode
+                : CloudShadowMode.FLAT;
+
         int srcWidth = source.width();
         int srcHeight = source.height();
         if (this.currentWidth != srcWidth || this.currentHeight != srcHeight) {
@@ -115,28 +124,28 @@ final class CloudShadowGpuResources implements AutoCloseable {
             this.currentWidth = srcWidth;
             this.currentHeight = srcHeight;
             this.transmittanceTexture = (MetalGpuTexture) this.device.createTexture(
-                    "Metallum cloud transmittance",
+                    "Metallum cloud transmittance and coverage",
                     GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
-                    GpuFormat.R8_UNORM,
+                    GpuFormat.RG8_UNORM,
                     this.currentWidth,
                     this.currentHeight,
                     1,
                     1
             );
-            this.stagingBuffer = ByteBuffer.allocateDirect(this.currentWidth * this.currentHeight)
+            this.stagingBuffer = ByteBuffer.allocateDirect(this.currentWidth * this.currentHeight * 2)
                     .order(ByteOrder.nativeOrder());
             this.cachedMode = CloudShadowMode.NONE;
             this.cachedPatternGeneration = Long.MIN_VALUE;
         }
 
         boolean rebuildNeeded = false;
-        if (this.cachedMode != mode) {
+        if (this.cachedMode != generationMode) {
             rebuildNeeded = true;
         } else if (this.cachedPatternGeneration != source.generation()) {
             rebuildNeeded = true;
         } else if (Math.abs(this.cachedOpacity - frameState.cloudOpacity()) > 0.01f) {
             rebuildNeeded = true;
-        } else if (mode == CloudShadowMode.VOLUMETRIC) {
+        } else if (generationMode == CloudShadowMode.VOLUMETRIC) {
             float dx = Math.abs(this.cachedToLightX - frameState.toLightX());
             float dy = Math.abs(this.cachedToLightY - frameState.toLightY());
             float dz = Math.abs(this.cachedToLightZ - frameState.toLightZ());
@@ -149,8 +158,8 @@ final class CloudShadowGpuResources implements AutoCloseable {
 
         if (rebuildNeeded) {
             this.stagingBuffer.clear();
-            source.generateTransmittanceBytes(
-                    mode,
+            source.generateTextureBytes(
+                    generationMode,
                     frameState.toLightX(),
                     frameState.toLightY(),
                     frameState.toLightZ(),
@@ -168,7 +177,7 @@ final class CloudShadowGpuResources implements AutoCloseable {
                     this.currentWidth,
                     this.currentHeight
             );
-            this.cachedMode = mode;
+            this.cachedMode = generationMode;
             this.cachedPatternGeneration = source.generation();
             this.cachedOpacity = frameState.cloudOpacity();
             this.cachedToLightX = frameState.toLightX();

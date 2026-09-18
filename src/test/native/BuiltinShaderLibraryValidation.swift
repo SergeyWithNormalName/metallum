@@ -66,13 +66,14 @@ private enum BuiltinShaderLibraryValidationMain {
 
             // Clustered lighting is lazy and optional: its failure disables only the
             // Advanced generation and must not poison the already-valid base Metal device.
+            let clusterSliceCount: UInt32 = 6
             do {
                 guard setenv("METALLUM_NATIVE_CLUSTER_PIPELINE_FORCE_FAILURE", "1", 1) == 0 else {
                     throw ValidationFailure.message("Could not enable cluster-pipeline failure injection")
                 }
                 defer { unsetenv("METALLUM_NATIVE_CLUSTER_PIPELINE_FORCE_FAILURE") }
                 let rejected = createLightingContext(
-                    objectPointer(device as AnyObject), 1, 1, 64, 1, 1, 6
+                    objectPointer(device as AnyObject), 1, 1, 64, 1, 1, clusterSliceCount
                 )
                 if let rejected {
                     releaseLightingContext(rejected)
@@ -88,7 +89,7 @@ private enum BuiltinShaderLibraryValidationMain {
             }
 
             guard let lightingContext = createLightingContext(
-                objectPointer(device as AnyObject), 2, 1, 64, 1, 1, 6
+                objectPointer(device as AnyObject), 2, 1, 64, 1, 1, clusterSliceCount
             ) else {
                 throw ValidationFailure.message("Lazy clustered-lighting recovery failed")
             }

@@ -48,6 +48,7 @@ BENCHMARK_SCALER_MODES = (
     "OFF",
     "QUALITY",
     "PERFORMANCE",
+    "TEMPORAL",
     "TEMPORAL_QUALITY",
     "TEMPORAL_PERFORMANCE",
     "TEMPORAL_ULTRA_PERFORMANCE",
@@ -160,10 +161,13 @@ WORKLOAD_CONTRACTS = frozenset({
 L3_FRAME_GRAPH_VERSION = 4
 L4_FRAME_GRAPH_VERSION = 5
 L6_FRAME_GRAPH_VERSION = 6
+WORLD_OPAQUE_STAGE = "world opaque"
 LIGHT_CLUSTER_STAGE = "light upload + cluster build"
 SUN_SHADOW_STAGE = "sun shadow"
 VOXEL_UPLOAD_UPDATE_STAGE = "voxel upload + update"
 DYNAMIC_LOCAL_SHADOW_STAGE = "dynamic local shadow"
+GI_INJECT_STAGE = "GI_INJECT"
+GI_TRANSPORT_STAGE = "GI_TRANSPORT"
 DYNAMIC_LOCAL_SHADOW_P95_BUDGET_MS = {
     "balanced": 1.0,
     "ultra": 2.0,
@@ -198,6 +202,68 @@ VOXEL_CLIPMAP_INTEGER_KEYS = (
 VOXEL_CLIPMAP_KEYS = frozenset({
     "active", "output_independent", *VOXEL_CLIPMAP_INTEGER_KEYS,
 })
+GI_INTEGER_KEYS = (
+    "contract_version", "resource_count", "pass_count", "binding_count",
+    "shader_symbol_count", "allocated_bytes", "resident_bytes",
+    "valid_probes", "unknown_probes", "dirty_queued_total",
+    "dirty_completed_total", "dirty_discarded_total", "dirty_pending",
+    "injection_dispatches", "transport_dispatches", "source_epoch",
+    "probe_epoch", "field_epoch", "stale_cell_rejects",
+)
+GI_V2_INTEGER_KEYS = GI_INTEGER_KEYS + ("full_volume_rebuilds",)
+GI_RESET_REASON_KEYS = frozenset({
+    "none", "world_change", "teleport", "scroll", "source_epoch",
+    "explicit", "device_reset",
+})
+GI_FALLBACK_REASON_KEYS = frozenset({
+    "none", "disabled", "unavailable", "invalid_input", "stale_data",
+    "budget", "native_failure",
+})
+GI_V1_KEYS = frozenset({
+    "mode", "reset_reasons", "fallback_reasons", *GI_INTEGER_KEYS,
+})
+GI_V2_KEYS = frozenset({
+    "mode", "reset_reasons", "fallback_reasons", *GI_V2_INTEGER_KEYS,
+})
+G4_RESOURCE_COUNT = 11
+G4_PASS_COUNT = 4
+G4_BRICK_COUNT = 192
+G4_ALLOCATED_BYTES = 4_020_576
+G4_RESIDENT_BYTES = 1_966_080
+G4_INJECT_ACTIVE_FRAMES = 24
+G4_REPORT_FRAMES = 300
+G4_METADATA_MODE = "g4_transport"
+G5_RECEIVER_METADATA_MODE = "g5_vertex_receiver"
+G6_LIVE_METADATA_MODE = "g6_live"
+GI_V3_METADATA_MODES = frozenset({
+    G4_METADATA_MODE,
+    G5_RECEIVER_METADATA_MODE,
+})
+G4_FINAL_COUNTERS = {
+    "dirty_queued_total": G4_BRICK_COUNT,
+    "dirty_completed_total": G4_BRICK_COUNT,
+    "dirty_discarded_total": 0,
+    "dirty_pending": 0,
+    "injection_dispatches": G4_BRICK_COUNT,
+    "full_volume_rebuilds": 1,
+    "transport_dispatches": 1,
+    "field_epoch": 1,
+}
+G5_ZERO_FIELD_COUNTERS = {
+    "valid_probes": 0,
+    "unknown_probes": 0,
+    "dirty_queued_total": 0,
+    "dirty_completed_total": 0,
+    "dirty_discarded_total": 0,
+    "dirty_pending": 0,
+    "injection_dispatches": 0,
+    "transport_dispatches": 0,
+    "source_epoch": 0,
+    "probe_epoch": 0,
+    "field_epoch": 0,
+    "stale_cell_rejects": 0,
+    "full_volume_rebuilds": 0,
+}
 VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS = {
     "performance": 0.15,
     "balanced": 0.40,
@@ -214,6 +280,7 @@ STABLE_METADATA_KEYS = (
     "sodium_settings_sha256", "configured_gui_scale",
     "active_resource_pack_ids", "sodium_chunk_builder_threads",
     "hdr_bloom_strength", "hdr_strength", "persistent_metalfx_mode",
+    "global_illumination_mode",
     "world", "fixture", "fixture_sha256", "route", "route_sha256",
     "benchmark_player_name", "benchmark_player_uuid", "benchmark_dimension",
     "benchmark_simulation_frozen", "monitor", "os_version",
@@ -268,10 +335,14 @@ class TimingWindow:
     renderer_generation: dict[str, Any] | None
     clustered_lighting: dict[str, Any] | None
     voxel_clipmaps: dict[str, Any] | None
+    global_illumination: dict[str, Any] | None
+    world_opaque_stage: dict[str, Any] | None
     light_cluster_stage: dict[str, Any] | None
     sun_shadow_stage: dict[str, Any] | None
     voxel_upload_update_stage: dict[str, Any] | None
     dynamic_local_shadow_stage: dict[str, Any] | None
+    gi_inject_stage: dict[str, Any] | None
+    gi_transport_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -396,6 +467,398 @@ def _parse_voxel_clipmaps(value: Any, line: int) -> dict[str, Any]:
             f"line {line}: voxel_clipmaps.heap_used_bytes exceeds heap_bytes"
         )
     return result
+
+
+def _parse_reason_counters(
+    value: Any, field: str, expected_keys: frozenset[str], line: int,
+) -> dict[str, int]:
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ReportError(f"line {line}: {field} has invalid keys")
+    return {
+        key: _integer(value.get(key), f"{field}.{key}", line)
+        for key in sorted(expected_keys)
+    }
+
+
+def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: global_illumination has invalid keys")
+    contract_version = _integer(
+        value.get("contract_version"), "global_illumination.contract_version", line
+    )
+    expected_keys = GI_V1_KEYS if contract_version == 1 else GI_V2_KEYS
+    # G4 schema v3 intentionally reuses the strict v2 key set: the version marks
+    # combined G3+G4 ownership while transport_dispatches/valid_probes/etc. are
+    # already reserved fields. Unknown keys remain a hard error.
+    if contract_version not in (1, 2, 3) or set(value) != expected_keys:
+        raise ReportError(f"line {line}: global_illumination has invalid keys")
+    mode = value.get("mode")
+    if mode not in ("off", "active"):
+        raise ReportError(
+            f"line {line}: global_illumination.mode must be 'off' or 'active'"
+        )
+    result: dict[str, Any] = {"mode": mode}
+    for key in GI_INTEGER_KEYS:
+        result[key] = _integer(value.get(key), f"global_illumination.{key}", line)
+    result["full_volume_rebuilds"] = (
+        _integer(
+            value.get("full_volume_rebuilds"),
+            "global_illumination.full_volume_rebuilds", line,
+        )
+        if contract_version >= 2 else 0
+    )
+    result["reset_reasons"] = _parse_reason_counters(
+        value.get("reset_reasons"), "global_illumination.reset_reasons",
+        GI_RESET_REASON_KEYS, line,
+    )
+    result["fallback_reasons"] = _parse_reason_counters(
+        value.get("fallback_reasons"), "global_illumination.fallback_reasons",
+        GI_FALLBACK_REASON_KEYS, line,
+    )
+    if result["resident_bytes"] > result["allocated_bytes"]:
+        raise ReportError(
+            f"line {line}: global_illumination.resident_bytes exceeds allocated_bytes"
+        )
+    drained = result["dirty_completed_total"] + result["dirty_discarded_total"]
+    if drained > result["dirty_queued_total"]:
+        raise ReportError(
+            f"line {line}: global_illumination dirty counters exceed queued work"
+        )
+    if result["dirty_pending"] != result["dirty_queued_total"] - drained:
+        raise ReportError(
+            f"line {line}: global_illumination dirty_pending algebra is invalid"
+        )
+    if contract_version == 3:
+        if mode != "active" \
+                or result["allocated_bytes"] != G4_ALLOCATED_BYTES \
+                or result["resident_bytes"] != G4_RESIDENT_BYTES \
+                or result["resource_count"] != G4_RESOURCE_COUNT \
+                or result["pass_count"] != G4_PASS_COUNT \
+                or result["binding_count"] != 0 \
+                or result["shader_symbol_count"] != 0 \
+                or result["dirty_queued_total"] not in (0, G4_BRICK_COUNT) \
+                or result["dirty_discarded_total"] != 0 \
+                or result["injection_dispatches"] != result["dirty_completed_total"] \
+                or result["full_volume_rebuilds"] not in (0, 1) \
+                or result["transport_dispatches"] not in (0, 1) \
+                or result["field_epoch"] != result["transport_dispatches"] \
+                or result["stale_cell_rejects"] != 0 \
+                or any(result["reset_reasons"].values()) \
+                or any(result["fallback_reasons"].values()):
+            raise ReportError(
+                f"line {line}: G4 global_illumination v3 shape is invalid"
+            )
+    if mode == "off":
+        nonzero = [
+            key for key in GI_V2_INTEGER_KEYS
+            if key != "contract_version" and result[key] != 0
+        ]
+        nonzero += [
+            f"reset_reasons.{key}"
+            for key, count in result["reset_reasons"].items() if count != 0
+        ]
+        nonzero += [
+            f"fallback_reasons.{key}"
+            for key, count in result["fallback_reasons"].items() if count != 0
+        ]
+        if nonzero:
+            raise ReportError(
+                f"line {line}: GI_OFF contains nonzero telemetry: {', '.join(nonzero)}"
+            )
+    return result
+
+
+def _is_g5_zero_field(gi: dict[str, Any]) -> bool:
+    return all(gi.get(key) == expected for key, expected in G5_ZERO_FIELD_COUNTERS.items())
+
+
+def _validate_g4_window_phase(window: TimingWindow) -> None:
+    gi = window.global_illumination
+    if gi is None or gi["contract_version"] != 3:
+        return
+    if window.metadata.get("global_illumination_mode") == G5_RECEIVER_METADATA_MODE \
+            and _is_g5_zero_field(gi):
+        if window.phase not in ("startup", "warmup", "measure"):
+            raise ReportError(
+                f"line {window.line}: G5 receiver contract v3 has an invalid "
+                "benchmark phase"
+            )
+        if window.gi_inject_stage is not None or window.gi_transport_stage is not None:
+            raise ReportError(
+                f"line {window.line}: G5 zero-ready field contains G4 dispatch timing"
+            )
+        return
+    if window.phase == "startup":
+        if gi["transport_dispatches"] != 0 \
+                or gi["field_epoch"] != 0 \
+                or gi["valid_probes"] != 0 \
+                or window.gi_transport_stage is not None:
+            raise ReportError(
+                f"line {window.line}: G4 startup must not contain transport work"
+            )
+        return
+    if window.phase not in ("warmup", "measure"):
+        raise ReportError(
+            f"line {window.line}: G4 contract v3 has an invalid benchmark phase"
+        )
+    for key, expected in G4_FINAL_COUNTERS.items():
+        if gi[key] != expected:
+            raise ReportError(
+                f"line {window.line}: G4 {window.phase} telemetry is not final"
+            )
+    if not 0 < gi["valid_probes"] <= 32 * 32 * 32:
+        raise ReportError(
+            f"line {window.line}: G4 final field contains no valid surface probes"
+        )
+    if window.gi_inject_stage is not None:
+        raise ReportError(
+            f"line {window.line}: GI_INJECT timing must occur only during G4 startup"
+        )
+    if window.phase == "measure" and window.gi_transport_stage is not None:
+        raise ReportError(
+            f"line {window.line}: GI_TRANSPORT timing must occur only during G4 warmup"
+        )
+
+
+def _validate_g5_zero_receiver_report(windows: Sequence[TimingWindow]) -> None:
+    phase_rank = {"startup": 0, "warmup": 1, "measure": 2}
+    phase_windows: dict[str, list[TimingWindow]] = {
+        "startup": [], "warmup": [], "measure": [],
+    }
+    previous_phase = -1
+    runtime_identity: tuple[Any, ...] | None = None
+    identity_keys = (
+        "commit", "source_sha256", "artifact_sha256", "route", "route_sha256",
+        "fixture", "fixture_sha256", "settings_id", "settings_spec_sha256",
+        "settings_sha256",
+    )
+    for window in windows:
+        rank = phase_rank.get(window.phase or "", -1)
+        if rank < previous_phase:
+            raise ReportError(
+                f"line {window.line}: G5 receiver benchmark phases are out of order"
+            )
+        previous_phase = rank
+        expected_generation = {"startup": 0, "warmup": 1, "measure": 2}[window.phase]
+        expected_segment = -1 if window.phase == "startup" else 0
+        expected_scaler = "UNKNOWN" if window.phase == "startup" else "OFF"
+        if window.generation != expected_generation \
+                or window.segment != expected_segment \
+                or window.scaler != expected_scaler:
+            raise ReportError(
+                f"line {window.line}: G5 receiver benchmark phase identity is invalid"
+            )
+        if window.frames != G4_REPORT_FRAMES:
+            raise ReportError(
+                f"line {window.line}: G5 receiver timing window is not 300 frames"
+            )
+        gi = window.global_illumination
+        assert gi is not None
+        if not _is_g5_zero_field(gi) \
+                or window.gi_inject_stage is not None \
+                or window.gi_transport_stage is not None:
+            raise ReportError(
+                f"line {window.line}: G5 zero-ready field contains transport state"
+            )
+        identity = tuple(window.metadata.get(key) for key in identity_keys)
+        if runtime_identity is None:
+            runtime_identity = identity
+            commit, source, artifact, route, route_sha, fixture, fixture_sha, \
+                settings, settings_spec, settings_sha = identity
+            if not isinstance(commit, str) \
+                    or re.fullmatch(r"[0-9a-f]{12}", commit) is None \
+                    or not isinstance(source, str) \
+                    or re.fullmatch(r"[0-9a-f]{64}", source) is None \
+                    or not isinstance(artifact, str) \
+                    or re.fullmatch(r"[0-9a-f]{64}", artifact) is None \
+                    or route != "gi-g4-overworld-v1" \
+                    or route_sha != "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d" \
+                    or fixture != "hdrtest-static-v1" \
+                    or fixture_sha != "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5" \
+                    or settings != "native-hdr-fancy-v1" \
+                    or settings_spec != "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+                    or settings_sha != "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3" \
+                    or window.metadata.get("dirty_worktree") is not False:
+                raise ReportError(
+                    f"line {window.line}: G5 source/route/settings identity is invalid"
+                )
+        elif identity != runtime_identity \
+                or window.metadata.get("dirty_worktree") is not False:
+            raise ReportError(
+                f"line {window.line}: G5 source/route/settings identity drifted"
+            )
+        phase_windows[window.phase].append(window)
+
+    for phase in ("warmup", "measure"):
+        if len(phase_windows[phase]) != 2:
+            raise ReportError(
+                f"G5 receiver report must contain exactly two 300-frame {phase} windows"
+            )
+
+
+def _validate_g4_report(windows: Sequence[TimingWindow]) -> None:
+    g4_windows = [
+        window for window in windows
+        if window.global_illumination is not None
+        and window.global_illumination["contract_version"] == 3
+    ]
+    if not g4_windows:
+        return
+    if len(g4_windows) != len(windows):
+        raise ReportError("G4 report mixes contract v3 with another GI contract")
+    metadata_modes = {
+        window.metadata.get("global_illumination_mode") for window in g4_windows
+    }
+    if len(metadata_modes) != 1:
+        raise ReportError("GI contract v3 report mixes G4 and G5 metadata modes")
+    if metadata_modes == {G5_RECEIVER_METADATA_MODE} \
+            and all(
+                window.global_illumination is not None
+                and _is_g5_zero_field(window.global_illumination)
+                for window in g4_windows
+            ):
+        _validate_g5_zero_receiver_report(g4_windows)
+        return
+
+    phase_rank = {"startup": 0, "warmup": 1, "measure": 2}
+    previous_phase = -1
+    previous_startup: dict[str, Any] | None = None
+    startup_windows: list[TimingWindow] = []
+    warmup_windows: list[TimingWindow] = []
+    measured_windows: list[TimingWindow] = []
+    final_source_epoch: int | None = None
+    final_probe_epoch: int | None = None
+    frozen_startup_epochs: tuple[int, int] | None = None
+    transport_timings: list[TimingWindow] = []
+    injection_timed_frames = 0
+    runtime_identity: tuple[Any, ...] | None = None
+    identity_keys = (
+        "commit", "source_sha256", "artifact_sha256", "route", "route_sha256",
+        "fixture", "fixture_sha256", "settings_id", "settings_spec_sha256",
+        "settings_sha256",
+    )
+    monotonic_keys = (
+        "dirty_queued_total", "dirty_completed_total", "dirty_pending",
+        "injection_dispatches", "full_volume_rebuilds", "source_epoch",
+        "probe_epoch",
+    )
+    for window in g4_windows:
+        rank = phase_rank.get(window.phase or "", -1)
+        if rank < previous_phase:
+            raise ReportError(
+                f"line {window.line}: G4 benchmark phases are out of order"
+            )
+        previous_phase = rank
+        gi = window.global_illumination
+        assert gi is not None
+        expected_generation = {"startup": 0, "warmup": 1, "measure": 2}[window.phase]
+        expected_segment = -1 if window.phase == "startup" else 0
+        expected_scaler = "UNKNOWN" if window.phase == "startup" else "OFF"
+        if window.generation != expected_generation \
+                or window.segment != expected_segment \
+                or window.scaler != expected_scaler:
+            raise ReportError(
+                f"line {window.line}: G4 benchmark phase identity is invalid"
+            )
+        identity = tuple(window.metadata.get(key) for key in identity_keys)
+        if runtime_identity is None:
+            runtime_identity = identity
+            commit, source, artifact, route, route_sha, fixture, fixture_sha, \
+                settings, settings_spec, settings_sha = identity
+            if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{12}", commit) is None \
+                    or not isinstance(source, str) or re.fullmatch(r"[0-9a-f]{64}", source) is None \
+                    or not isinstance(artifact, str) or re.fullmatch(r"[0-9a-f]{64}", artifact) is None \
+                    or route != "gi-g4-overworld-v1" \
+                    or route_sha != "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d" \
+                    or fixture != "hdrtest-static-v1" \
+                    or fixture_sha != "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5" \
+                    or settings != "native-hdr-fancy-v1" \
+                    or settings_spec != "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+                    or settings_sha != "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3" \
+                    or window.metadata.get("dirty_worktree") is not False:
+                raise ReportError(
+                    f"line {window.line}: G4 source/route/settings identity is invalid"
+                )
+        elif identity != runtime_identity or window.metadata.get("dirty_worktree") is not False:
+            raise ReportError(
+                f"line {window.line}: G4 source/route/settings identity drifted"
+            )
+        if window.phase == "startup":
+            startup_windows.append(window)
+            if previous_startup is not None:
+                for key in monotonic_keys:
+                    if key == "dirty_pending":
+                        continue
+                    if gi[key] < previous_startup[key]:
+                        raise ReportError(
+                            f"line {window.line}: G4 startup progression regressed: {key}"
+                        )
+            previous_startup = gi
+            if gi["dirty_completed_total"] > 0 \
+                    or gi["source_epoch"] > 0 or gi["probe_epoch"] > 0:
+                epochs = (gi["source_epoch"], gi["probe_epoch"])
+                if min(epochs) <= 0:
+                    raise ReportError(
+                        f"line {window.line}: G4 populated startup epochs are not positive"
+                    )
+                if frozen_startup_epochs is None:
+                    frozen_startup_epochs = epochs
+                elif epochs != frozen_startup_epochs:
+                    raise ReportError(
+                        f"line {window.line}: G4 startup source/probe epoch drifted"
+                    )
+        else:
+            (warmup_windows if window.phase == "warmup" else measured_windows).append(window)
+            if final_source_epoch is None:
+                final_source_epoch = gi["source_epoch"]
+                final_probe_epoch = gi["probe_epoch"]
+                if final_source_epoch <= 0 or final_probe_epoch <= 0:
+                    raise ReportError(
+                        f"line {window.line}: G4 final epochs must be positive"
+                    )
+            elif gi["source_epoch"] != final_source_epoch \
+                    or gi["probe_epoch"] != final_probe_epoch:
+                    raise ReportError(
+                        f"line {window.line}: G4 source/probe epochs drifted after warmup"
+                    )
+            if frozen_startup_epochs is not None \
+                    and (gi["source_epoch"], gi["probe_epoch"]) != frozen_startup_epochs:
+                raise ReportError(
+                    f"line {window.line}: G4 final epochs differ from frozen startup"
+                )
+        if window.gi_inject_stage is not None:
+            if window.phase != "startup":
+                raise ReportError(
+                    f"line {window.line}: GI_INJECT timing must occur only during G4 startup"
+                )
+            injection_timed_frames += window.gi_inject_stage["frames"]
+        if window.gi_transport_stage is not None:
+            transport_timings.append(window)
+
+    if len(startup_windows) < 2 \
+            or any(window.frames != G4_REPORT_FRAMES for window in startup_windows) \
+            or sum(window.frames for window in startup_windows) < 600:
+        raise ReportError(
+            "G4 report must contain at least 600 startup frames in 300-frame windows"
+        )
+    if len(warmup_windows) != 2 \
+            or any(window.frames != G4_REPORT_FRAMES for window in warmup_windows):
+        raise ReportError("G4 report must contain exactly two 300-frame warmup windows")
+    if len(measured_windows) != 2 \
+            or any(window.frames != G4_REPORT_FRAMES for window in measured_windows):
+        raise ReportError("G4 report must contain exactly two 300-frame measure windows")
+    if injection_timed_frames != G4_INJECT_ACTIVE_FRAMES:
+        raise ReportError(
+            "G4 report must contain exactly 24 startup GI_INJECT active frames"
+        )
+    if len(transport_timings) != 1 \
+            or transport_timings[0].phase != "warmup" \
+            or transport_timings[0].gi_transport_stage is None \
+            or transport_timings[0].gi_transport_stage["frames"] != 1:
+        raise ReportError(
+            "G4 report must contain exactly one single-dispatch GI_TRANSPORT "
+            "timing during warmup"
+        )
 
 
 def _parse_timing_stage(
@@ -998,7 +1461,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
     if not isinstance(payload, dict):
         raise ReportError(f"line {line}: JSON value must be an object")
     schema = _integer(payload.get("schema_version"), "schema_version", line, 1)
-    if schema not in (1, 2, 3, 4, 5):
+    if schema not in (1, 2, 3, 4, 5, 6):
         raise ReportError(f"line {line}: unsupported schema_version {schema}")
     detail = payload.get("detail_enabled")
     if not isinstance(detail, bool):
@@ -1075,6 +1538,14 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_voxel_clipmaps(payload.get("voxel_clipmaps"), line)
             if schema >= 5 else None
         ),
+        global_illumination=(
+            _parse_global_illumination(payload.get("global_illumination"), line)
+            if schema >= 6 else None
+        ),
+        world_opaque_stage=(
+            _parse_timing_stage(payload.get("stages"), WORLD_OPAQUE_STAGE, line)
+            if schema >= 4 else None
+        ),
         light_cluster_stage=(
             _parse_light_cluster_stage(payload.get("stages"), line)
             if schema >= 4 else None
@@ -1090,6 +1561,14 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         dynamic_local_shadow_stage=(
             _parse_timing_stage(payload.get("stages"), DYNAMIC_LOCAL_SHADOW_STAGE, line)
             if schema >= 5 else None
+        ),
+        gi_inject_stage=(
+            _parse_timing_stage(payload.get("stages"), GI_INJECT_STAGE, line)
+            if schema >= 6 else None
+        ),
+        gi_transport_stage=(
+            _parse_timing_stage(payload.get("stages"), GI_TRANSPORT_STAGE, line)
+            if schema >= 6 else None
         ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
@@ -1112,6 +1591,35 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
                     f"line {line}: metadata.static_geometry_heaps_enabled differs "
                     "from workload.private_geometry_heap.enabled"
                 )
+    if schema >= 6 and window.global_illumination is not None:
+        contract_version = window.global_illumination["contract_version"]
+        metadata_gi_mode = window.metadata.get("global_illumination_mode")
+        if contract_version == 3 and metadata_gi_mode not in GI_V3_METADATA_MODES:
+            raise ReportError(
+                f"line {line}: GI contract v3 requires metadata mode "
+                "g4_transport or g5_vertex_receiver"
+            )
+        if metadata_gi_mode in GI_V3_METADATA_MODES and contract_version != 3:
+            raise ReportError(
+                f"line {line}: metadata mode {metadata_gi_mode} requires GI contract v3"
+            )
+        if metadata_gi_mode == G6_LIVE_METADATA_MODE \
+                and (contract_version != 2
+                     or window.global_illumination["mode"] != "active"):
+            raise ReportError(
+                f"line {line}: metadata mode g6_live requires active GI contract v2"
+            )
+        live_transport_timing = (
+            metadata_gi_mode == G6_LIVE_METADATA_MODE
+            and contract_version == 2
+        )
+        if window.gi_transport_stage is not None \
+                and contract_version != 3 and not live_transport_timing:
+            raise ReportError(
+                f"line {line}: GI_TRANSPORT timing requires G4 contract v3 "
+                "or production G6 contract v2"
+            )
+        _validate_g4_window_phase(window)
     return window
 
 
@@ -1136,6 +1644,7 @@ def load_report(path: Path) -> list[TimingWindow]:
             raise ReportError(
                 f"line {current.line}: timestamp precedes line {previous.line}"
             )
+    _validate_g4_report(windows)
     return windows
 
 
@@ -1554,6 +2063,45 @@ def _aggregate_voxel_clipmaps(
     }
 
 
+def _aggregate_global_illumination(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    present = [window.global_illumination is not None for window in windows]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ReportError("selected windows mix global-illumination telemetry presence")
+    values = [
+        window.global_illumination for window in windows
+        if window.global_illumination is not None
+    ]
+    if len({value["mode"] for value in values}) != 1:
+        raise ReportError("selected windows mix global-illumination modes")
+    if len({value["contract_version"] for value in values}) != 1:
+        raise ReportError("selected windows mix global-illumination contract versions")
+    return {
+        "mode": values[0]["mode"],
+        "contract_version": values[0]["contract_version"],
+        "window_count": len(values),
+        "counters": {
+            key: {
+                "window_minimum": min(value[key] for value in values),
+                "window_maximum": max(value[key] for value in values),
+                "last_window": values[-1][key],
+            }
+            for key in GI_V2_INTEGER_KEYS if key != "contract_version"
+        },
+        "reset_reasons": {
+            key: sum(value["reset_reasons"][key] for value in values)
+            for key in sorted(GI_RESET_REASON_KEYS)
+        },
+        "fallback_reasons": {
+            key: sum(value["fallback_reasons"][key] for value in values)
+            for key in sorted(GI_FALLBACK_REASON_KEYS)
+        },
+    }
+
+
 def _aggregate_timing_stage(
     windows: Sequence[TimingWindow], attribute: str, stage_name: str,
     *, allow_absent_or_zero: bool = False,
@@ -1604,6 +2152,14 @@ def _aggregate_light_cluster_stage(
     )
 
 
+def _aggregate_world_opaque_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows, "world_opaque_stage", WORLD_OPAQUE_STAGE
+    )
+
+
 def _aggregate_voxel_upload_update_stage(
     windows: Sequence[TimingWindow],
 ) -> dict[str, Any] | None:
@@ -1622,6 +2178,28 @@ def _aggregate_dynamic_local_shadow_stage(
         windows,
         "dynamic_local_shadow_stage",
         DYNAMIC_LOCAL_SHADOW_STAGE,
+        allow_absent_or_zero=True,
+    )
+
+
+def _aggregate_gi_inject_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows,
+        "gi_inject_stage",
+        GI_INJECT_STAGE,
+        allow_absent_or_zero=True,
+    )
+
+
+def _aggregate_gi_transport_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows,
+        "gi_transport_stage",
+        GI_TRANSPORT_STAGE,
         allow_absent_or_zero=True,
     )
 
@@ -1911,9 +2489,9 @@ def validate_release_contract(
 
     expected_scaling = scaler != "OFF"
     for window in windows:
-        if window.schema not in (2, 3, 4, 5):
+        if window.schema not in (2, 3, 4, 5, 6):
             raise ReportError(
-                f"line {window.line}: release contract requires schema v2, v3, v4 or v5"
+                f"line {window.line}: release contract requires schema v2 through v6"
             )
         if window.detail:
             raise ReportError(f"line {window.line}: intrusive detail timing must be disabled")
@@ -2036,6 +2614,16 @@ def validate_release_contract(
             raise ReportError(
                 f"line {window.line}: persistent MetalFX mode must remain off"
             )
+        if window.schema >= 6:
+            if metadata.get("global_illumination_mode") != "off":
+                raise ReportError(
+                    f"line {window.line}: release metadata must attest GI_OFF"
+                )
+            if window.global_illumination is None \
+                    or window.global_illumination.get("mode") != "off":
+                raise ReportError(
+                    f"line {window.line}: release telemetry must attest GI_OFF"
+                )
         for key, expected_value in (
             ("hdr_strength", 1.0 if resolved_output == "hdr" else 0.0),
             ("bloom_strength", 0.18 if resolved_output == "hdr" else 0.0),
@@ -2126,6 +2714,10 @@ def summarize(
     if any(value is not None for value in renderer_generations):
         if not all(value is not None for value in renderer_generations):
             raise ReportError("selected windows mix renderer-generation telemetry presence")
+        g6_matrix_route = all(
+            window.metadata.get("route") == "hdrtest-gi-g6-matrix-v1"
+            for window in selected
+        )
         stable_generations = []
         for value in renderer_generations:
             stable = dict(value)
@@ -2134,7 +2726,24 @@ def summarize(
             # renderer/resource/work declaration must stay stable across windows.
             stable.pop("frame_id", None)
             work = stable.get("advanced_lighting_work")
-            if work is not None:
+            if g6_matrix_route:
+                # The G6 matrix deliberately performs a resource reload and two
+                # dimension transitions. Those events change per-frame identities,
+                # history, submit slots, headroom observations, and work counts while
+                # the renderer contract and resource declaration remain invariant.
+                for key in (
+                    "delta_seconds",
+                    "dimension_identity",
+                    "display_headroom",
+                    "history_generation",
+                    "in_flight_slot",
+                    "renderer_generation_id",
+                    "submit_index",
+                    "world_identity",
+                ):
+                    stable.pop(key, None)
+                stable.pop("advanced_lighting_work", None)
+            elif work is not None:
                 stable["advanced_lighting_work"] = {
                     key: item
                     for key, item in work.items()
@@ -2227,6 +2836,12 @@ def summarize(
     voxel_clipmaps = _aggregate_voxel_clipmaps(selected)
     if voxel_clipmaps is not None:
         result["voxel_clipmaps"] = voxel_clipmaps
+    global_illumination = _aggregate_global_illumination(selected)
+    if global_illumination is not None:
+        result["global_illumination"] = global_illumination
+    world_opaque_stage = _aggregate_world_opaque_stage(selected)
+    if world_opaque_stage is not None:
+        result.setdefault("stages", {})[WORLD_OPAQUE_STAGE] = world_opaque_stage
     cluster_stage = _aggregate_light_cluster_stage(selected)
     if cluster_stage is not None:
         result.setdefault("stages", {})[LIGHT_CLUSTER_STAGE] = cluster_stage
@@ -2241,6 +2856,12 @@ def summarize(
     dynamic_shadow_stage = _aggregate_dynamic_local_shadow_stage(selected)
     if dynamic_shadow_stage is not None:
         result.setdefault("stages", {})[DYNAMIC_LOCAL_SHADOW_STAGE] = dynamic_shadow_stage
+    gi_inject_stage = _aggregate_gi_inject_stage(selected)
+    if gi_inject_stage is not None:
+        result.setdefault("stages", {})[GI_INJECT_STAGE] = gi_inject_stage
+    gi_transport_stage = _aggregate_gi_transport_stage(selected)
+    if gi_transport_stage is not None:
+        result.setdefault("stages", {})[GI_TRANSPORT_STAGE] = gi_transport_stage
     if selected[0].schema >= 2:
         meta = dict(selected[-1].metadata)
         if "ablation_mode" not in meta:
@@ -2419,6 +3040,41 @@ def compare(
     candidate_p95 = metric(candidate, "p95")
     delta = candidate_p95 - base_p95
     regressions: list[dict[str, Any]] = []
+
+    def stage_p95(summary: dict[str, Any], label: str) -> float | None:
+        stages = summary.get("stages")
+        if not isinstance(stages, dict) or WORLD_OPAQUE_STAGE not in stages:
+            return None
+        try:
+            value = stages[WORLD_OPAQUE_STAGE]["p95_ms"][
+                "window_frame_weighted_mean"
+            ]
+        except (KeyError, TypeError) as error:
+            raise ReportError(
+                f"{label} has invalid {WORLD_OPAQUE_STAGE} p95 summary"
+            ) from error
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(float(value)):
+            raise ReportError(
+                f"{label} has invalid {WORLD_OPAQUE_STAGE} p95 summary"
+            )
+        return float(value)
+
+    baseline_world_opaque_p95 = stage_p95(baseline, "baseline")
+    candidate_world_opaque_p95 = stage_p95(candidate, "candidate")
+    if (baseline_world_opaque_p95 is None) \
+            != (candidate_world_opaque_p95 is None):
+        raise ReportError(
+            f"compare inputs mix {WORLD_OPAQUE_STAGE} p95 timing presence"
+        )
+    stage_p95_metrics: dict[str, dict[str, float]] = {}
+    if baseline_world_opaque_p95 is not None \
+            and candidate_world_opaque_p95 is not None:
+        stage_p95_metrics[WORLD_OPAQUE_STAGE] = {
+            "baseline": baseline_world_opaque_p95,
+            "candidate": candidate_world_opaque_p95,
+            "delta": candidate_world_opaque_p95 - baseline_world_opaque_p95,
+        }
 
     def absolute_upper_gate(
         name: str,
@@ -2664,6 +3320,7 @@ def compare(
             }
             for key in ("p50", "p95", "p99")
         },
+        "stage_p95_ms": stage_p95_metrics,
         "cpu_metrics": cpu_metrics,
         "generation_resource_bytes": resource_metrics,
         "transient_memory_bytes": transient_metrics,
@@ -3028,9 +3685,9 @@ def _derive_release_summary(
     workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
-    if any(window.schema not in (2, 3, 4, 5) for window in windows):
+    if any(window.schema not in (2, 3, 4, 5, 6) for window in windows):
         raise ReportError(
-            "accepted raw report must contain schema-v2/v3/v4/v5 windows only"
+            "accepted raw report must contain schema-v2 through schema-v6 windows only"
         )
     measure_windows = [window for window in windows if window.phase == "measure"]
     if not measure_windows:
@@ -3274,7 +3931,6 @@ def _validate_log_evidence(
         armed_line,
         window_ready_line,
         apply_line,
-        frozen_line,
         ready_line,
         route_check_lines["MEASURE_START"],
         measure_start_line,
@@ -3282,7 +3938,10 @@ def _validate_log_evidence(
         route_check_lines["MEASURE_END"],
         complete_line,
     )
-    if any(current >= following for current, following in zip(ordered_lines, ordered_lines[1:])):
+    if (
+        frozen_line >= ready_line
+        or any(current >= following for current, following in zip(ordered_lines, ordered_lines[1:]))
+    ):
         raise ReportError("benchmark evidence events are out of order")
     measurement["runtime"] = {
         "resolved_gui_scale": resolved_gui_scale,
@@ -3417,7 +4076,7 @@ def create_attestation(
         workload_contract=WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     )
     payload = {
-        "schema_version": 5,
+        "schema_version": 6,
         "accepted": True,
         "raw_report": str(paths["raw_report"]),
         "raw_sha256": _file_sha256(paths["raw_report"]),
@@ -3462,6 +4121,7 @@ def _attestation_workload_contract(schema_version: int) -> str:
         3: WORKLOAD_CONTRACT_BASE,
         4: WORKLOAD_CONTRACT_EXPANDED,
         5: WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
+        6: WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     }[schema_version]
 
 
@@ -3470,7 +4130,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
     path = _attestation_path(raw)
     payload = _load_json_object(path, "benchmark attestation")
     schema_version = payload.get("schema_version")
-    if schema_version not in (2, 3, 4, 5) or payload.get("accepted") is not True:
+    if schema_version not in (2, 3, 4, 5, 6) or payload.get("accepted") is not True:
         raise ReportError(f"invalid benchmark attestation: {path}")
     expected = _artifact_paths(raw)
     artifact_keys = ("raw_report", "summary", "minecraft_log", "console_log")
@@ -3505,7 +4165,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
         raise ReportError(f"attestation measurement contract is inconsistent: {path}")
     if payload.get("presented_frames") != summary["presented_frames"]:
         raise ReportError(f"attestation frame count is inconsistent: {path}")
-    if schema_version in (3, 4, 5):
+    if schema_version in (3, 4, 5, 6):
         if payload.get("workload") != summary["workload"]:
             raise ReportError(f"attestation workload is inconsistent: {path}")
     if payload.get("metadata") != summary["metadata"]:
@@ -3660,6 +4320,11 @@ def _print_comparison(result: dict[str, Any]) -> None:
         print(
             f"  {key}: {values['baseline']:.4f} -> {values['candidate']:.4f} ms "
             f"({values['delta']:+.4f})"
+        )
+    for name, values in result["stage_p95_ms"].items():
+        print(
+            f"  stage {name} p95: {values['baseline']:.4f} -> "
+            f"{values['candidate']:.4f} ms ({values['delta']:+.4f})"
         )
     for key, values in result["cpu_metrics"].items():
         print(
@@ -4028,6 +4693,14 @@ def self_test() -> None:
             })
         return result
 
+    def global_illumination_off() -> dict[str, Any]:
+        return {
+            "mode": "off",
+            **{key: (1 if key == "contract_version" else 0) for key in GI_INTEGER_KEYS},
+            "reset_reasons": {key: 0 for key in GI_RESET_REASON_KEYS},
+            "fallback_reasons": {key: 0 for key in GI_FALLBACK_REASON_KEYS},
+        }
+
     def l3_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
         payload = line(4, index)
         payload["detail_enabled"] = detail
@@ -4103,6 +4776,13 @@ def self_test() -> None:
             }
         return payload
 
+    def g0_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
+        payload = l5_line(index, advanced=advanced, detail=detail)
+        payload["schema_version"] = 6
+        payload["global_illumination"] = global_illumination_off()
+        payload["metadata"]["global_illumination_mode"] = "off"
+        return payload
+
     def l6_dynamic_line(index: int, *, detail: bool) -> dict[str, Any]:
         payload = l5_line(index, advanced=True, detail=detail)
         payload["renderer_generation"]["frame_graph_version"] = L6_FRAME_GRAPH_VERSION
@@ -4143,6 +4823,7 @@ def self_test() -> None:
         )
 
     minecraft_evidence = "\n".join((
+        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
         "[render/INFO] METALLUM_BENCHMARK EVENT=ARMED "
         "scope=Built-in Retina Display target=3024x1964 warmup=1800 "
         "measure=3000 sequence=[OFF] route=hdrtest-static-v1",
@@ -4153,7 +4834,6 @@ def self_test() -> None:
         "route=hdrtest-static-v1 fixture=hdrtest-static-v1 "
         "player=MetallumBench/b07a402a-d8ea-354f-9398-aaf208a798b9 "
         "dimension=minecraft:overworld",
-        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
         "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_READY "
         "route=hdrtest-static-v1 stable_frames=120 "
         "pose=[86.1,74.0,-95.5;155.4,13.2] max_fps=260 "
@@ -4273,6 +4953,64 @@ def self_test() -> None:
         assert l3_advanced_summary["stages"][LIGHT_CLUSTER_STAGE]["p95_ms"][
             "window_maximum"
         ] == 0.12
+
+        world_opaque_control = root / "world-opaque-control.jsonl"
+        world_opaque_control_payloads = [
+            l3_line(i, advanced=True, detail=True) for i in range(10)
+        ]
+        for index, payload in enumerate(world_opaque_control_payloads):
+            offset = index * 0.01
+            payload["stages"][WORLD_OPAQUE_STAGE] = {
+                "frames": 300,
+                "average_ms": 4.0 + offset,
+                "p50_ms": 4.1 + offset,
+                "p95_ms": 4.2 + offset,
+                "p99_ms": 4.3 + offset,
+                "maximum_ms": 4.4 + offset,
+            }
+        world_opaque_control.write_text(
+            "\n".join(json.dumps(payload) for payload in world_opaque_control_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        world_opaque_control_summary = summarize(
+            world_opaque_control, 3000, 0, "OFF"
+        )
+        control_world_opaque_p95 = world_opaque_control_summary["stages"][
+            WORLD_OPAQUE_STAGE
+        ]["p95_ms"]
+        assert math.isclose(
+            control_world_opaque_p95["window_frame_weighted_mean"], 4.245
+        )
+        assert math.isclose(control_world_opaque_p95["window_maximum"], 4.29)
+
+        world_opaque_candidate = root / "world-opaque-candidate.jsonl"
+        world_opaque_candidate_payloads = copy.deepcopy(
+            world_opaque_control_payloads
+        )
+        for payload in world_opaque_candidate_payloads:
+            stage = payload["stages"][WORLD_OPAQUE_STAGE]
+            for key in ("average_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms"):
+                stage[key] += 0.2
+        world_opaque_candidate.write_text(
+            "\n".join(json.dumps(payload) for payload in world_opaque_candidate_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        world_opaque_candidate_summary = summarize(
+            world_opaque_candidate, 3000, 0, "OFF"
+        )
+        world_opaque_comparison = compare(
+            world_opaque_control_summary,
+            world_opaque_candidate_summary,
+            require_stability=False,
+        )
+        world_opaque_p95_comparison = world_opaque_comparison["stage_p95_ms"][
+            WORLD_OPAQUE_STAGE
+        ]
+        assert math.isclose(world_opaque_p95_comparison["baseline"], 4.245)
+        assert math.isclose(world_opaque_p95_comparison["candidate"], 4.445)
+        assert math.isclose(world_opaque_p95_comparison["delta"], 0.2)
 
         l4_advanced_detail = root / "l4-advanced-detail.jsonl"
         l4_advanced_detail.write_text(
@@ -4632,6 +5370,41 @@ def self_test() -> None:
             "selected windows mix renderer-generation declarations",
         )
 
+        g6_generation_transitions = root / "g6-generation-transitions.jsonl"
+        g6_transition_payloads = copy.deepcopy(mixed_work_payloads)
+        for index, payload in enumerate(g6_transition_payloads):
+            payload["metadata"]["route"] = "hdrtest-gi-g6-matrix-v1"
+            generation = payload["renderer_generation"]
+            generation["renderer_generation_id"] = (
+                generation.get("renderer_generation_id", 1) + index // 3
+            )
+            generation["history_generation"] = (
+                generation.get("history_generation", 1) + index
+            )
+            generation["world_identity"] = (
+                generation.get("world_identity", 1) + index // 5
+            )
+            generation["dimension_identity"] = (
+                generation.get("dimension_identity", 1) + index // 5
+            )
+            generation["submit_index"] = generation.get("submit_index", 1) + index
+        g6_generation_transitions.write_text(
+            "\n".join(json.dumps(payload) for payload in g6_transition_payloads) + "\n",
+            encoding="utf-8",
+        )
+        assert summarize(g6_generation_transitions, 3000, 0, "OFF")[
+            "metadata"
+        ]["route"] == "hdrtest-gi-g6-matrix-v1"
+        g6_transition_payloads[1]["renderer_generation"]["resource_bytes"]["hdr"] += 1
+        g6_generation_transitions.write_text(
+            "\n".join(json.dumps(payload) for payload in g6_transition_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(g6_generation_transitions, 3000, 0, "OFF"),
+            "selected windows mix renderer-generation declarations",
+        )
+
         # Cluster statistics are sampled and published from an asynchronous
         # command-buffer completion handler. A completed frame may therefore trail
         # the current renderer declaration, and its scene light count need not match
@@ -4788,6 +5561,450 @@ def self_test() -> None:
         schema5_release_summary, _ = _derive_release_summary(schema5_advanced_release)
         assert schema5_release_summary["schema_versions"] == [5]
         assert schema5_release_summary["voxel_clipmaps"]["active"] is True
+
+        schema6_gi_off_release = root / "schema6-gi-off-release.raw.jsonl"
+        gi_off_payloads = [
+            g0_line(index, advanced=True, detail=False) for index in range(10)
+        ]
+        schema6_gi_off_release.write_text(
+            "\n".join(json.dumps(payload) for payload in gi_off_payloads) + "\n",
+            encoding="utf-8",
+        )
+        gi_off_summary, _ = _derive_release_summary(schema6_gi_off_release)
+        assert gi_off_summary["schema_versions"] == [6]
+        assert gi_off_summary["global_illumination"]["mode"] == "off"
+        assert gi_off_summary["global_illumination"]["window_count"] == 10
+        assert all(
+            value["window_maximum"] == 0
+            for value in gi_off_summary["global_illumination"]["counters"].values()
+        )
+
+        transport_timing = {
+            "frames": 1,
+            "average_ms": 0.31,
+            "p50_ms": 0.31,
+            "p95_ms": 0.34,
+            "p99_ms": 0.35,
+            "maximum_ms": 0.36,
+        }
+        injection_timing = {
+            "frames": G4_INJECT_ACTIVE_FRAMES,
+            "average_ms": 0.08,
+            "p50_ms": 0.07,
+            "p95_ms": 0.11,
+            "p99_ms": 0.12,
+            "maximum_ms": 0.13,
+        }
+
+        def g4_line(
+            index: int, phase: str, completed: int,
+            *, timed_inject: bool = False, timed_transport: bool = False,
+        ) -> dict[str, Any]:
+            payload = g0_line(index, advanced=True, detail=True)
+            queued = 0 if completed == 0 else G4_BRICK_COUNT
+            final = phase in ("warmup", "measure")
+            payload["benchmark"].update({
+                "generation": {"startup": 0, "warmup": 1, "measure": 2}[phase],
+                "phase": phase,
+                "segment_index": -1 if phase == "startup" else 0,
+                "scaler_mode": "UNKNOWN" if phase == "startup" else "OFF",
+            })
+            payload["global_illumination"].update({
+                "contract_version": 3,
+                "mode": "active",
+                "allocated_bytes": 4_020_576,
+                "resident_bytes": 1_966_080,
+                "resource_count": G4_RESOURCE_COUNT,
+                "pass_count": G4_PASS_COUNT,
+                "valid_probes": 64 if final else 0,
+                "unknown_probes": 0,
+                "source_epoch": 17 if queued else 0,
+                "probe_epoch": 19 if queued else 0,
+                "dirty_queued_total": queued,
+                "dirty_completed_total": completed,
+                "dirty_discarded_total": 0,
+                "dirty_pending": queued - completed,
+                "injection_dispatches": completed,
+                "transport_dispatches": 1 if final else 0,
+                "field_epoch": 1 if final else 0,
+                "full_volume_rebuilds": 1 if queued else 0,
+            })
+            payload["metadata"].update({
+                "global_illumination_mode": "g4_transport",
+                "commit": "1" * 12,
+                "source_sha256": "2" * 64,
+                "artifact_sha256": "3" * 64,
+                "dirty_worktree": False,
+                "route": "gi-g4-overworld-v1",
+                "route_sha256": "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d",
+                "fixture": "hdrtest-static-v1",
+                "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5",
+                "settings_id": "native-hdr-fancy-v1",
+                "settings_spec_sha256": "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e",
+                "settings_sha256": "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3",
+            })
+            payload["stages"][GI_INJECT_STAGE] = (
+                copy.deepcopy(injection_timing) if timed_inject else None
+            )
+            payload["stages"][GI_TRANSPORT_STAGE] = (
+                copy.deepcopy(transport_timing) if timed_transport else None
+            )
+            return payload
+
+        schema6_gi_active_v3 = root / "schema6-gi-active-v3.raw.jsonl"
+        active_payloads = [
+            g4_line(0, "startup", 0),
+            g4_line(1, "startup", 0),
+            g4_line(2, "startup", G4_BRICK_COUNT, timed_inject=True),
+            g4_line(3, "warmup", G4_BRICK_COUNT, timed_transport=True),
+            g4_line(4, "warmup", G4_BRICK_COUNT),
+            g4_line(5, "measure", G4_BRICK_COUNT),
+            g4_line(6, "measure", G4_BRICK_COUNT),
+        ]
+        schema6_gi_active_v3.write_text(
+            "\n".join(json.dumps(payload) for payload in active_payloads) + "\n",
+            encoding="utf-8",
+        )
+        active_windows = load_report(schema6_gi_active_v3)
+        active_window = active_windows[3]
+        assert active_window.global_illumination["full_volume_rebuilds"] == 1
+        assert active_window.gi_transport_stage["p95_ms"] == 0.34
+        active_summary = summarize(schema6_gi_active_v3, 600, 0, "OFF")
+        assert active_summary.get("stages", {}).get(GI_TRANSPORT_STAGE) is None
+
+        # G6 owns its live transport receipts separately while the raw timing
+        # window continues to report the strict G3 source-field contract v2.
+        # Its bounded live Jacobi work still uses the append-only GI_TRANSPORT
+        # profiler stage, so that stage must remain legal outside frozen G4.
+        g6_payload = g4_line(0, "measure", 0, timed_transport=True)
+        g6_payload["global_illumination"]["contract_version"] = 2
+        g6_payload["metadata"]["global_illumination_mode"] = G6_LIVE_METADATA_MODE
+        schema6_g6_live_v2 = root / "schema6-g6-live-v2.raw.jsonl"
+        schema6_g6_live_v2.write_text(
+            json.dumps(g6_payload) + "\n", encoding="utf-8"
+        )
+        g6_window = load_report(schema6_g6_live_v2)[0]
+        assert g6_window.metadata["global_illumination_mode"] == G6_LIVE_METADATA_MODE
+        assert g6_window.global_illumination["contract_version"] == 2
+        assert g6_window.gi_transport_stage is not None \
+            and g6_window.gi_transport_stage["frames"] == 1
+        invalid_g6_payload = copy.deepcopy(g6_payload)
+        invalid_g6_payload["global_illumination"]["contract_version"] = 1
+        invalid_g6_payload["global_illumination"].pop("full_volume_rebuilds")
+        invalid_g6_path = root / "schema6-g6-invalid-v1.raw.jsonl"
+        invalid_g6_path.write_text(
+            json.dumps(invalid_g6_payload) + "\n", encoding="utf-8"
+        )
+        expect_error(
+            lambda: load_report(invalid_g6_path),
+            "metadata mode g6_live requires active GI contract v2",
+        )
+
+        # G5 reuses the G4 contract-v3 textures and telemetry instead of defining
+        # a second field schema. FIELD therefore retains the populated G4 shape,
+        # while CONTROL/CANDIDATE retain the same allocation with an exact
+        # zero-ready field and no injection/transport dispatch timing.
+        g5_field_payloads = copy.deepcopy(active_payloads)
+        for payload in g5_field_payloads:
+            payload["metadata"]["global_illumination_mode"] = G5_RECEIVER_METADATA_MODE
+        schema6_g5_field_v3 = root / "schema6-g5-field-v3.raw.jsonl"
+        schema6_g5_field_v3.write_text(
+            "\n".join(json.dumps(payload) for payload in g5_field_payloads) + "\n",
+            encoding="utf-8",
+        )
+        g5_field_summary = summarize(schema6_g5_field_v3, 600, 0, "OFF")
+        assert g5_field_summary["metadata"]["global_illumination_mode"] \
+            == G5_RECEIVER_METADATA_MODE
+        assert g5_field_summary["global_illumination"]["contract_version"] == 3
+        assert g5_field_summary["global_illumination"]["counters"]["valid_probes"][
+            "window_minimum"
+        ] > 0
+
+        g5_zero_payloads = copy.deepcopy(g5_field_payloads)
+        for payload in g5_zero_payloads:
+            payload["global_illumination"].update(G5_ZERO_FIELD_COUNTERS)
+            payload["stages"][GI_INJECT_STAGE] = None
+            payload["stages"][GI_TRANSPORT_STAGE] = None
+        schema6_g5_zero_v3 = root / "schema6-g5-zero-v3.raw.jsonl"
+        schema6_g5_zero_v3.write_text(
+            "\n".join(json.dumps(payload) for payload in g5_zero_payloads) + "\n",
+            encoding="utf-8",
+        )
+        g5_zero_summary = summarize(schema6_g5_zero_v3, 600, 0, "OFF")
+        assert g5_zero_summary["metadata"]["global_illumination_mode"] \
+            == G5_RECEIVER_METADATA_MODE
+        assert g5_zero_summary["global_illumination"]["contract_version"] == 3
+        assert all(
+            g5_zero_summary["global_illumination"]["counters"][key][
+                "window_maximum"
+            ] == expected
+            for key, expected in G5_ZERO_FIELD_COUNTERS.items()
+        )
+
+        def invalid_g5_report(
+            stem: str, mutation: Any, expected_error: str,
+        ) -> None:
+            payloads = copy.deepcopy(g5_zero_payloads)
+            mutation(payloads)
+            path = root / f"{stem}.raw.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            expect_error(lambda: load_report(path), expected_error)
+
+        invalid_g5_report(
+            "g5-obsolete-contract",
+            lambda payloads: payloads[0]["global_illumination"].update(
+                {"contract_version": 2}
+            ),
+            "metadata mode g5_vertex_receiver requires GI contract v3",
+        )
+        invalid_g5_report(
+            "g5-unknown-metadata-mode",
+            lambda payloads: payloads[0]["metadata"].update(
+                {"global_illumination_mode": "g5_receiver_typo"}
+            ),
+            "GI contract v3 requires metadata mode g4_transport or g5_vertex_receiver",
+        )
+        invalid_g5_report(
+            "g5-mixed-v3-modes",
+            lambda payloads: payloads[0]["metadata"].update(
+                {"global_illumination_mode": G4_METADATA_MODE}
+            ),
+            "GI contract v3 report mixes G4 and G5 metadata modes",
+        )
+        invalid_g5_report(
+            "g5-zero-dispatch-timing",
+            lambda payloads: payloads[3]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "G5 zero-ready field contains G4 dispatch timing",
+        )
+        invalid_g5_report(
+            "g5-short-warmup",
+            lambda payloads: payloads.pop(3),
+            "exactly two 300-frame warmup windows",
+        )
+
+        def invalid_g4_report(
+            stem: str, mutation: Any, expected_error: str,
+        ) -> None:
+            payloads = copy.deepcopy(active_payloads)
+            mutation(payloads)
+            path = root / f"{stem}.raw.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            expect_error(lambda: load_report(path), expected_error)
+
+        def remove_startup(payloads: list[dict[str, Any]]) -> None:
+            del payloads[:3]
+
+        def use_short_final_windows(payloads: list[dict[str, Any]]) -> None:
+            for payload in payloads[3:]:
+                payload["presented_frames"] = 100
+
+        invalid_g4_report(
+            "g4-no-startup", remove_startup,
+            "at least 600 startup frames",
+        )
+        invalid_g4_report(
+            "g4-short-final-windows", use_short_final_windows,
+            "two 300-frame warmup windows",
+        )
+        invalid_g4_report(
+            "g4-missing-inject-timing",
+            lambda payloads: payloads[2]["stages"].update({GI_INJECT_STAGE: None}),
+            "exactly 24 startup GI_INJECT active frames",
+        )
+        invalid_g4_report(
+            "g4-startup-epoch-drift",
+            lambda payloads: payloads[3]["global_illumination"].update({
+                "source_epoch": 18,
+            }),
+            "final epochs differ from frozen startup",
+        )
+        invalid_g4_report(
+            "g4-cross-source-warmup",
+            lambda payloads: payloads[3]["metadata"].update({
+                "source_sha256": "4" * 64,
+            }),
+            "source/route/settings identity drifted",
+        )
+        invalid_g4_report(
+            "g4-invalid-allocation",
+            lambda payloads: payloads[0]["global_illumination"].update({
+                "allocated_bytes": 1, "resident_bytes": 1,
+            }),
+            "G4 global_illumination v3 shape is invalid",
+        )
+        invalid_g4_report(
+            "g4-empty-final-field",
+            lambda payloads: payloads[3]["global_illumination"].update({
+                "valid_probes": 0,
+            }),
+            "contains no valid surface probes",
+        )
+
+        invalid_g4_report(
+            "g4-invalid-resources",
+            lambda payloads: payloads[0]["global_illumination"].update(
+                {"resource_count": 6}
+            ),
+            "G4 global_illumination v3 shape is invalid",
+        )
+        invalid_g4_report(
+            "g4-startup-transport",
+            lambda payloads: payloads[1]["global_illumination"].update({
+                "transport_dispatches": 1, "field_epoch": 1,
+            }),
+            "G4 startup must not contain transport work",
+        )
+        invalid_g4_report(
+            "g4-startup-timing",
+            lambda payloads: payloads[1]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "G4 startup must not contain transport work",
+        )
+        invalid_g4_report(
+            "g4-startup-regression",
+            lambda payloads: payloads[0]["global_illumination"].update({
+                "dirty_queued_total": G4_BRICK_COUNT,
+                "dirty_completed_total": 96,
+                "dirty_pending": 96,
+                "injection_dispatches": 96,
+                "full_volume_rebuilds": 1,
+                "source_epoch": 17,
+                "probe_epoch": 19,
+            }),
+            "G4 startup progression regressed",
+        )
+        invalid_g4_report(
+            "g4-partial-warmup",
+            lambda payloads: payloads[3]["global_illumination"].update({
+                "dirty_completed_total": 191,
+                "dirty_pending": 1,
+                "injection_dispatches": 191,
+            }),
+            "G4 warmup telemetry is not final",
+        )
+        invalid_g4_report(
+            "g4-warmup-inject-timing",
+            lambda payloads: payloads[3]["stages"].update({
+                GI_INJECT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "GI_INJECT timing must occur only during G4 startup",
+        )
+        invalid_g4_report(
+            "g4-measure-inject-timing",
+            lambda payloads: payloads[5]["stages"].update({
+                GI_INJECT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "GI_INJECT timing must occur only during G4 startup",
+        )
+        invalid_g4_report(
+            "g4-measure-timing",
+            lambda payloads: payloads[5]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "GI_TRANSPORT timing must occur only during G4 warmup",
+        )
+        invalid_g4_report(
+            "g4-duplicate-timing",
+            lambda payloads: payloads[4]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "exactly one single-dispatch GI_TRANSPORT timing",
+        )
+        invalid_g4_report(
+            "g4-multi-dispatch-timing",
+            lambda payloads: payloads[3]["stages"][GI_TRANSPORT_STAGE].update(
+                {"frames": 2}
+            ),
+            "exactly one single-dispatch GI_TRANSPORT timing",
+        )
+        invalid_g4_report(
+            "g4-metadata-v2",
+            lambda payloads: payloads[0]["global_illumination"].update(
+                {"contract_version": 2}
+            ),
+            "metadata mode g4_transport requires GI contract v3",
+        )
+        invalid_g4_report(
+            "g4-v3-metadata-off",
+            lambda payloads: payloads[0]["metadata"].update(
+                {"global_illumination_mode": "off"}
+            ),
+            "GI contract v3 requires metadata mode g4_transport or g5_vertex_receiver",
+        )
+
+        def invalid_gi_payload(
+            stem: str, mutation: Any, expected_error: str,
+        ) -> None:
+            payload = g0_line(0, advanced=True, detail=False)
+            mutation(payload["global_illumination"])
+            path = root / f"{stem}.jsonl"
+            path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            expect_error(lambda: load_report(path), expected_error)
+
+        invalid_gi_payload(
+            "gi-off-extra-key", lambda gi: gi.update({"unexpected": 0}),
+            "global_illumination has invalid keys",
+        )
+        invalid_gi_payload(
+            "gi-off-active-bytes", lambda gi: gi.update({"allocated_bytes": 1}),
+            "GI_OFF contains nonzero telemetry",
+        )
+        invalid_gi_payload(
+            "gi-off-resident-over-allocation",
+            lambda gi: gi.update({"resident_bytes": 2, "allocated_bytes": 1}),
+            "resident_bytes exceeds allocated_bytes",
+        )
+        invalid_gi_payload(
+            "gi-off-dirty-algebra",
+            lambda gi: gi.update({"dirty_queued_total": 2, "dirty_pending": 1}),
+            "dirty_pending algebra is invalid",
+        )
+        invalid_gi_payload(
+            "gi-off-invalid-mode", lambda gi: gi.update({"mode": "debug"}),
+            "mode must be 'off' or 'active'",
+        )
+        invalid_gi_payload(
+            "gi-off-reset-reason",
+            lambda gi: gi["reset_reasons"].update({"teleport": 1}),
+            "GI_OFF contains nonzero telemetry",
+        )
+
+        missing_gi = root / "schema6-missing-gi.jsonl"
+        missing_payload = g0_line(0, advanced=True, detail=False)
+        missing_payload.pop("global_illumination")
+        missing_gi.write_text(json.dumps(missing_payload) + "\n", encoding="utf-8")
+        expect_error(lambda: load_report(missing_gi), "global_illumination has invalid keys")
+
+        mixed_gi = root / "schema6-mixed-gi-mode.jsonl"
+        mixed_payloads = [g0_line(index, advanced=True, detail=False) for index in range(10)]
+        mixed_payloads[-1]["global_illumination"]["mode"] = "active"
+        mixed_gi.write_text(
+            "\n".join(json.dumps(payload) for payload in mixed_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(mixed_gi, 3000, 0, "OFF"),
+            "mix global-illumination modes",
+        )
+
+        for invalid_frames in (299, 301, 3001):
+            invalid_alignment = root / f"schema6-invalid-alignment-{invalid_frames}.jsonl"
+            payload = g0_line(0, advanced=True, detail=False)
+            payload["presented_frames"] = invalid_frames
+            invalid_alignment.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            expect_error(
+                lambda path=invalid_alignment: _derive_release_summary(path),
+                "requires exactly 3000 measured frames",
+            )
 
         def make_bundle(
             stem: str,
@@ -5062,7 +6279,7 @@ def self_test() -> None:
         )["verdict"] == "WITHIN_THRESHOLD"
 
         verified = verify_attestation(new)
-        assert verified["schema_version"] == 5
+        assert verified["schema_version"] == 6
         assert verified["presented_frames"] == 3000
         assert verified["workload"] == new_summary["workload"]
         new_attested = summarize_attested_release(new, 3000, 0, "OFF")
@@ -5273,6 +6490,21 @@ def self_test() -> None:
         )
         expect_log_error(
             "\n".join(reordered_lines) + "\n",
+            "events are out of order",
+        )
+        late_freeze_lines = minecraft_text.splitlines()
+        freeze_index = next(
+            index for index, value in enumerate(late_freeze_lines)
+            if "EVENT=SERVER_TICKS_FROZEN" in value
+        )
+        freeze_record = late_freeze_lines.pop(freeze_index)
+        ready_index = next(
+            index for index, value in enumerate(late_freeze_lines)
+            if "EVENT=ROUTE_READY" in value
+        )
+        late_freeze_lines.insert(ready_index + 1, freeze_record)
+        expect_log_error(
+            "\n".join(late_freeze_lines) + "\n",
             "events are out of order",
         )
         paths["minecraft_log"].write_text(minecraft_text, encoding="utf-8")

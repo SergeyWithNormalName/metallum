@@ -78,6 +78,9 @@ private typealias NativeSetFrameStateFunction = @convention(c) (
 private typealias NativeGenerationContractFunction = @convention(c) (
     UnsafeRawPointer?
 ) -> UInt64
+private typealias NativeActualHdrExposureResetMaskFunction = @convention(c) (
+    UInt64
+) -> Int32
 private typealias NativeCreateEdrMonitorFunction = @convention(c) (
     UnsafeRawPointer? // window
 ) -> UnsafeMutableRawPointer?
@@ -1168,12 +1171,15 @@ private final class GpuHarness {
 
     func analyzeActualRadiance(
         scene: MTLTexture,
-        currentHeadroom: Float
+        currentHeadroom: Float,
+        deltaTime: Float = 0.0,
+        forceReset: Bool = true,
+        previousState: HdrAdaptiveState? = nil
     ) throws -> (extract: MTLTexture, state: HdrAdaptiveState) {
         let outputWidth = max((scene.width + 3) / 4, 1)
         let outputHeight = max((scene.height + 3) / 4, 1)
         let output = try makePrivateRgba16FloatTexture(width: outputWidth, height: outputHeight)
-        var initialState = HdrAdaptiveState(
+        var initialState = previousState ?? HdrAdaptiveState(
             breakpoint: 1.0,
             inferredPeak: 1.0,
             medianLog2: -12.0,
@@ -1241,8 +1247,8 @@ private final class GpuHarness {
         reduce.setBuffer(stateBuffer, offset: 0, index: 1)
         var reduceUniforms = HdrHistogramReduceUniforms(
             currentHeadroom: currentHeadroom,
-            deltaTime: 0,
-            forceReset: 1,
+            deltaTime: deltaTime,
+            forceReset: forceReset ? 1 : 0,
             _padding0: 0
         )
         reduce.setBytes(
@@ -2235,6 +2241,7 @@ private final class ValueValidation {
         try validateSdrIdentityAtHeadroomOne()
         try validateSdrOutputTransferContracts()
         try validateActualRadiancePath()
+        try validateActualExposureStability()
         try validateNonsemanticWhiteUsesHeadroom()
         try validateMidtoneIdentity()
         try validateSaturatedSdrIdentity()
@@ -2261,7 +2268,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 47, "HDR validation check count changed unexpectedly: \(passCount), expected 47")
+        try require(passCount == 49, "HDR validation check count changed unexpectedly: \(passCount), expected 49")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -2526,6 +2533,306 @@ private final class ValueValidation {
             extracted.w,
             max(outputOff.x, max(outputOff.y, outputOff.z))
         ))
+    }
+
+    private func validateActualExposureStability() throws {
+        let sparse = try makeActualQuarterCellScene(
+            cellsWide: 10,
+            cellsHigh: 10,
+            brightCells: Set([0, 1]),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(repeating: 16.0)
+        )
+        let aboveP98 = try makeActualQuarterCellScene(
+            cellsWide: 10,
+            cellsHigh: 10,
+            brightCells: Set([0, 1, 2]),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(repeating: 16.0)
+        )
+        let allBright = try makeActualQuarterCellScene(
+            cellsWide: 10,
+            cellsHigh: 10,
+            brightCells: Set(0..<100),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(repeating: 16.0)
+        )
+
+        let sparseState = try gpu.analyzeActualRadiance(
+            scene: sparse,
+            currentHeadroom: 1.2
+        ).state
+        let aboveP98Target = try gpu.analyzeActualRadiance(
+            scene: aboveP98,
+            currentHeadroom: 1.2
+        ).state
+        try require(abs(sparseState.breakpoint - 1.0) < 0.001,
+                    "Two-percent sparse highlights changed global actual-HDR exposure")
+        try require((0.249...0.251).contains(aboveP98Target.breakpoint),
+                    "Actual-HDR p98 boundary did not admit the third bright quarter-cell")
+        try require(sparseState.p99Log2 > 3.8
+                    && aboveP98Target.p99Log2 > 3.8
+                    && sparseState.inferredPeak > 14.0,
+                    "Actual-HDR p99 telemetry stopped reporting sparse scene peaks")
+
+        let oneFrame: Float = 1.0 / 60.0
+        let stepped = try gpu.analyzeActualRadiance(
+            scene: aboveP98,
+            currentHeadroom: 1.2,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: sparseState
+        ).state
+        let expectedStep = filteredActualExposure(
+            initial: sparseState.breakpoint,
+            target: aboveP98Target.breakpoint,
+            deltaTime: oneFrame,
+            timeConstant: 0.35
+        )
+        try require(abs(stepped.breakpoint - expectedStep) < 0.001
+                    && (0.93...0.95).contains(stepped.breakpoint)
+                    && stepped.breakpoint > aboveP98Target.breakpoint + 0.5,
+                    "Actual-HDR brightening bypassed EV smoothing: \(stepped.breakpoint)")
+
+        let aboveP98AtDoubleExtent = try makeActualQuarterCellScene(
+            cellsWide: 20,
+            cellsHigh: 20,
+            brightCells: Set(0..<12),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(repeating: 16.0)
+        )
+        let resizedStep = try gpu.analyzeActualRadiance(
+            scene: aboveP98AtDoubleExtent,
+            currentHeadroom: 1.2,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: sparseState
+        ).state
+        try require(abs(resizedStep.breakpoint - expectedStep) < 0.001,
+                    "Compatible actual-HDR source extent change reset exposure: \(resizedStep.breakpoint)")
+
+        let medianJump = try gpu.analyzeActualRadiance(
+            scene: allBright,
+            currentHeadroom: 1.2,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: sparseState
+        ).state
+        try require(abs(medianJump.breakpoint - expectedStep) < 0.001,
+                    "Actual-HDR median change still hard-resets global exposure")
+
+        let stalled = try gpu.analyzeActualRadiance(
+            scene: aboveP98,
+            currentHeadroom: 1.2,
+            deltaTime: 10.0,
+            forceReset: false,
+            previousState: sparseState
+        ).state
+        let expectedStalled = filteredActualExposure(
+            initial: sparseState.breakpoint,
+            target: aboveP98Target.breakpoint,
+            deltaTime: 1.0 / 15.0,
+            timeConstant: 0.35
+        )
+        try require(abs(stalled.breakpoint - expectedStalled) < 0.001
+                    && (0.78...0.80).contains(stalled.breakpoint),
+                    "Actual-HDR scheduler stall reset or over-advanced exposure")
+
+        func oneSecondSequence(frameCount: Int) throws -> Float {
+            var state = sparseState
+            let delta = Float(1.0 / Double(frameCount))
+            for _ in 0..<frameCount {
+                state = try gpu.analyzeActualRadiance(
+                    scene: aboveP98,
+                    currentHeadroom: 1.2,
+                    deltaTime: delta,
+                    forceReset: false,
+                    previousState: state
+                ).state
+            }
+            return state.breakpoint
+        }
+        let exposure30 = try oneSecondSequence(frameCount: 30)
+        let exposure60 = try oneSecondSequence(frameCount: 60)
+        let exposure120 = try oneSecondSequence(frameCount: 120)
+        let oneSecondDecay = Float(exp(-1.0 / 0.35))
+        let expectedOneSecond = exp2(
+            log2(aboveP98Target.breakpoint)
+                + (log2(sparseState.breakpoint) - log2(aboveP98Target.breakpoint))
+                * oneSecondDecay
+        )
+        try require(abs(log2(exposure30) - log2(exposure60)) < 0.002
+                    && abs(log2(exposure60) - log2(exposure120)) < 0.002
+                    && abs(log2(exposure60) - log2(expectedOneSecond)) < 0.002,
+                    "Actual-HDR EV smoothing depends on frame rate")
+
+        let medium = try makeActualQuarterCellScene(
+            cellsWide: 2,
+            cellsHigh: 2,
+            brightCells: Set(0..<4),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(repeating: 2.0)
+        )
+        let highHeadroom = try gpu.analyzeActualRadiance(
+            scene: medium,
+            currentHeadroom: 4.0
+        ).state
+        let droppedAnalysis = try gpu.analyzeActualRadiance(
+            scene: medium,
+            currentHeadroom: 1.2,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: highHeadroom
+        )
+        try require((0.50...0.52).contains(droppedAnalysis.state.breakpoint),
+                    "Meaningful EDR headroom loss was not capped immediately")
+        let droppedWorld = try gpu.renderActualWorld(
+            scene: medium,
+            bloom: droppedAnalysis.extract,
+            state: droppedAnalysis.state,
+            headroom: 1.2,
+            legacyReconstructionStrength: 0.0
+        )
+        let droppedPixels = try gpu.readRgba16FloatPixels(texture: droppedWorld)
+        try require(droppedPixels.allSatisfy {
+            $0.x.isFinite && $0.y.isFinite && $0.z.isFinite
+                && $0.x >= 0 && $0.y >= 0 && $0.z >= 0
+                && $0.x <= 1.2005 && $0.y <= 1.2005 && $0.z <= 1.2005
+        }, "Actual-HDR headroom drop escaped the display bound")
+
+        let recovered = try gpu.analyzeActualRadiance(
+            scene: medium,
+            currentHeadroom: 4.0,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: droppedAnalysis.state
+        ).state
+        let expectedRecovery = filteredActualExposure(
+            initial: droppedAnalysis.state.breakpoint,
+            target: 1.0,
+            deltaTime: oneFrame,
+            timeConstant: 1.0
+        )
+        try require(abs(recovered.breakpoint - expectedRecovery) < 0.001
+                    && recovered.breakpoint < 1.0,
+                    "Actual-HDR headroom recovery snapped the whole frame brighter")
+
+        let headroomProbe = try makeActualQuarterCellScene(
+            cellsWide: 2,
+            cellsHigh: 2,
+            brightCells: Set(0..<4),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(repeating: 4.0)
+        )
+        let headroomFour = try gpu.analyzeActualRadiance(
+            scene: headroomProbe,
+            currentHeadroom: 4.0
+        ).state
+        let jitterTarget = try gpu.analyzeActualRadiance(
+            scene: headroomProbe,
+            currentHeadroom: 3.98
+        ).state
+        let jittered = try gpu.analyzeActualRadiance(
+            scene: headroomProbe,
+            currentHeadroom: 3.98,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: headroomFour
+        ).state
+        let expectedJitter = filteredActualExposure(
+            initial: headroomFour.breakpoint,
+            target: jitterTarget.breakpoint,
+            deltaTime: oneFrame,
+            timeConstant: 0.35
+        )
+        try require(abs(jittered.breakpoint - expectedJitter) < 0.0005
+                    && jittered.breakpoint > jitterTarget.breakpoint + 0.002,
+                    "Small EDR headroom readout jitter bypassed temporal smoothing")
+        let meaningfulDropTarget = try gpu.analyzeActualRadiance(
+            scene: headroomProbe,
+            currentHeadroom: 3.8
+        ).state
+        let meaningfulDrop = try gpu.analyzeActualRadiance(
+            scene: headroomProbe,
+            currentHeadroom: 3.8,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: headroomFour
+        ).state
+        try require(abs(meaningfulDrop.breakpoint - meaningfulDropTarget.breakpoint) < 0.0005,
+                    "Meaningful EDR headroom loss escaped the deadbanded immediate cap")
+
+        let sparseColor = try makeActualQuarterCellScene(
+            cellsWide: 10,
+            cellsHigh: 10,
+            brightCells: Set([0, 1]),
+            baseRadiance: SIMD3<Float>(repeating: 0.5),
+            brightRadiance: SIMD3<Float>(16.0, 4.0, 1.0)
+        )
+        let sparseColorAnalysis = try gpu.analyzeActualRadiance(
+            scene: sparseColor,
+            currentHeadroom: 4.0
+        )
+        let sparseColorWorld = try gpu.renderActualWorld(
+            scene: sparseColor,
+            bloom: sparseColorAnalysis.extract,
+            state: sparseColorAnalysis.state,
+            headroom: 4.0,
+            legacyReconstructionStrength: 0.0
+        )
+        let sparseColorPixels = try gpu.readRgba16FloatPixels(texture: sparseColorWorld)
+        let background = sparseColorPixels[39 * 40 + 39]
+        let emitter = sparseColorPixels[2 * 40 + 2]
+        try require(abs(background.x - 0.5) < 0.005
+                    && abs(background.y - 0.5) < 0.005
+                    && abs(background.z - 0.5) < 0.005,
+                    "Sparse actual-HDR emitter globally dimmed a neutral background")
+        try require(emitter.x.isFinite && emitter.y.isFinite && emitter.z.isFinite
+                    && emitter.x > emitter.y && emitter.y > emitter.z
+                    && emitter.x <= 4.001 && emitter.y <= 4.001 && emitter.z <= 4.001,
+                    "Sparse actual-HDR emitter lost chroma or escaped display headroom")
+
+        passCount += 1
+        print(String(
+            format: "PASS actual HDR p98 control and EV stability: sparse %.3f, step %.3f, stalled %.3f",
+            sparseState.breakpoint,
+            stepped.breakpoint,
+            stalled.breakpoint
+        ))
+    }
+
+    private func makeActualQuarterCellScene(
+        cellsWide: Int,
+        cellsHigh: Int,
+        brightCells: Set<Int>,
+        baseRadiance: SIMD3<Float>,
+        brightRadiance: SIMD3<Float>
+    ) throws -> MTLTexture {
+        let width = cellsWide * 4
+        let height = cellsHigh * 4
+        var pixels = [SIMD4<Float>]()
+        pixels.reserveCapacity(width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let cell = (y / 4) * cellsWide + x / 4
+                let rgb = brightCells.contains(cell) ? brightRadiance : baseRadiance
+                pixels.append(SIMD4<Float>(rgb.x, rgb.y, rgb.z, 1.0))
+            }
+        }
+        return try gpu.makeRgba16FloatTexture(width: width, height: height, pixels: pixels)
+    }
+
+    private func filteredActualExposure(
+        initial: Float,
+        target: Float,
+        deltaTime: Float,
+        timeConstant: Float
+    ) -> Float {
+        let boundedDelta = min(max(deltaTime, 0.0), 1.0 / 15.0)
+        let blend = Float(1.0 - exp(-Double(boundedDelta / timeConstant)))
+        let initialEv = log2(initial)
+        let targetEv = log2(target)
+        return exp2(initialEv + (targetEv - initialEv) * blend)
     }
 
     private func validateSdrOutputTransferContracts() throws {
@@ -4147,6 +4454,10 @@ private final class ValueValidation {
                 handle,
                 "metallum_renderer_generation_native_contract_v1"
             ),
+            let actualHdrResetMaskSymbol = dlsym(
+                handle,
+                "metallum_actual_hdr_exposure_reset_mask_v1"
+            ),
             let createEdrMonitorSymbol = dlsym(handle, "metallum_create_edr_monitor"),
             let edrMonitorQuerySymbol = dlsym(handle, "metallum_EDRMonitor_query"),
             let releaseSymbol = dlsym(handle, "metallum_release_object"),
@@ -4178,6 +4489,10 @@ private final class ValueValidation {
         let generationContract = unsafeBitCast(
             generationContractSymbol,
             to: NativeGenerationContractFunction.self
+        )
+        let actualHdrResetMask = unsafeBitCast(
+            actualHdrResetMaskSymbol,
+            to: NativeActualHdrExposureResetMaskFunction.self
         )
         let createEdrMonitor = unsafeBitCast(
             createEdrMonitorSymbol,
@@ -4211,6 +4526,22 @@ private final class ValueValidation {
             to: NativeSpatialScreenshotFunction.self
         )
         let present = unsafeBitCast(presentSymbol, to: NativePresentFunction.self)
+
+        let smoothPresentationBits: [UInt64] = [1, 6, 7, 11]
+        let hardResetBits: [UInt64] = [0, 2, 3, 4, 5, 8, 9, 10, 12, 13]
+        try require(actualHdrResetMask(0) == 0
+                    && smoothPresentationBits.allSatisfy {
+                        actualHdrResetMask(1 << $0) == 0
+                    }
+                    && hardResetBits.allSatisfy {
+                        actualHdrResetMask(1 << $0) == 1
+                    }
+                    && actualHdrResetMask((1 << 1) | (1 << 7)) == 0
+                    && actualHdrResetMask((1 << 11) | (1 << 7)) == 0
+                    && actualHdrResetMask((1 << 6) | (1 << 2)) == 1,
+                    "Actual-HDR host reset classifier accepts a smooth presentation change or rejects a hard cut")
+        passCount += 1
+        print("PASS actual HDR host reset mask excludes resize/DRS/FOV/resource generation and retains hard cuts")
 
         let application = NSApplication.shared
         application.setActivationPolicy(.prohibited)

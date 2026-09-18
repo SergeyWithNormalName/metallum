@@ -116,6 +116,7 @@ public final class VoxelShadowCacheBuilder {
         public boolean complete() {
             return this.complete;
         }
+
     }
 
     private VoxelShadowCacheBuilder() {

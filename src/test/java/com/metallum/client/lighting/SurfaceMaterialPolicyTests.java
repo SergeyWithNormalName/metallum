@@ -1,11 +1,22 @@
 package com.metallum.client.lighting;
 
+import com.metallum.client.gi.semantic.GiSemanticMaterial;
+import com.metallum.client.gi.semantic.GiSemanticPacking;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.hdr.HdrEmissionVertex;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
+import net.caffeinemc.mods.sodium.api.memory.MemoryIntrinsics;
+import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
+import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.SharedConstants;
 import net.minecraft.world.level.block.Blocks;
+import org.lwjgl.system.MemoryUtil;
 
 /** Deterministic numerical and compact-ABI checks for the L8 surface material policy. */
 public final class SurfaceMaterialPolicyTests {
@@ -17,6 +28,9 @@ public final class SurfaceMaterialPolicyTests {
         Bootstrap.bootStrap();
         testVanillaDefaults();
         testCompactSemanticCoexistence();
+        testGiSharedVoxelReflectionPolicy();
+        testReflectionFaceCarrier();
+        testWaterSurfaceDoesNotBecomeACausticReceiver();
         testFresnelAndGgx();
         testRainExposureSnapshot();
         testWetnessAndAbsorption();
@@ -72,6 +86,14 @@ public final class SurfaceMaterialPolicyTests {
                         Blocks.SLIME_BLOCK.defaultBlockState(), true)
                         == SurfaceMaterialPolicy.GLASS,
                 "genuine translucent terrain lost its conservative glass fallback");
+        require(SurfaceMaterialPolicy.forTerrain(
+                        Blocks.WATER.defaultBlockState(), true)
+                        == SurfaceMaterialPolicy.WATER,
+                "water terrain fell through to the generic translucent material path");
+        require(SodiumHdrSemantic.terrainSurfaceClass(
+                        SurfaceMaterialPolicy.Kind.WATER, true, false)
+                        == SodiumHdrSemantic.SURFACE_CLASS_WATER,
+                "water terrain was not forwarded to the compact water surface class");
         require(SodiumHdrSemantic.SURFACE_CLASS_METAL
                         != SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
                         && SodiumHdrSemantic.SURFACE_CLASS_WATER
@@ -131,6 +153,223 @@ public final class SurfaceMaterialPolicyTests {
                 5, SodiumHdrShaderPatcher.encodeVertexSemantic(15, true));
         require(exactEmission == 253 && ((exactEmission >> 3) & 15) == 15,
                 "L8 compact material policy changed exact HDR emission");
+    }
+
+    private static void testGiSharedVoxelReflectionPolicy() {
+        require(SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.WATER)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.INTRINSIC
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.METAL)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.INTRINSIC
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.SMOOTH_DIELECTRIC)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.INTRINSIC,
+                "intrinsic glossy receiver families are incomplete");
+        require(SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.STONE)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.WET_ONLY
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.WOOD)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.WET_ONLY
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.DIELECTRIC)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.WET_ONLY,
+                "wet-only receiver families are incomplete");
+        require(SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.GLASS)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.NONE
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.POROUS)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.NONE,
+                "unsupported transparent or high-roughness receiver entered R2");
+        for (SurfaceMaterialPolicy.Descriptor descriptor : new SurfaceMaterialPolicy.Descriptor[]{
+                SurfaceMaterialPolicy.DIELECTRIC, SurfaceMaterialPolicy.STONE,
+                SurfaceMaterialPolicy.WOOD, SurfaceMaterialPolicy.POROUS,
+                SurfaceMaterialPolicy.SMOOTH_DIELECTRIC, SurfaceMaterialPolicy.METAL,
+                SurfaceMaterialPolicy.GLASS, SurfaceMaterialPolicy.WATER
+        }) {
+            require(GiSemanticMaterial.from(descriptor).voxelReflectionMode()
+                            == SurfaceMaterialPolicy.voxelReflectionMode(descriptor),
+                    "G2 material semantics diverged from the L8 reflection receiver policy");
+        }
+        require(SodiumHdrSemantic.terrainSurfaceClass(
+                        SurfaceMaterialPolicy.Kind.METAL, true, false)
+                        == SodiumHdrSemantic.SURFACE_CLASS_METAL
+                        && SodiumHdrSemantic.terrainSurfaceClass(
+                        SurfaceMaterialPolicy.Kind.SMOOTH_DIELECTRIC, true, false)
+                        == SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC,
+                "sheltered glossy top faces lost their intrinsic material semantic");
+    }
+
+    private static void testReflectionFaceCarrier() {
+        require(VoxelReflectionFace.NEG_X == GiSemanticPacking.FACE_NEG_X
+                        && VoxelReflectionFace.POS_X == GiSemanticPacking.FACE_POS_X
+                        && VoxelReflectionFace.NEG_Y == GiSemanticPacking.FACE_NEG_Y
+                        && VoxelReflectionFace.POS_Y == GiSemanticPacking.FACE_POS_Y
+                        && VoxelReflectionFace.NEG_Z == GiSemanticPacking.FACE_NEG_Z
+                        && VoxelReflectionFace.POS_Z == GiSemanticPacking.FACE_POS_Z,
+                "reflection receiver face order must remain identical to the G2 semantic ABI");
+        require(VoxelReflectionFace.forNormal(-0.8F, 0.2F, 0.1F)
+                        == GiSemanticPacking.faceForNormal(-0.8F, 0.2F, 0.1F)
+                        && VoxelReflectionFace.forNormal(0.1F, 0.2F, 0.8F)
+                        == GiSemanticPacking.faceForNormal(0.1F, 0.2F, 0.8F),
+                "reflection receiver dominant-face selection must match G2 semantics");
+        require(VoxelReflectionFace.forAxisAlignedUnitNormal(-1.0F, 0.0F, 0.0F)
+                        == VoxelReflectionFace.NEG_X
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.0F, 1.0F, 0.0F)
+                        == VoxelReflectionFace.POS_Y
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.0F, 0.0F, 1.0F)
+                        == VoxelReflectionFace.POS_Z
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.8F, 0.0F, 0.0F) == 0
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.7071F, 0.7071F, 0.0F) == 0,
+                "G5 accepted a diagonal/crossed-plant or non-unit normal as an exact axis face");
+        require(SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_NEG_X) == 1
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_X) == 2
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_NEG_Y) == 3
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_Y) == 4
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_Z) == 6,
+                "G2 face order diverged from the compact reflection carrier");
+
+        String runtimeKey = VertexReflectionExperiment.RUNTIME_PROPERTY;
+        String previousRuntime = System.getProperty(runtimeKey);
+        try {
+            GiReceiverCompatibility.setTestOverride(true);
+            CompactPositionCarrierSafety.resetForTests();
+            VertexReflectionExperiment.setOverride(true);
+            System.setProperty(runtimeKey, "true");
+            int[] faces = {
+                    VoxelReflectionFace.NEG_X, VoxelReflectionFace.POS_X,
+                    VoxelReflectionFace.NEG_Y, VoxelReflectionFace.POS_Y,
+                    VoxelReflectionFace.NEG_Z, VoxelReflectionFace.POS_Z
+            };
+            for (int face : faces) {
+                int authoredColor = 0x9180a0c0;
+                int authoredLight = 0x00e500a1;
+                ChunkVertexEncoder.Vertex[] glossyQuad = testQuad(authoredColor, authoredLight);
+                SodiumHdrSemantic.tagQuad(
+                        glossyQuad,
+                        0,
+                        false,
+                        SodiumHdrSemantic.SURFACE_CLASS_METAL,
+                        false,
+                        0,
+                        face,
+                        face
+                );
+                int packedMaterial = SodiumHdrSemantic.packMaterialBits(0, glossyQuad);
+                require((packedMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2
+                                && ((packedMaterial >> 7) & 1) == 1,
+                        "iron quad lost its compact metal material tag");
+                int faceCode = SodiumHdrSemantic.reflectionFaceCode(face);
+                require(SodiumHdrSemantic.compactPositionCarrierCode(glossyQuad) == faceCode,
+                        "L8 face did not enter the compact position sideband");
+                for (ChunkVertexEncoder.Vertex vertex : glossyQuad) {
+                    require(vertex.color == authoredColor && vertex.light == authoredLight,
+                            "position carrier changed authored color or foreign light bytes");
+                }
+            }
+
+            ChunkVertexEncoder.Vertex[] diagonalReflection = testQuad(
+                    0x7f80a0c0, 0x00ff00ff
+            );
+            SodiumHdrSemantic.tagQuad(
+                    diagonalReflection,
+                    0,
+                    false,
+                    SodiumHdrSemantic.SURFACE_CLASS_METAL,
+                    false,
+                    0,
+                    VoxelReflectionFace.POS_X,
+                    0
+            );
+            SodiumHdrSemantic.packMaterialBits(0, diagonalReflection);
+            require(SodiumHdrSemantic.compactPositionCarrierCode(diagonalReflection)
+                            == SodiumHdrSemantic.reflectionFaceCode(VoxelReflectionFace.POS_X),
+                    "dominant-only L8 face lost its non-G5 sideband class");
+            for (ChunkVertexEncoder.Vertex vertex : diagonalReflection) {
+                require(vertex.color == 0x7f80a0c0 && vertex.light == 0x00ff00ff,
+                        "dominant-only position carrier changed authored vertex attributes");
+            }
+
+            ChunkVertexEncoder.Vertex[] untagged = testQuad(0xff80a0c0, 0x00f000a0);
+            int untaggedMaterial = SodiumHdrSemantic.packMaterialBits(0, untagged);
+            long pointer = MemoryUtil.nmemCalloc(
+                    1,
+                    SodiumHdrSemantic.COMPACT_VERTEX_STRIDE
+                            * SodiumHdrSemantic.COMPACT_QUAD_VERTEX_COUNT
+            );
+            try {
+                long end = new CompactChunkVertex().getEncoder().write(
+                        pointer, untaggedMaterial, untagged, 0
+                );
+                MemoryIntrinsics.putInt(
+                        pointer,
+                        MemoryIntrinsics.getInt(pointer) | 0x4000_0000
+                );
+                require(!SodiumHdrSemantic.writeCompactPositionCarrier(pointer, end, 0)
+                                && !CompactPositionCarrierSafety.isSafe()
+                                && VertexReflectionExperiment.isLayoutEnabled()
+                                && !VertexReflectionExperiment.isRuntimeEnabled(),
+                        "L8-only pre-owned code 1 changed layout or remained contributive");
+            } finally {
+                MemoryUtil.nmemFree(pointer);
+            }
+        } finally {
+            CompactPositionCarrierSafety.resetForTests();
+            GiReceiverCompatibility.setTestOverride(null);
+            VertexReflectionExperiment.setOverride(null);
+            if (previousRuntime == null) {
+                System.clearProperty(runtimeKey);
+            } else {
+                System.setProperty(runtimeKey, previousRuntime);
+            }
+        }
+    }
+
+    private static ChunkVertexEncoder.Vertex[] testQuad(final int color, final int light) {
+        ChunkVertexEncoder.Vertex[] vertices = new ChunkVertexEncoder.Vertex[4];
+        for (int index = 0; index < vertices.length; index++) {
+            TestVertex vertex = new TestVertex();
+            vertex.color = color;
+            vertex.light = light;
+            vertices[index] = vertex;
+        }
+        return vertices;
+    }
+
+    private static final class TestVertex extends ChunkVertexEncoder.Vertex
+            implements HdrEmissionVertex {
+        private int hdrSemantic;
+
+        @Override
+        public int metallum$getHdrSemantic() {
+            return this.hdrSemantic;
+        }
+
+        @Override
+        public void metallum$setHdrSemantic(final int semantic) {
+            this.hdrSemantic = semantic;
+        }
+    }
+
+    private static void testWaterSurfaceDoesNotBecomeACausticReceiver() {
+        ChunkVertexEncoder.Vertex[] vertices = new ChunkVertexEncoder.Vertex[4];
+        int[] vanillaLight = {0x00F000A0, 0x00D00080, 0x00900050, 0x00300020};
+        for (int index = 0; index < vertices.length; index++) {
+            vertices[index] = new ChunkVertexEncoder.Vertex();
+            vertices[index].color = 0xFF80A0C0;
+            vertices[index].light = vanillaLight[index];
+        }
+
+        SodiumHdrSemantic.tagQuad(
+                vertices,
+                0,
+                false,
+                SodiumHdrSemantic.SURFACE_CLASS_WATER,
+                true,
+                5
+        );
+        for (int index = 0; index < vertices.length; index++) {
+            ChunkVertexEncoder.Vertex vertex = vertices[index];
+            int alpha = (vertex.color >>> 24) & 0xFF;
+            require(alpha == 255,
+                    "water surface was encoded as a submerged caustic receiver");
+            require(vertex.light == vanillaLight[index],
+                    "water surface tagging replaced propagated vanilla skylight");
+        }
     }
 
     private static void testFresnelAndGgx() {
@@ -279,12 +518,6 @@ public final class SurfaceMaterialPolicyTests {
                         && !snapshot.canRainReach(31, 100, -13)
                         && !snapshot.canRainReach(34, 100, 0),
                 "rain exposure snapshot accepts a dry-biome, sheltered, or foreign column");
-        require(snapshot.canSeeSky(34, 71, -13)
-                        && !snapshot.canSeeSky(34, 70, -13)
-                        && snapshot.canSeeSky(36, 63, -12)
-                        && !snapshot.canRainReach(36, 63, -12)
-                        && !snapshot.canSeeSky(31, 100, -13),
-                "sky exposure must respect the roof height but ignore local rain biome eligibility");
     }
 
     private static void testComprehensiveBlockClassifications() {

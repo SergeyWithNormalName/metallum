@@ -28,6 +28,7 @@ public final class VoxelOccupancyTests {
         testFullAndSlabMasks();
         testStairFenceAndPaneMasks();
         testCoverageAwareOpticsAndDeterminism();
+        testSectionScratchMatchesImmutableEncoding();
         testDebugSliceVisualization();
         testPreviewSettingsAndAcknowledgedMirror();
         testClipmapPresetSizing();
@@ -298,6 +299,37 @@ public final class VoxelOccupancyTests {
                 "glass pane became transparent-air or fully opaque");
         require(first.opticalByte(cell) < first.coverageByte(cell),
                 "glass optical byte ignored material transmittance");
+    }
+
+    private static void testSectionScratchMatchesImmutableEncoding() {
+        List<VoxelShape> shapes = List.of(
+                Shapes.empty(),
+                Shapes.block(),
+                Shapes.box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0),
+                Shapes.or(
+                        Shapes.box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0),
+                        Shapes.box(0.0, 0.5, 0.0, 0.5, 1.0, 1.0)
+                ),
+                Shapes.box(0.0, 0.0, 0.4375, 1.0, 1.0, 0.5625)
+        );
+        VoxelShapeEncoder.Scratch scratch = new VoxelShapeEncoder.Scratch();
+        for (VoxelShape shape : shapes) {
+            VoxelShapeEncoder.EncodedShape immutable = VoxelShapeEncoder.encode(
+                    shape,
+                    VoxelSubdivision.FOUR,
+                    OPAQUE
+            );
+            VoxelShapeEncoder.encodeInto(shape, VoxelSubdivision.FOUR, scratch);
+            require(scratch.occupancyMask() == immutable.occupancyMask()
+                            && scratch.shapeProxyId() == immutable.shapeProxyId()
+                            && scratch.coverageByte() == immutable.coverageByte(),
+                    "allocation-bounded section encoding diverged from immutable encoding");
+        }
+        VoxelShapeEncoder.encodeInto(Shapes.empty(), VoxelSubdivision.FOUR, scratch);
+        require(scratch.occupancyMask() == 0L
+                        && scratch.shapeProxyId() == VoxelShapeRegistry.FAST_PATH_ID
+                        && scratch.coverageByte() == 0,
+                "section scratch retained state across block encodes");
     }
 
     private static void testDebugSliceVisualization() {

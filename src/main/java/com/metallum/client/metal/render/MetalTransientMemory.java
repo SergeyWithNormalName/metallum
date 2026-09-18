@@ -199,6 +199,24 @@ final class MetalTransientMemory implements TransientMemory {
         return upload(data, alignment, usage, minimumAllocation, elementSize);
     }
 
+    GpuBufferSlice uploadStagingFromAddress(
+            final long sourceAddress,
+            final int byteLength,
+            final long alignment,
+            @Usage final int usage
+    ) {
+        if (sourceAddress == MemoryUtil.NULL || byteLength <= 0) {
+            throw new IllegalArgumentException("Raw staging upload requires a non-empty source range");
+        }
+        try (MappedView mapped = allocateMapped(byteLength, alignment, usage, byteLength, 1L)) {
+            MemoryUtil.memCopy(sourceAddress, MemoryUtil.memAddress(mapped.data()), byteLength);
+            if (this.workloadTelemetry != null) {
+                this.workloadTelemetry.recordCpuToShared(byteLength);
+            }
+            return mapped.slice();
+        }
+    }
+
     private GpuBufferSlice upload(final List<ByteBuffer> data, final long alignment, @Usage final int usage, final long minimumAllocation, final long elementSize) {
         long totalSize = 0L;
         for (ByteBuffer buffer : data) {
@@ -211,7 +229,9 @@ final class MetalTransientMemory implements TransientMemory {
             long mappedPtr = MemoryUtil.memAddress(mapped.data());
             long offset = 0L;
             for (ByteBuffer buffer : data) {
-                long copyLength = Math.min(mapped.slice().length() - offset, buffer.remaining());
+                long copyLength = checkedUploadCopyLength(
+                        mapped.slice().length(), offset, buffer.remaining()
+                );
                 MemoryUtil.memCopy(MemoryUtil.memAddress(buffer), mappedPtr + offset, copyLength);
                 if (this.workloadTelemetry != null) {
                     this.workloadTelemetry.recordCpuToShared(copyLength);
@@ -225,6 +245,30 @@ final class MetalTransientMemory implements TransientMemory {
             result = mapped.slice();
         }
         return result;
+    }
+
+    /**
+     * Rejects an allocator-contract violation before copying any part of the next source buffer.
+     * A truncated upload is more dangerous than a loud failure because the returned GPU slice still
+     * advertises the complete allocation while its tail contains stale or uninitialized bytes.
+     */
+    static long checkedUploadCopyLength(
+            final long mappedLength,
+            final long offset,
+            final long requestedLength
+    ) {
+        if (mappedLength < 0L || offset < 0L || requestedLength < 0L
+                || offset > mappedLength || requestedLength > mappedLength - offset) {
+            long available = offset >= 0L && offset <= mappedLength
+                    ? mappedLength - offset
+                    : -1L;
+            throw new IllegalStateException(
+                    "Transient memory upload overflow: requested " + requestedLength
+                            + " bytes at offset " + offset
+                            + " in a " + mappedLength + "-byte slice (available " + available + ")"
+            );
+        }
+        return requestedLength;
     }
 
     @Override

@@ -4,6 +4,29 @@ import com.metallum.Metallum;
 import com.metallum.client.display.NativeFullscreen;
 import com.metallum.client.display.NativeFullscreenStartup;
 import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
+import com.metallum.client.gi.semantic.GiSemanticController;
+import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
+import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.receiver.GiReceiverGpuResources;
+import com.metallum.client.gi.receiver.GiReceiverLayout;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
+import com.metallum.client.gi.receiver.GiReceiverShaderPatcher;
+import com.metallum.client.gi.live.GiLiveReceiverShaderPatcher;
+import com.metallum.client.gi.live.GiLiveCoordinator;
+import com.metallum.client.gi.live.GiLiveGpuResources;
+import com.metallum.client.gi.live.GiLiveLayout;
+import com.metallum.client.gi.live.GiLiveRuntime;
+import com.metallum.client.gi.source.GiDirectDirtyQueue;
+import com.metallum.client.gi.source.GiDirectSourceCoordinator;
+import com.metallum.client.gi.source.GiDirectSourceGpuResources;
+import com.metallum.client.gi.source.GiDirectSourceLayout;
+import com.metallum.client.gi.source.GiDirectSourceRuntime;
+import com.metallum.client.gi.source.GiDynamicSourceSnapshot;
+import com.metallum.client.gi.transport.GiTransportCoordinator;
+import com.metallum.client.gi.transport.GiTransportGpuResources;
+import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
@@ -17,6 +40,7 @@ import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
+import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.VanillaHdrShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
@@ -28,14 +52,23 @@ import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.EntityShadowProxySnapshot;
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.lighting.GodRayVisibilityDiagnostic;
 import com.metallum.client.lighting.LightFrameSnapshot;
+import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.RealWorldReflectionField;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.L8ReactiveShaderPatcher;
+import com.metallum.client.lighting.shader.L6TemporalShadowExperiment;
+import com.metallum.client.lighting.shader.L6TemporalShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
+import com.metallum.client.metal.render.framegraph.GiDirectSourceFrameGraph;
+import com.metallum.client.metal.render.framegraph.GiTransportFrameGraph;
 import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -69,6 +102,7 @@ import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.metallum.client.renderer.temporal.TemporalDiagnostics;
+import com.metallum.client.radiance.RadianceGpuResources;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelClipmapLayout;
@@ -89,8 +123,8 @@ import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.systems.*;
 import com.mojang.blaze3d.textures.*;
-import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
 import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
+import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -114,6 +148,8 @@ public final class MetalDevice implements GpuDeviceBackend {
      * reactive ring on the render thread at every resolution transition.
      */
     private static final int TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY = 2;
+    private static final long GI_G4_ACCOUNTED_BYTES = 22_917_480L;
+    private static final long GI_TOTAL_BUDGET_BYTES = 25_165_824L;
 
     private record RendererGenerationKey(
             int renderWidth,
@@ -211,9 +247,17 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
+    private boolean vertexReflectionPipelineStateInitialized;
+    private boolean vertexReflectionPipelineState;
+    @Nullable
+    private RadianceGpuResources frozenReflectionResources;
+    private long frozenReflectionFieldGeneration = Long.MIN_VALUE;
+    @Nullable
+    private RadianceGpuResources pendingFrozenReflectionResources;
+    private long pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
     @Nullable
     private SodiumLightSidecarBindings sodiumLightSidecarBindings;
-    private ShaderSource activeShaderSource;
+    private final ShaderSource defaultShaderSource;
     @Nullable
     private MetalGpuTexture hdrSceneSnapshot;
     @Nullable
@@ -242,6 +286,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private MemorySegment hdrUiHandle = MemorySegment.NULL;
     private long hdrUiSubmitIndex = Long.MIN_VALUE;
     private boolean hdrUiSuppressSceneEnhancement;
+    private final GodRayVisibilityRenderer godRayVisibilityRenderer;
+    @Nullable
+    private TextureTarget godRayVisibilityTarget;
     private boolean materialWorldPassActive;
     private boolean spatialSceneAvailable;
     private long spatialSceneSubmitIndex = Long.MIN_VALUE;
@@ -294,6 +341,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private AdvancedLightingGpuResources advancedLightingResources;
     @Nullable
+    private L6TemporalHistoryResources l6TemporalHistoryResources;
+    private long l6TemporalHistoryClearedSubmitIndex = Long.MIN_VALUE;
+    @Nullable
     private SunShadowGpuResources sunShadowResources;
     @Nullable
     private CloudShadowGpuResources cloudShadowResources;
@@ -303,6 +353,29 @@ public final class MetalDevice implements GpuDeviceBackend {
     private VoxelOccupancyGpuResources voxelOccupancyResources;
     @Nullable
     private LocalVoxelShadowGpuResources localVoxelShadowResources;
+    @Nullable
+    private GiDirectSourceCoordinator giDirectSourceCoordinator;
+    private boolean giDirectSourceFailureLogged;
+    private long giDirectSourceDebugLogNanos;
+    private long giDirectSourceRestartLogNanos;
+    private long giDirectSourceRestartCount;
+    @Nullable
+    private GiTransportCoordinator giTransportCoordinator;
+    private boolean giTransportFailureLogged;
+    private boolean giTransportDisabled;
+    private boolean giTransportAdmissionLogged;
+    @Nullable
+    private GiReceiverGpuResources giReceiverResources;
+    @Nullable
+    private GiLiveCoordinator giLiveCoordinator;
+    private final long giLiveDeviceGeneration;
+    private boolean giLiveFailureLogged;
+    private boolean giLiveFrameCompatible;
+    private boolean giReceiverAdmissionLogged;
+    private long giReceiverBindingProofSubmitIndex = Long.MIN_VALUE;
+    private long giReceiverBindingProofEncoderAddress;
+    private int giReceiverBindingProofStatus = GiReceiverLayout.STATUS_INVALID;
+    private boolean giReceiverBindingProofCarrierSafe;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
@@ -330,7 +403,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     ) {
         NativeHdrFrameGraph.initialize();
         INSTANCE = this;
-        this.activeShaderSource = defaultShaderSource;
+        this.defaultShaderSource = defaultShaderSource;
         this.debugOptions = debugOptions;
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
@@ -450,7 +523,164 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
+        this.giLiveDeviceGeneration = GiLiveRuntime.resetDeviceState();
+        GiReceiverRuntime.resetDeviceState();
+        GiReceiverRuntime.admission().beginCarrierWriteCensus(
+                SodiumHdrSemantic.g5CarrierWriteCount()
+        );
+        if (GiReceiverRuntime.isConfigurationInvalid()) {
+            Metallum.LOGGER.warn(
+                    "G5 receiver request is invalid: {}",
+                    GiReceiverRuntime.admission().invalidReason()
+            );
+        } else if (GiReceiverRuntime.isRequested()) {
+            if (!GiReceiverRuntime.admitCompactPositionCarrier(
+                    GiReceiverCompatibility.supportsInstalledCompactPositionCarrier()
+            )) {
+                throw new IllegalStateException(
+                        "G5 receiver rejected the installed Sodium compact-position layout: "
+                                + GiReceiverRuntime.admission().invalidReason()
+                );
+            }
+        }
+        GiTransportRuntime.resetDeviceState();
+        boolean giFieldRequested = GiDirectSourceRuntime.isRequested()
+                || GiTransportRuntime.isRequested() || GiLiveRuntime.isRequested();
+        if (giFieldRequested && !AdvancedLightingRuntime.isRequested()) {
+            Metallum.LOGGER.warn(
+                    "G3/G4 field diagnostics require the Advanced lighting contract; "
+                            + "keeping their native resources structurally inactive"
+            );
+        }
+        if (giFieldRequested && AdvancedLightingRuntime.isRequested()) {
+            try {
+                GiDirectSourceFrameGraph.initialize();
+                GiDirectSourceGpuResources.validateNativeAbi();
+                this.giDirectSourceCoordinator = new GiDirectSourceCoordinator(
+                        this.metalDeviceHandle,
+                        this.commandQueue.nativeHandle(),
+                        GiTransportRuntime.isRequested(),
+                        GiTransportRuntime.isDebugPreviewRequested(),
+                        handle -> this.commandEncoder.queueForDestroy(
+                                () -> MetalNativeBridge.metallum_gi_direct_source_release_context_v1(handle)
+                        )
+                );
+            } catch (RuntimeException exception) {
+                Metallum.LOGGER.warn(
+                        "G3 direct-source ABI preflight failed; keeping GI structurally inactive",
+                        exception
+                );
+            }
+        }
+        if (GiTransportRuntime.isRequested()) {
+            if (this.giDirectSourceCoordinator == null) {
+                GiTransportRuntime.reportInvalid("G3 source admission failed");
+                Metallum.LOGGER.warn(
+                        "G4 transport requested but its private G3 source failed admission; "
+                                + "keeping G4 structurally inactive"
+                );
+            } else {
+                try {
+                    GiTransportFrameGraph.initialize();
+                    GiTransportGpuResources.validateNativeAbi();
+                    this.giTransportCoordinator = new GiTransportCoordinator(
+                            this.metalDeviceHandle,
+                            this.commandQueue.nativeHandle(),
+                            this.giDirectSourceCoordinator.telemetrySource(),
+                            handle -> this.commandEncoder.queueForDestroy(
+                                    () -> MetalNativeBridge.metallum_gi_transport_release_context_v1(handle)
+                            )
+                    );
+                } catch (RuntimeException exception) {
+                    GiTransportRuntime.reportInvalid("G4 native resource admission failed");
+                    Metallum.LOGGER.warn(
+                            "G4 frozen-transport ABI preflight failed; keeping G4 structurally inactive",
+                            exception
+                    );
+                }
+            }
+        }
+        if (GiReceiverRuntime.isRequested()) {
+            if (!AdvancedLightingRuntime.isRequested()) {
+                GiReceiverRuntime.admission().reportInvalid(
+                        "G5 requires the Advanced lighting contract"
+                );
+                throw new IllegalStateException(
+                        "G5 receiver requested without the Advanced lighting contract"
+                );
+            }
+            if (GiLiveRuntime.isRequested()) {
+                if (this.giDirectSourceCoordinator == null) {
+                    GiLiveRuntime.reportInvalid("G3 source admission failed");
+                    GiReceiverRuntime.admission().reportInvalid(
+                            "G6 G3 resource owner failed admission"
+                    );
+                    throw new IllegalStateException(
+                            "G6 receiver requested but its private G3 owner is unavailable"
+                    );
+                }
+                try {
+                    GiLiveGpuResources.validateNativeAbi();
+                    this.giLiveCoordinator = new GiLiveCoordinator(
+                            this.metalDeviceHandle,
+                            this.commandQueue.nativeHandle(),
+                            this.giDirectSourceCoordinator,
+                            this.giLiveDeviceGeneration,
+                            handle -> this.commandEncoder.queueForDestroy(
+                                    () -> MetalNativeBridge
+                                            .metallum_gi_live_release_context_v1(handle)
+                            )
+                    );
+                    GiLiveRuntime.reportReady(this.giLiveDeviceGeneration);
+                    GiReceiverRuntime.admission().reportNativeReady();
+                } catch (RuntimeException exception) {
+                    GiLiveRuntime.reportInvalid("G6 native resource admission failed");
+                    GiReceiverRuntime.admission().reportInvalid(
+                            "G6 native resource admission failed"
+                    );
+                    this.releaseFailedGiStartup();
+                    throw new IllegalStateException(
+                            "G6 live ABI/resource admission failed",
+                            exception
+                    );
+                }
+            } else {
+                if (this.giTransportCoordinator == null) {
+                    GiReceiverRuntime.admission().reportInvalid(
+                            "G4 resource owner failed admission"
+                    );
+                    throw new IllegalStateException(
+                            "G5 receiver requested but its private G4 resource owner is unavailable"
+                    );
+                }
+                try {
+                    GiReceiverGpuResources.validateNativeAbi();
+                    this.giReceiverResources = GiReceiverGpuResources.create(
+                            this.giTransportCoordinator.readToken(),
+                            handle -> this.commandEncoder.queueForDestroy(
+                                    () -> MetalNativeBridge
+                                            .metallum_gi_receiver_release_context_v1(handle)
+                            )
+                    );
+                    if (this.giReceiverResources == null) {
+                        throw new IllegalStateException("native G5 context creation returned null");
+                    }
+                    GiReceiverRuntime.admission().reportNativeReady();
+                } catch (RuntimeException exception) {
+                    GiReceiverRuntime.admission().reportInvalid(
+                            "G5 native resource admission failed"
+                    );
+                    throw new IllegalStateException(
+                            "G5 receiver ABI/resource admission failed",
+                            exception
+                    );
+                }
+            }
+        }
         this.cloudShadowResources = new CloudShadowGpuResources(this);
+        // Persistent fallback binding is created once on the render thread.  The water-only
+        // planar target itself is allocated lazily after the first eligible camera frame.
+        PlanarReflectionRenderer.init(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
         HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
         HdrSceneState.configure(this.hdrConfig, initialEdrCapabilities);
@@ -487,6 +717,47 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.rendererConfig.lightingPreset(),
                 this.rendererConfig.frameInterpolation()
         );
+        this.godRayVisibilityRenderer = new GodRayVisibilityRenderer(this);
+    }
+
+    /**
+     * Rolls back the resources already owned by this partially constructed device when the
+     * mandatory production G6 chain cannot be admitted.  No frame has been submitted at this
+     * point, but releases still flow through the normal destruction queue so ownership remains
+     * identical to the steady-state close path.
+     */
+    private void releaseFailedGiStartup() {
+        if (this.giLiveCoordinator != null) {
+            this.giLiveCoordinator.close();
+            this.giLiveCoordinator = null;
+        }
+        if (this.giTransportCoordinator != null) {
+            this.giTransportCoordinator.close();
+            this.giTransportCoordinator = null;
+        }
+        if (this.giDirectSourceCoordinator != null) {
+            this.giDirectSourceCoordinator.close();
+            this.giDirectSourceCoordinator = null;
+        }
+        this.commandEncoder.close();
+        this.commandQueue.close();
+        if (this.nativeFullscreen != null) {
+            this.nativeFullscreen.close();
+            this.nativeFullscreen = null;
+        }
+        if (!MetalNativeBridge.isNullHandle(this.edrMonitor)) {
+            MetalNativeBridge.metallum_release_object(this.edrMonitor);
+        }
+        try {
+            MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
+        } catch (Throwable ignored) {
+        }
+        MetalNativeBridge.metallum_release_object(this.metalLayer);
+        MetalNativeBridge.metallum_release_device_caches(this.metalDeviceHandle);
+        MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
+        if (INSTANCE == this) {
+            INSTANCE = null;
+        }
     }
 
     MetalCapabilities rendererCapabilities() {
@@ -638,10 +909,8 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
-        ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
-        if (shaderSource != null) {
-            this.activeShaderSource = shaderSource;
-        }
+        this.invalidatePipelinesForVertexReflectionToggle();
+        ShaderSource effectiveSource = shaderSource == null ? this.defaultShaderSource : shaderSource;
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, effectiveSource));
     }
 
@@ -678,6 +947,13 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSceneDepthSnapshot.close();
             this.hdrSceneDepthSnapshot = null;
         }
+        if (this.godRayVisibilityRenderer != null) {
+            this.godRayVisibilityRenderer.close();
+        }
+        if (this.godRayVisibilityTarget != null) {
+            this.godRayVisibilityTarget.destroyBuffers();
+            this.godRayVisibilityTarget = null;
+        }
         this.resetHdrSceneColor();
         this.hdrSceneDepthHandle = MemorySegment.NULL;
         if (this.hdrSemanticMask != null) {
@@ -689,9 +965,15 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
         this.replaceFrameInterpolationCoordinator(null);
+        this.closeFrozenReflectionResources();
+        PlanarReflectionRenderer.close();
         if (this.advancedLightingResources != null) {
             this.advancedLightingResources.close();
             this.advancedLightingResources = null;
+        }
+        if (this.l6TemporalHistoryResources != null) {
+            this.l6TemporalHistoryResources.close();
+            this.l6TemporalHistoryResources = null;
         }
         if (this.sunShadowResources != null) {
             this.sunShadowResources.close();
@@ -709,6 +991,25 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.localVoxelShadowResources.close();
             this.localVoxelShadowResources = null;
         }
+        if (this.giReceiverResources != null) {
+            this.giReceiverResources.close();
+            this.giReceiverResources = null;
+        }
+        if (this.giLiveCoordinator != null) {
+            this.giLiveCoordinator.close();
+            this.giLiveCoordinator = null;
+        }
+        if (this.giTransportCoordinator != null) {
+            this.giTransportCoordinator.close();
+            this.giTransportCoordinator = null;
+        }
+        if (this.giDirectSourceCoordinator != null) {
+            this.giDirectSourceCoordinator.close();
+            this.giDirectSourceCoordinator = null;
+        }
+        GiReceiverRuntime.resetDeviceState();
+        GiLiveRuntime.resetDeviceState();
+        GiTransportRuntime.resetDeviceState();
         this.commandEncoder.close();
         this.entityVelocityPackets.close();
         this.frameStatePackets.close();
@@ -883,6 +1184,80 @@ public final class MetalDevice implements GpuDeviceBackend {
         return INSTANCE;
     }
 
+    /** One-shot G6 benchmark-boundary diagnostics; exposes no mutable GPU capability. */
+    public String giLiveDebugSummary() {
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? "g6_coordinator=null" : live.debugSummary();
+    }
+
+    /**
+     * Starts the seven-texel G6 benchmark probe.  It is intentionally unavailable outside the
+     * benchmark process and delegates current epoch/source/origin ownership to the live
+     * coordinator; callers provide only fixed world-space sample locations.
+     */
+    public int beginGiLiveDebugProbe(
+            final int[] cascades,
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiLiveLayout.STATUS_REJECTED;
+        }
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? GiLiveLayout.STATUS_REJECTED
+                : live.beginDebugProbe(cascades, worldXs, worldYs, worldZs);
+    }
+
+    /** Polls the benchmark probe only; returns {@code null} while native's blit is pending. */
+    public GiLiveGpuResources.@Nullable DebugProbeCapture pollGiLiveDebugProbe() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return null;
+        }
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? null : live.pollDebugProbe();
+    }
+
+    /** Status companion for a bounded benchmark retry after an optional probe became stale. */
+    public int giLiveDebugProbeLastStatus() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiLiveLayout.STATUS_REJECTED;
+        }
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        return live == null ? GiLiveLayout.STATUS_REJECTED : live.debugProbeLastStatus();
+    }
+
+    /** Starts a benchmark-only G3 C0 point probe; it never waits for GPU completion. */
+    public int beginGiDirectDebugProbe(
+            final int[] worldXs,
+            final int[] worldYs,
+            final int[] worldZs
+    ) {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiDirectSourceGpuResources.STATUS_REJECTED;
+        }
+        GiDirectSourceCoordinator direct = this.giDirectSourceCoordinator;
+        return direct == null ? GiDirectSourceGpuResources.STATUS_REJECTED
+                : direct.beginDebugProbe(worldXs, worldYs, worldZs);
+    }
+
+    public GiDirectSourceGpuResources.@Nullable DebugProbeCapture pollGiDirectDebugProbe() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return null;
+        }
+        GiDirectSourceCoordinator direct = this.giDirectSourceCoordinator;
+        return direct == null ? null : direct.pollDebugProbe();
+    }
+
+    public int giDirectDebugProbeLastStatus() {
+        if (!GiLiveRuntime.isBenchmarkActive()) {
+            return GiDirectSourceGpuResources.STATUS_REJECTED;
+        }
+        GiDirectSourceCoordinator direct = this.giDirectSourceCoordinator;
+        return direct == null ? GiDirectSourceGpuResources.STATUS_REJECTED
+                : direct.debugProbeLastStatus();
+    }
+
     long currentSubmitIndex() {
         return this.commandEncoder.currentSubmitIndex();
     }
@@ -920,6 +1295,12 @@ public final class MetalDevice implements GpuDeviceBackend {
                     telemetry.blockInvalidations(),
                     telemetry.resourceBytes()
             );
+        }
+    }
+
+    public synchronized void invalidateSunShadowCache() {
+        if (this.sunShadowResources != null) {
+            this.sunShadowResources.invalidate();
         }
     }
 
@@ -1666,6 +2047,12 @@ public final class MetalDevice implements GpuDeviceBackend {
     /** Publishes one final world-camera snapshot into its reusable in-flight ABI slot. */
     public synchronized FrameState publishFrameState(final FrameCapture capture) {
         Objects.requireNonNull(capture, "capture");
+        // A frozen-reflection layout change closes PSOs and, by design, drains the current
+        // command buffer.  It must happen before this method snapshots the submit index for
+        // L4; doing it lazily from the shadow/reflection terrain pass would advance that index
+        // after SunShadowRenderer has captured its frame and force Advanced Lighting to fail
+        // closed for the rest of the session.
+        this.invalidatePipelinesForVertexReflectionToggle();
         this.activeEnvironmentProfile = capture.environment() != null
                 ? capture.environment().profile()
                 : EnvironmentDescriptor.Profile.CELESTIAL;
@@ -1882,6 +2269,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                         this.acknowledgeVoxelNativeRejection(voxelResources);
                         this.voxelTransientBusyLogged = false;
                     } else {
+                        AdvancedLightingRuntime.reportBenchmarkFrameFallback(
+                                "L5 voxel upload was not active for Advanced frame: status " + voxelStatus
+                        );
                         voxelController.retryUploadBatch(voxelBatch.batchId());
                         voxelBatch = null;
                         published = published.withAdvancedLightingWork(advancedWork);
@@ -1906,6 +2296,379 @@ public final class MetalDevice implements GpuDeviceBackend {
                             this.disableVoxelOccupancy(
                                     "native L5 voxel upload failed with status " + voxelStatus,
                                     null
+                            );
+                        }
+                    }
+                }
+                GiSemanticTransportFieldView transportField = this.giTransportCoordinator == null
+                        || !GiTransportRuntime.isPopulationRequested()
+                        ? null : GiSemanticController.global().activeTransportField();
+                GiTransportRuntime.reportSemanticSourceReady(transportField != null);
+                if (GiTransportRuntime.isPopulationRequested()
+                        && this.giTransportCoordinator != null && !this.giTransportDisabled) {
+                    try {
+                        boolean accepted = this.giTransportCoordinator.hasAcceptedEpoch();
+                        int transportStatus;
+                        if (accepted) {
+                            if (GiTransportRuntime.isDebugPreviewRequested()) {
+                                transportStatus = this.giTransportCoordinator
+                                        .pollFrozenFrame(submitIndex);
+                            } else {
+                                GiDirectSourceCoordinator.TransportSourceIdentity observedSource =
+                                        this.giTransportCoordinator.submittedSourceIdentity();
+                                if (observedSource != null
+                                        && !this.giDirectSourceCoordinator
+                                        .transportSourceIdentityStillCurrent(
+                                                observedSource,
+                                                capture.giEnvironment(),
+                                                AdvancedLightRegistry.global()
+                                        )) {
+                                    observedSource = null;
+                                }
+                                transportStatus = this.giTransportCoordinator.observeFrame(
+                                        transportField, observedSource, submitIndex
+                                );
+                            }
+                        } else {
+                            GiDirectSourceCoordinator.TransportSource transportSource =
+                                    this.giDirectSourceCoordinator == null
+                                            ? null
+                                            : this.giDirectSourceCoordinator.transportSource();
+                            GiTransportRuntime.reportSourceReady(transportSource != null);
+                            if (transportField != null && transportSource != null
+                                    && GiTransportRuntime.isSubmissionAllowed()) {
+                                transportStatus = this.commandEncoder.encodeGiTransport(
+                                        this.giTransportCoordinator,
+                                        transportField,
+                                        transportSource,
+                                        submitIndex
+                                );
+                            } else {
+                                transportStatus = GiTransportCoordinator.STATUS_INPUT_NOT_READY;
+                            }
+                        }
+                        if (transportStatus == GiTransportGpuResources.STATUS_STALE) {
+                            if (!accepted && GiTransportRuntime.isDebugPreviewRequested()) {
+                                this.giTransportFailureLogged = false;
+                            } else {
+                                this.giTransportDisabled = true;
+                                GiTransportRuntime.reportInvalid(
+                                        accepted
+                                                ? "frozen G3/G2 source drifted"
+                                                : "G3/G2 handoff raced before G4 admission"
+                                );
+                                if (!this.giTransportFailureLogged) {
+                                    this.giTransportFailureLogged = true;
+                                    Metallum.LOGGER.warn(
+                                            "G4 frozen transport input became stale; retaining the private field without rebuilding"
+                                    );
+                                }
+                            }
+                        } else if (transportStatus == GiTransportGpuResources.STATUS_OK
+                                || transportStatus == GiTransportCoordinator.STATUS_NO_WORK
+                                || transportStatus == GiTransportCoordinator.STATUS_INPUT_NOT_READY
+                                || transportStatus == GiTransportGpuResources.STATUS_BUSY) {
+                            this.giTransportFailureLogged = false;
+                        } else {
+                            this.giTransportDisabled = true;
+                            GiTransportRuntime.reportInvalid(
+                                    "native transport status " + transportStatus
+                            );
+                            if (!this.giTransportFailureLogged) {
+                                this.giTransportFailureLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "G4 frozen transport failed with status {}; disabling further one-shot work",
+                                        transportStatus
+                                );
+                            }
+                        }
+                        if (this.giTransportCoordinator.isFrozen()
+                                && !this.giTransportAdmissionLogged) {
+                            GiTransportGpuResources.Stats transportStats =
+                                    this.giTransportCoordinator.nativeStats();
+                            GiDirectSourceGpuResources.Stats sourceStats =
+                                    this.giDirectSourceCoordinator.nativeStats();
+                            GiDirectDirtyQueue.Telemetry queue =
+                                    this.giDirectSourceCoordinator.queueTelemetry();
+                            if (transportStats == null || sourceStats == null) {
+                                GiTransportRuntime.reportInvalid(
+                                        "READY transport telemetry disappeared"
+                                );
+                            } else {
+                                boolean cleanBenchmarkPopulation =
+                                        !GiTransportRuntime.isBenchmarkActive()
+                                                || (queue.queued()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && queue.completed()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && queue.discarded() == 0L
+                                                && queue.pending() == 0
+                                                && sourceStats.directInjectDispatches()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && sourceStats.geometryApplyDispatches()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && sourceStats.fullVolumeRebuilds() == 1L
+                                                && sourceStats.staleRejects() == 0L
+                                                && sourceStats.rejectedCount() == 0L
+                                                && transportStats.transportDispatches() == 1L
+                                                && transportStats.fullVolumeBuilds() == 1L
+                                                && transportStats.validSurfaceCount() > 0L
+                                                && transportStats.staleRejects() == 0L
+                                                && transportStats.rejectedCount() == 0L);
+                                if (!cleanBenchmarkPopulation) {
+                                    GiTransportRuntime.reportInvalid(
+                                            "G4 READY telemetry is not a clean single population"
+                                    );
+                                } else {
+                                    GiTransportRuntime.reportResolvedReady(transportStats);
+                                }
+                                if (GiTransportRuntime.isResolvedReady()) {
+                                    this.giTransportAdmissionLogged = true;
+                                    Metallum.LOGGER.info(
+                                            "METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
+                                                    + "requested=g4_transport resolved=g4_transport "
+                                                    + "contract=3 state=READY phase={} presented_frame={} "
+                                                    + "resources=11 passes=4 dirty={}/{}/{}/{} "
+                                                    + "injection_dispatches={} full_volume_rebuilds={} "
+                                                    + "transport_dispatches={} field_epoch=1 "
+                                                    + "stale={} rejected={} status=PASS "
+                                                    + "field_only=true receiver=false image_binding=false",
+                                            GiTransportRuntime.isBenchmarkWarmup()
+                                                    ? "WARMUP" : "DIAGNOSTIC",
+                                            submitIndex,
+                                            queue.queued(), queue.completed(),
+                                            queue.discarded(), queue.pending(),
+                                            sourceStats.directInjectDispatches(),
+                                            sourceStats.fullVolumeRebuilds(),
+                                            transportStats.transportDispatches(),
+                                            transportStats.staleRejects(),
+                                            transportStats.rejectedCount()
+                                    );
+                                }
+                            }
+                        }
+                        if (GiTransportRuntime.isResolvedReady()
+                                && GiTransportRuntime.isDebugPreviewRequested()
+                                && GiTransportRuntime.debugCapture() == null) {
+                            GiTransportGpuResources.Capture debugCapture =
+                                    this.giTransportCoordinator.pollDebugCapture();
+                            if (debugCapture != null) {
+                                GiTransportRuntime.reportDebugCapture(debugCapture);
+                            }
+                        }
+                    } catch (RuntimeException exception) {
+                        this.giTransportDisabled = true;
+                        GiTransportRuntime.reportInvalid("G4 runtime exception");
+                        if (!this.giTransportFailureLogged) {
+                            this.giTransportFailureLogged = true;
+                            Metallum.LOGGER.warn(
+                                    "G4 frozen transport failed; disabling further one-shot work",
+                                    exception
+                            );
+                        }
+                    }
+                }
+                // G4 latches one frozen G3 generation. G6 instead keeps the same bounded
+                // scheduler alive and advances it no more than once per world/source tick.
+                if ((GiTransportRuntime.isPopulationRequested() || GiLiveRuntime.isOperational())
+                        && this.giDirectSourceCoordinator != null
+                        && (this.giTransportCoordinator == null
+                        || !this.giTransportCoordinator.hasAcceptedEpoch()
+                        || GiLiveRuntime.isOperational())) {
+                    try {
+                        boolean preparationAllowed = !GiTransportRuntime.isRequested()
+                                || (GiTransportRuntime.isSourcePreparationAllowed()
+                                && !GiTransportRuntime.isInvalid());
+                        AdvancedLightRegistry liveRegistry = AdvancedLightRegistry.global();
+                        Object liveWorldIdentity = preparationAllowed
+                                ? liveRegistry.activeWorldIdentityForGi() : null;
+                        GiSemanticDirectFieldView directField = liveWorldIdentity == null
+                                ? null : GiSemanticController.global().directField(
+                                        liveWorldIdentity
+                                );
+                        if (directField != null) {
+                            LightWorldToken liveLightWorld = GiLiveRuntime.isOperational()
+                                    ? liveRegistry.activeWorldTokenForGi(
+                                            liveWorldIdentity,
+                                            directField.world().dimensionId()
+                                    ) : null;
+                            GiDynamicSourceSnapshot liveDynamic = GiLiveRuntime.isOperational()
+                                    && liveLightWorld != null
+                                    ? GiLiveRuntime.dynamicSources(liveLightWorld) : null;
+                            long publicationTick = liveDynamic == null ? -1L
+                                    : GiLiveRuntime.dynamicSourceTick(liveDynamic);
+                            // submitIndex is the authoritative renderer tick. It advances once per
+                            // real rendered submit, while generated MetalFX presents cannot spend
+                            // another G3/G6 brick budget and a frozen game tick cannot starve it.
+                            long liveSourceTick = publicationTick < 0L ? -1L : submitIndex;
+                            int directStatus;
+                            if (GiLiveRuntime.isOperational()) {
+                                directStatus = liveDynamic == null || liveSourceTick < 0L
+                                        || !capture.giEnvironmentReady()
+                                        ? GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY
+                                        : this.commandEncoder.encodeGiDirectSource(
+                                                this.giDirectSourceCoordinator,
+                                                directField,
+                                                capture.giEnvironment(),
+                                                liveDynamic,
+                                                liveSourceTick
+                                        );
+                            } else {
+                                directStatus = this.commandEncoder.encodeGiDirectSource(
+                                        this.giDirectSourceCoordinator,
+                                        directField,
+                                        capture.giEnvironment(),
+                                        submitIndex
+                                );
+                            }
+                            if (directStatus
+                                    == GiDirectSourceCoordinator.STATUS_FROZEN_INPUT_DRIFT) {
+                                GiTransportRuntime.reportInvalid(
+                                        "frozen G3 preparation tuple drifted"
+                                );
+                            } else if (directStatus
+                                    == GiDirectSourceCoordinator.STATUS_FROZEN_PREPARATION_RESTARTED) {
+                                this.giDirectSourceRestartCount++;
+                                long nowNanos = System.nanoTime();
+                                if (nowNanos - this.giDirectSourceRestartLogNanos
+                                        >= 2_000_000_000L) {
+                                    this.giDirectSourceRestartLogNanos = nowNanos;
+                                    Metallum.LOGGER.info(
+                                            "[GI_G3] interactive preparation retry #{} after {} drift",
+                                            this.giDirectSourceRestartCount,
+                                            this.giDirectSourceCoordinator
+                                                    .frozenPreparationRestartReason()
+                                    );
+                                }
+                                this.giDirectSourceFailureLogged = false;
+                            } else if (directStatus == GiDirectSourceGpuResources.STATUS_OK
+                                    || directStatus == GiDirectSourceCoordinator.STATUS_NO_WORK
+                                    || directStatus == GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY
+                                    || directStatus == GiDirectSourceGpuResources.STATUS_BUSY) {
+                                this.giDirectSourceFailureLogged = false;
+                            } else {
+                                if (GiTransportRuntime.isRequested()) {
+                                    GiTransportRuntime.reportInvalid(
+                                            "G3 native status " + directStatus
+                                    );
+                                }
+                                if (GiLiveRuntime.isRequested()) {
+                                    GiLiveRuntime.reportInvalid(
+                                            "G3 native status " + directStatus
+                                    );
+                                }
+                                if (!this.giDirectSourceFailureLogged) {
+                                    this.giDirectSourceFailureLogged = true;
+                                    Metallum.LOGGER.warn(
+                                            "G3 direct-source batch was rejected with status {}; retaining its private prior field",
+                                            directStatus
+                                    );
+                                }
+                            }
+                            if (GiTransportRuntime.isDebugPreviewRequested()
+                                    && directStatus
+                                    == GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY) {
+                                long nowNanos = System.nanoTime();
+                                if (nowNanos - this.giDirectSourceDebugLogNanos
+                                        >= 5_000_000_000L) {
+                                    this.giDirectSourceDebugLogNanos = nowNanos;
+                                    GiDirectSourceCoordinator.FrozenPreparationDebugState debug =
+                                            this.giDirectSourceCoordinator
+                                                    .frozenPreparationDebugState(nowNanos);
+                                    Metallum.LOGGER.info(
+                                            "[GI_G3] interactive preparation waiting: "
+                                                    + "observed={} committed={} reason={} changes={} "
+                                                    + "settled_ms={} clipmap={} palette={} content={}",
+                                            debug.tupleObserved(), debug.committed(),
+                                            debug.changeReason(), debug.changeCount(),
+                                            debug.settledMillis(), debug.clipmapGeneration(),
+                                            debug.paletteGeneration(), debug.contentGeneration()
+                                    );
+                                }
+                            }
+                        }
+                    } catch (RuntimeException exception) {
+                        if (GiTransportRuntime.isRequested()) {
+                            GiTransportRuntime.reportInvalid("G3 runtime exception");
+                        }
+                        if (GiLiveRuntime.isRequested()) {
+                            GiLiveRuntime.reportInvalid("G3 runtime exception");
+                        }
+                        if (!this.giDirectSourceFailureLogged) {
+                            this.giDirectSourceFailureLogged = true;
+                            Metallum.LOGGER.warn(
+                                    "G3 direct-source update failed; retaining its private prior field",
+                                    exception
+                            );
+                        }
+                    }
+                }
+                // Re-prove the live tuple every submit. A world unload, dimension switch,
+                // missing dynamic snapshot, or terminal G3/G6 error must bind native zero even
+                // if an older epoch still has completed atlas coverage.
+                this.giLiveFrameCompatible = false;
+                if (GiLiveRuntime.isRequested() && this.giLiveCoordinator != null
+                        && GiLiveRuntime.admissionState()
+                        != GiLiveRuntime.AdmissionState.INVALID) {
+                    try {
+                        AdvancedLightRegistry liveRegistry = AdvancedLightRegistry.global();
+                        Object liveWorldIdentity = liveRegistry.activeWorldIdentityForGi();
+                        GiSemanticTransportFieldView liveField = liveWorldIdentity == null
+                                ? null : GiSemanticController.global().transportField(
+                                        liveWorldIdentity
+                                );
+                        LightWorldToken liveLightWorld = liveField == null ? null
+                                : liveRegistry.activeWorldTokenForGi(
+                                        liveWorldIdentity, liveField.world().dimensionId()
+                                );
+                        GiDynamicSourceSnapshot liveDynamic = liveLightWorld == null ? null
+                                : GiLiveRuntime.dynamicSources(liveLightWorld);
+                        long publicationTick = liveDynamic == null ? -1L
+                                : GiLiveRuntime.dynamicSourceTick(liveDynamic);
+                        long liveSourceTick = publicationTick < 0L ? -1L : submitIndex;
+                        if (liveField != null && liveDynamic != null && liveSourceTick >= 0L
+                                && capture.giEnvironmentReady()) {
+                            int liveStatus = this.commandEncoder.encodeGiLive(
+                                    this.giLiveCoordinator,
+                                    liveField,
+                                    liveDynamic,
+                                    capture.giEnvironment(),
+                                    liveSourceTick,
+                                    submitIndex
+                            );
+                            if (liveStatus == GiLiveLayout.STATUS_OK
+                                    || liveStatus == GiLiveCoordinator.STATUS_NO_WORK
+                                    || liveStatus == GiLiveCoordinator.STATUS_RETAINED_HISTORY
+                                    || liveStatus == GiLiveCoordinator.STATUS_INPUT_NOT_READY
+                                    || liveStatus == GiLiveLayout.STATUS_BUSY) {
+                                this.giLiveFailureLogged = false;
+                                // INPUT_NOT_READY can precede G6's observation/invalidation when
+                                // the attached G3 environment identity has not been admitted yet
+                                // (notably on world/dimension/resource reset). It is recoverable,
+                                // but it cannot authorize an older atlas for this frame.
+                                this.giLiveFrameCompatible = liveStatus
+                                        != GiLiveCoordinator.STATUS_INPUT_NOT_READY;
+                            } else {
+                                GiLiveRuntime.reportInvalid(
+                                        "native G6 status " + liveStatus
+                                );
+                                if (!this.giLiveFailureLogged) {
+                                    this.giLiveFailureLogged = true;
+                                    Metallum.LOGGER.warn(
+                                            "G6 live transport failed with status {}; "
+                                                    + "receiver remains on exact zero fallback",
+                                            liveStatus
+                                    );
+                                }
+                            }
+                        }
+                    } catch (RuntimeException exception) {
+                        GiLiveRuntime.reportInvalid("G6 runtime exception");
+                        if (!this.giLiveFailureLogged) {
+                            this.giLiveFailureLogged = true;
+                            Metallum.LOGGER.warn(
+                                    "G6 live update failed; receiver remains on exact zero fallback",
+                                    exception
                             );
                         }
                     }
@@ -1949,8 +2712,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                     }
                     if (MetalGpuTiming.isReportEnabled()
                             && (submitIndex + 1L) % 300L == 0L) {
+                        LocalVoxelShadowGpuResources.DescriptorEdgeCoverage edgeCoverage =
+                                localShadowResources.descriptorEdgeCoverage();
                         Metallum.LOGGER.info(
-                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, capacityWaitSkips={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
+                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cachedEdges=8:{}/16:{}/32:{}/64:{}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, capacityWaitSkips={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
                                 localPrepared.active(),
                                 localPrepared.descriptorLights(),
                                 lightSnapshot.lights().size(),
@@ -1959,6 +2724,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 localPrepared.approximateDirectLights(),
                                 localPrepared.buildingLights(),
                                 localPrepared.failClosedLights(),
+                                edgeCoverage.edge8(),
+                                edgeCoverage.edge16(),
+                                edgeCoverage.edge32(),
+                                edgeCoverage.edge64(),
                                 localPrepared.cacheCoveredLights(),
                                 localPrepared.coverageLimitedLights(),
                                 localPrepared.residentPages(),
@@ -2006,6 +2775,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                     }
                     this.advancedLightingFrameSubmitIndex = submitIndex;
                     this.advancedLightingFrameReady = shadowResources.isReady(submitIndex);
+                    AdvancedLightingRuntime.reportFrameHealth(
+                            this.rendererGenerationId,
+                            submitIndex,
+                            lightingResources != null,
+                            voxelResources != null,
+                            localPrepared.active()
+                    );
                     this.advancedLightingTransientFallbackLogged = false;
                     if (shouldScheduleVoxelDebugChecksum(
                             this.rendererConfig.voxelDebugChecksum(),
@@ -2053,6 +2829,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                     lightingStatus = Integer.MIN_VALUE;
                     this.advancedLightingFrameReady = false;
                     this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+                    AdvancedLightingRuntime.reportBenchmarkFrameFallback(
+                            "L4/L6 Advanced frame preparation failed"
+                    );
                     Metallum.LOGGER.warn(
                             "L4/L6 shadow frame preparation failed; using Vanilla lighting for this frame",
                             exception
@@ -2066,6 +2845,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 }
                 this.advancedLightingFrameReady = false;
                 this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+                AdvancedLightingRuntime.reportBenchmarkFrameFallback(
+                        "Advanced frame upload fell back with status " + lightingStatus
+                );
                 FrameState fallback = published.withAdvancedLightingWork(
                         FrameState.AdvancedLightingWork.NONE
                 );
@@ -2511,7 +3293,45 @@ public final class MetalDevice implements GpuDeviceBackend {
         return resources.pair(slot).reactive() != null;
     }
 
-    void bindAdvancedLighting(final MTLRenderCommandEncoder encoder) {
+    boolean isL6TemporalWorldPassActive() {
+        return L6TemporalShadowExperiment.enabled()
+                && !this.temporalScalingActive
+                && this.isAdvancedLightingWorldPassActive();
+    }
+
+    SemanticAttachment prepareL6TemporalHistoryAttachment(final MetalGpuTexture source) {
+        if (!this.isL6TemporalWorldPassActive()) {
+            throw new IllegalStateException(
+                    "L6 temporal history requires an active native-resolution Advanced world pass"
+            );
+        }
+        int width = source.getWidth(0);
+        int height = source.getHeight(0);
+        if (this.l6TemporalHistoryResources == null
+                || !this.l6TemporalHistoryResources.matches(width, height)) {
+            L6TemporalHistoryResources replacement =
+                    new L6TemporalHistoryResources(this, width, height);
+            L6TemporalHistoryResources previous = this.l6TemporalHistoryResources;
+            this.l6TemporalHistoryResources = replacement;
+            this.l6TemporalHistoryClearedSubmitIndex = Long.MIN_VALUE;
+            replacement.materializeInitialClears(this.commandEncoder);
+            if (previous != null) {
+                previous.close();
+            }
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        L6TemporalHistoryResources.Pair pair =
+                this.l6TemporalHistoryResources.pair(submitIndex);
+        this.commandEncoder.prepareTextureForRead(pair.read());
+        boolean clear = this.l6TemporalHistoryClearedSubmitIndex != submitIndex;
+        this.l6TemporalHistoryClearedSubmitIndex = submitIndex;
+        return new SemanticAttachment(pair.write().nativeHandle(), clear);
+    }
+
+    long bindAdvancedLighting(
+            final MTLRenderCommandEncoder encoder,
+            final boolean g5TerrainPipeline
+    ) {
         if (!this.isAdvancedLightingWorldPassActive() || this.advancedLightingResources == null) {
             throw new IllegalStateException("Advanced lighting bindings are not ready for this frame");
         }
@@ -2532,6 +3352,25 @@ public final class MetalDevice implements GpuDeviceBackend {
                 bindings.indices(), 0L, AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
+        if (this.isL6TemporalWorldPassActive()
+                && this.l6TemporalHistoryResources != null) {
+            long submitIndex = this.commandEncoder.currentSubmitIndex();
+            int inFlightSlot = (int) (submitIndex % FrameStatePacketRing.SLOT_COUNT);
+            L6TemporalHistoryResources.Pair pair =
+                    this.l6TemporalHistoryResources.pair(submitIndex);
+            encoder.setBuffer(
+                    bindings.l6TemporalParams(),
+                    (long) inFlightSlot * AdvancedLightingLayout.L6_TEMPORAL_PARAMS_BYTES,
+                    AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_SLOT,
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+            encoder.setTextureAndSampler(
+                    pair.read().nativeHandle(),
+                    this.l6TemporalHistoryResources.sampler().nativeHandle(),
+                    AdvancedLightingBindingAbi.L6_TEMPORAL_HISTORY_SLOT,
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+        }
         SunShadowGpuResources shadows = this.sunShadowResources;
         LocalVoxelShadowGpuResources localShadows = this.localVoxelShadowResources;
         if (shadows == null || localShadows == null) {
@@ -2548,6 +3387,381 @@ public final class MetalDevice implements GpuDeviceBackend {
                 inFlightSlot,
                 this.commandEncoder.currentSubmitIndex()
         );
+        this.bindGiReceiver(encoder, g5TerrainPipeline);
+        this.bindFrozenReflectionIfReady(encoder);
+        PlanarReflectionRenderer.bind(encoder);
+        return CompactPositionCarrierSafety.revision();
+    }
+
+    /**
+     * Rebinds only the two compact-position consumers after the terminal shared safety revision
+     * changes. The caller holds {@link CompactPositionCarrierSafety}'s draw-side gate, so this
+     * revision remains valid through the immediately following native draw.
+     */
+    long refreshCompactPositionCarrierBindings(
+            final MTLRenderCommandEncoder encoder,
+            final boolean g5TerrainPipeline
+    ) {
+        this.bindGiReceiver(encoder, g5TerrainPipeline);
+        this.bindFrozenReflectionIfReady(encoder);
+        return CompactPositionCarrierSafety.revision();
+    }
+
+    /**
+     * Binds the vertex-only G5 view of G4. CONTROL and CANDIDATE deliberately use the
+     * same textures, sampler and params allocation; only the immutable params select whether
+     * the four vertex reads execute. No allocation or CPU readback occurs on this draw path.
+     */
+    private void bindGiReceiver(
+            final MTLRenderCommandEncoder encoder,
+            final boolean verifyTerrainBinding
+    ) {
+        if (!GiReceiverRuntime.isRequested()) {
+            return;
+        }
+        boolean carrierSafe = CompactPositionCarrierSafety.isSafe()
+                && GiReceiverRuntime.admission().carrierSafe()
+                && (!GiLiveRuntime.isRequested()
+                || (this.giLiveFrameCompatible
+                && GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.INVALID));
+        int status;
+        if (GiLiveRuntime.isRequested()) {
+            GiLiveCoordinator live = this.giLiveCoordinator;
+            if (live == null) {
+                GiLiveRuntime.reportInvalid("G6 resources disappeared");
+                GiReceiverRuntime.admission().reportInvalid("G6 resources disappeared");
+                throw new IllegalStateException("G6 live vertex bindings are unavailable");
+            }
+            int inFlightSlot = (int) (this.commandEncoder.currentSubmitIndex()
+                    % FrameStatePacketRing.SLOT_COUNT);
+            status = live.bindVertex(encoder.handle(), inFlightSlot, carrierSafe);
+            if (status != GiLiveLayout.STATUS_OK
+                    && status != GiLiveLayout.STATUS_ZERO_READY) {
+                GiLiveRuntime.reportInvalid("native G6 bind status " + status);
+                GiReceiverRuntime.admission().reportInvalid(
+                        "native G6 bind status " + status
+                );
+                throw new IllegalStateException(
+                        "Native G6 vertex binding failed with status " + status
+                );
+            }
+        } else {
+            GiReceiverGpuResources resources = this.giReceiverResources;
+            if (resources == null) {
+                GiReceiverRuntime.admission().reportInvalid("G5 resources disappeared");
+                throw new IllegalStateException("G5 vertex bindings are unavailable");
+            }
+            status = resources.bindVertex(
+                    encoder.handle(), GiReceiverRuntime.arm(), carrierSafe
+            );
+            if (status != GiReceiverLayout.STATUS_OK
+                    && status != GiReceiverLayout.STATUS_ZERO_READY) {
+                GiReceiverRuntime.admission().reportInvalid(
+                        "native G5 bind status " + status
+                );
+                throw new IllegalStateException(
+                        "Native G5 vertex binding failed with status " + status
+                );
+            }
+        }
+        if (verifyTerrainBinding
+                && (GiLiveRuntime.isRequested() || !this.giReceiverAdmissionLogged)) {
+            this.giReceiverBindingProofSubmitIndex = this.commandEncoder.currentSubmitIndex();
+            this.giReceiverBindingProofEncoderAddress = encoder.handle().address();
+            this.giReceiverBindingProofStatus = status;
+            this.giReceiverBindingProofCarrierSafe = carrierSafe;
+        }
+    }
+
+    /**
+     * Qualifies G5 only after the pinned Sodium private indirect draw was actually encoded with
+     * the same encoder and submit for which native installed all five receiver bindings.
+     */
+    void reportG5TerrainDraw(
+            final MTLRenderCommandEncoder encoder,
+            final long drawnG5CarrierSlices
+    ) {
+        if (!GiReceiverRuntime.isRequested()) {
+            return;
+        }
+        if (GiLiveRuntime.isRequested()) {
+            this.reportG6TerrainDraw(encoder, drawnG5CarrierSlices);
+            return;
+        }
+        if (!GiReceiverRuntime.isFrozenRequested()) return;
+        GiReceiverRuntime.Admission admission = GiReceiverRuntime.admission();
+        if (admission.state() == GiReceiverRuntime.AdmissionState.INVALID) {
+            return;
+        }
+        if (drawnG5CarrierSlices <= 0L) {
+            return;
+        }
+        admission.reportTerrainDrawEncoded(drawnG5CarrierSlices);
+        if (this.giReceiverAdmissionLogged) {
+            return;
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        boolean proofMatches = this.giReceiverBindingProofSubmitIndex == submitIndex
+                && this.giReceiverBindingProofEncoderAddress == encoder.handle().address();
+        if (!proofMatches) {
+            // FIELD may legitimately draw the bound zero packet while the frozen G4 owner is
+            // still becoming ready. Such a draw cannot qualify admission; a later encoder must
+            // provide the exact ready binding proof before the warmup receipt can be emitted.
+            return;
+        }
+        boolean receiptWindow = !GiTransportRuntime.isBenchmarkActive()
+                || GiTransportRuntime.isBenchmarkWarmup();
+        if (!receiptWindow) {
+            return;
+        }
+        boolean fieldArm = GiReceiverRuntime.arm()
+                == com.metallum.client.gi.GiRuntimeStages.ReceiverArm.FIELD;
+        boolean admissionReady = admission.bindingAllowed()
+                && this.giReceiverBindingProofCarrierSafe
+                && CompactPositionCarrierSafety.isSafe()
+                && (!fieldArm
+                || this.giReceiverBindingProofStatus == GiReceiverLayout.STATUS_OK);
+        if (!admissionReady) {
+            return;
+        }
+        long g5CarrierWrites = admission.successfulCarrierWrites(
+                SodiumHdrSemantic.g5CarrierWriteCount()
+        );
+        if (g5CarrierWrites <= 0L) {
+            return;
+        }
+        GiReceiverGpuResources resources = this.giReceiverResources;
+        GiReceiverGpuResources.Stats stats = resources == null ? null : resources.stats();
+        if (stats == null) {
+            admission.reportInvalid("G5 admission telemetry disappeared");
+            throw new IllegalStateException("G5 admission telemetry is unavailable");
+        }
+        int expectedArm = GiReceiverLayout.nativeArm(GiReceiverRuntime.arm());
+        boolean expectedCounter = this.giReceiverBindingProofStatus == GiReceiverLayout.STATUS_OK
+                ? stats.fieldBindings() > 0L
+                : stats.zeroBindings() > 0L;
+        if (stats.lastArm() != expectedArm
+                || stats.carrierSafe() != this.giReceiverBindingProofCarrierSafe
+                || stats.bindCount() == 0L
+                || !expectedCounter
+                || (this.giReceiverBindingProofStatus == GiReceiverLayout.STATUS_OK
+                && !stats.ready())) {
+            admission.reportInvalid("native G5 arm/carrier telemetry differs");
+            throw new IllegalStateException(
+                    "G5 native admission differs: arm=" + stats.lastArm()
+                            + ", carrier=" + stats.carrierSafe()
+                            + ", binds=" + stats.bindCount()
+                            + ", zero=" + stats.zeroBindings()
+                            + ", field=" + stats.fieldBindings()
+            );
+        }
+        long combinedBytes;
+        try {
+            combinedBytes = Math.addExact(GI_G4_ACCOUNTED_BYTES, stats.allocatedBytes());
+        } catch (ArithmeticException overflow) {
+            combinedBytes = Long.MAX_VALUE;
+        }
+        if (stats.sharedTextureBytes() != 0L || combinedBytes > GI_TOTAL_BUDGET_BYTES) {
+            admission.reportInvalid("G5 memory accounting exceeds the GI cap");
+            throw new IllegalStateException(
+                    "G5 memory census failed: shared=" + stats.sharedTextureBytes()
+                            + ", combined=" + combinedBytes
+            );
+        }
+        this.giReceiverAdmissionLogged = true;
+        admission.reportBenchmarkReceiptEmitted();
+        long totalDrawnG5CarrierSlices = admission.drawnG5CarrierSlices();
+        String arm = GiReceiverRuntime.arm().name().toLowerCase(Locale.ROOT);
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_G5_ADMISSION "
+                        + "requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 "
+                        + "state=READY arm={} field={} phase={} presented_frame={} "
+                        + "resources={} bindings={} allocated_bytes={} g4_accounted_bytes={} "
+                        + "combined_accounted_bytes={} cap_bytes={} shared_texture_bytes={} "
+                        + "carrier_skips={} g5_carrier_writes={} drawn_g5_carrier_slices={} "
+                        + "status=PASS vertex_only=true "
+                        + "fragment_texture3d=0 sidecar_bytes=0",
+                arm,
+                fieldArm ? "g4" : "zero",
+                GiTransportRuntime.isBenchmarkWarmup() ? "WARMUP" : "DIAGNOSTIC",
+                submitIndex,
+                stats.resourceCount(),
+                stats.bindingCount(),
+                stats.allocatedBytes(),
+                GI_G4_ACCOUNTED_BYTES,
+                combinedBytes,
+                GI_TOTAL_BUDGET_BYTES,
+                stats.sharedTextureBytes(),
+                admission.carrierSkipCount(),
+                g5CarrierWrites,
+                totalDrawnG5CarrierSlices
+        );
+    }
+
+    private void reportG6TerrainDraw(
+            final MTLRenderCommandEncoder encoder,
+            final long drawnCarrierSlices
+    ) {
+        GiLiveCoordinator live = this.giLiveCoordinator;
+        if (live == null || drawnCarrierSlices <= 0L
+                || GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.INVALID) {
+            return;
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        boolean proofMatches = this.giReceiverBindingProofSubmitIndex == submitIndex
+                && this.giReceiverBindingProofEncoderAddress == encoder.handle().address();
+        GiLiveGpuResources.Stats stats = live.stats();
+        int latestBindStatus = proofMatches
+                ? this.giReceiverBindingProofStatus : GiLiveLayout.STATUS_INVALID;
+        boolean latestCarrierSafe = proofMatches && this.giReceiverBindingProofCarrierSafe;
+        boolean latestFrameCompatible = proofMatches && this.giLiveFrameCompatible;
+        GiLiveRuntime.publishTerrainBinding(
+                this.giLiveDeviceGeneration,
+                submitIndex,
+                latestBindStatus,
+                latestCarrierSafe,
+                latestFrameCompatible,
+                stats.readyMask(),
+                proofMatches ? stats.lastBindVisibleMask() : 0,
+                stats.fieldGeneration(),
+                stats.sourceTick()
+        );
+        if (!GiLiveRuntime.isBenchmarkWarmup() || live.admissionLogged()
+                || !proofMatches || !latestCarrierSafe || !latestFrameCompatible
+                || latestBindStatus != GiLiveLayout.STATUS_OK) {
+            return;
+        }
+        long accounted = live.accountedBytes();
+        if ((stats.readyMask() & 1) == 0 || stats.buildInFlight()
+                || stats.rejectedCount() != 0L || stats.staleRejects() != 0L
+                || accounted > GiLiveCoordinator.TOTAL_BUDGET_BYTES) {
+            if (stats.rejectedCount() != 0L || stats.staleRejects() != 0L
+                    || accounted > GiLiveCoordinator.TOTAL_BUDGET_BYTES) {
+                GiLiveRuntime.reportInvalid("G6 admission telemetry is not clean");
+            }
+            return;
+        }
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_G6_ADMISSION "
+                        + "requested=g6_live resolved=g6_live contract=6 state=READY "
+                        + "device_generation={} presented_frame={} ready_mask={} "
+                        + "field_generation={} source_tick={} "
+                        + "transport_dispatches={} cascade_builds={}/{}/{} invalidations={} "
+                        + "bindings={} zero_bindings={} field_bindings={} "
+                        + "resident_bytes={} staging_bytes={} java_packet_bytes={} "
+                        + "combined_accounted_bytes={} cap_bytes={} dynamic=true "
+                        + "vertex_only=true fragment_texture3d=0 stale=0 rejected=0 status=PASS",
+                this.giLiveDeviceGeneration,
+                submitIndex,
+                stats.readyMask(),
+                stats.fieldGeneration(),
+                stats.sourceTick(),
+                stats.transportDispatches(),
+                stats.cascadeBuilds0(), stats.cascadeBuilds1(), stats.cascadeBuilds2(),
+                stats.invalidations(),
+                stats.bindCount(), stats.zeroBindings(), stats.fieldBindings(),
+                stats.residentBytes(), stats.stagingBytes(), GiLiveLayout.JAVA_PACKET_BYTES,
+                accounted, GiLiveCoordinator.TOTAL_BUDGET_BYTES
+        );
+        GiLiveRuntime.reportAdmissionReceiptEmitted(
+                this.giLiveDeviceGeneration, submitIndex
+        );
+        live.markAdmissionLogged();
+    }
+
+    /**
+     * Consumes at most one already-complete Sodium snapshot.  No world lookup, source capture,
+     * wait, or CPU readback happens here; native copies the snapshot into owned staging and later
+     * publishes readiness from its command-buffer completion handler.
+     */
+    private void bindFrozenReflectionIfReady(final MTLRenderCommandEncoder encoder) {
+        if (!VertexReflectionExperiment.isLayoutEnabled()) {
+            return;
+        }
+        boolean contributionAllowed = VertexReflectionExperiment.isRuntimeEnabled();
+        RealWorldReflectionField field = RealWorldReflectionField.get();
+        // The reflection define changes the vertex function's Metal resource layout immediately,
+        // while a Sodium snapshot arrives later on a worker thread.  Materialize a native context
+        // first so its zero-ready resources cover that gap; otherwise the translucent Advanced
+        // draw executes with texture/sampler slot 10 and buffer slot 27 unbound.
+        if (this.frozenReflectionResources == null) {
+            this.frozenReflectionResources = RadianceGpuResources.create(
+                    this.metalDeviceHandle,
+                    this.commandQueue.nativeHandle(),
+                    0L,
+                    this::queueFrozenReflectionContextRelease
+            );
+            if (this.frozenReflectionResources == null) {
+                throw new IllegalStateException("Vertex reflection fallback resources are unavailable");
+            }
+        }
+        FrozenReflectionFieldController.SourceSnapshot snapshot = contributionAllowed
+                && this.pendingFrozenReflectionResources == null
+                ? field.claimReadySnapshotForGpuUpload()
+                : null;
+        if (snapshot != null) {
+            RadianceGpuResources replacement = RadianceGpuResources.create(
+                    this.metalDeviceHandle,
+                    this.commandQueue.nativeHandle(),
+                    snapshot.worldGeneration(),
+                    this::queueFrozenReflectionContextRelease
+            );
+            if (replacement == null || !replacement.queueFrozenBuild(
+                    snapshot.worldGeneration(),
+                    snapshot.originX(), snapshot.originY(), snapshot.originZ(),
+                    snapshot.packedRgba(), snapshot.validity(),
+                    field.strength(), field.roughness(), field.isContributionOnly()
+            )) {
+                if (replacement != null) {
+                    replacement.close();
+                }
+                field.noteGpuFailure(snapshot.worldGeneration(), snapshot.fieldGeneration());
+            } else {
+                this.pendingFrozenReflectionResources = replacement;
+                this.pendingFrozenReflectionFieldGeneration = snapshot.fieldGeneration();
+            }
+        }
+        RadianceGpuResources pending = contributionAllowed
+                ? this.pendingFrozenReflectionResources : null;
+        if (pending != null) {
+            switch (pending.buildStatus()) {
+                case READY -> {
+                    RadianceGpuResources previous = this.frozenReflectionResources;
+                    this.frozenReflectionResources = pending;
+                    this.frozenReflectionFieldGeneration = this.pendingFrozenReflectionFieldGeneration;
+                    this.pendingFrozenReflectionResources = null;
+                    this.pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
+                    field.noteGpuReady(pending.worldGeneration(), this.frozenReflectionFieldGeneration);
+                    if (previous != null) {
+                        previous.close();
+                    }
+                }
+                case FAILED -> {
+                    pending.close();
+                    this.pendingFrozenReflectionResources = null;
+                    field.noteGpuFailure(pending.worldGeneration(), this.pendingFrozenReflectionFieldGeneration);
+                    this.pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
+                }
+                case PENDING -> { }
+            }
+        }
+        RadianceGpuResources resources = this.frozenReflectionResources;
+        if (resources != null) {
+            resources.bindVertexResources(encoder.handle(), contributionAllowed);
+        }
+    }
+
+    private void closeFrozenReflectionResources() {
+        if (this.frozenReflectionResources != null) {
+            this.frozenReflectionResources.close();
+            this.frozenReflectionResources = null;
+        }
+        if (this.pendingFrozenReflectionResources != null) {
+            this.pendingFrozenReflectionResources.close();
+            this.pendingFrozenReflectionResources = null;
+        }
+        this.frozenReflectionFieldGeneration = Long.MIN_VALUE;
+        this.pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
     }
 
     public com.metallum.client.lighting.cloud.CloudShadowSource cloudShadowSource() {
@@ -2752,28 +3966,33 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrSceneAvailable = false;
         this.hdrSemanticSceneAvailable = false;
         this.resetHdrSceneColor();
+        boolean diagnosticActive = GodRayVisibilityDiagnostic.isActive();
         boolean materialScene = this.isMaterialGenerationActive();
         RendererGenerationConfig generation = this.activeRendererGeneration;
         boolean legacyHdrScene = generation != null && usesLegacyHdrDepthSnapshot(
                 generation.renderContractMode(), this.hdrEnhancedActive
         );
         boolean temporalScene = this.temporalScalingActive;
-        if ((!materialScene && !legacyHdrScene && !temporalScene) || source.isClosed()) {
+        boolean needsDepthSnapshot = legacyHdrScene || temporalScene || diagnosticActive;
+        if ((!materialScene && !legacyHdrScene && !temporalScene && !diagnosticActive) || source.isClosed()) {
             return;
         }
         this.hdrWorldSceneAvailable = worldSceneRendered;
 
         int width = source.getWidth(0);
         int height = source.getHeight(0);
-        if ((legacyHdrScene || temporalScene)
+        if (needsDepthSnapshot
                 && (depth == null
                 || depth.isClosed()
                 || depth.getWidth(0) != width
                 || depth.getHeight(0) != height)) {
+            if (diagnosticActive) {
+                GodRayVisibilityDiagnostic.reportStatus(GodRayVisibilityDiagnostic.ExecutionStatus.ACTIVE_BUT_NO_DEPTH);
+            }
             return;
         }
         boolean directSpatialScene = MetalFxUpscaling.isActive();
-        if (legacyHdrScene || temporalScene) {
+        if (needsDepthSnapshot) {
             if (this.hdrSceneDepthSnapshot == null
                     || this.hdrSceneDepthSnapshot.isClosed()
                     || this.hdrSceneDepthSnapshot.getWidth(0) != width
@@ -2821,10 +4040,58 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrDirectSceneSource = source;
             this.hdrSceneColorState = HdrSceneColorState.PENDING_REDIRECT;
         }
-        if (legacyHdrScene || temporalScene) {
+        if (needsDepthSnapshot) {
             this.commandEncoder.copyTextureToTexture(
                     depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height
             );
+        }
+        if (diagnosticActive
+                && this.hdrSceneDepthSnapshot != null
+                && !this.hdrSceneDepthSnapshot.isClosed()) {
+            boolean froxelMode = GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FROXEL
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.WORLD_GRID_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FREEZE_PHYSICAL_CAMERA
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.CAMERA_DELTA_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.HDR_PREVIEW
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_RAW_VISIBILITY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_SCATTERING_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_PHASE_FUNCTION_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_EXTINCTION_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_FINAL_RADIANCE
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FROXEL_CELL_ID_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.SUN_VISIBILITY_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FROXEL_WORLD_POSITION_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.SUN_SHAFT_ONLY;
+            boolean fullRes = GodRayVisibilityDiagnostic.resolution() == GodRayVisibilityDiagnostic.Resolution.FULL;
+            int targetWidth = froxelMode ? 512 : (fullRes ? width : (width + 1) / 2);
+            int targetHeight = froxelMode ? 144 : (fullRes ? height : (height + 1) / 2);
+            if (this.godRayVisibilityTarget == null
+                    || this.godRayVisibilityTarget.width != targetWidth
+                    || this.godRayVisibilityTarget.height != targetHeight) {
+                if (this.godRayVisibilityTarget != null) {
+                    this.godRayVisibilityTarget.destroyBuffers();
+                }
+                this.godRayVisibilityTarget = this.createTrackedTextureTarget(
+                        "Metallum God-Ray visibility target",
+                        targetWidth,
+                        targetHeight,
+                        false,
+                        GpuFormat.R16_FLOAT
+                );
+            }
+            SunShadowGpuResources sunShadow = this.sunShadowResourcesForCurrentFrame();
+            FrameState frameState = this.frameStateTracker.previous();
+            if (this.godRayVisibilityRenderer != null) {
+                int inFlightSlot = (int) (this.commandEncoder.currentSubmitIndex() % MetalCommandEncoder.MAX_SUBMITS_IN_FLIGHT);
+                this.godRayVisibilityRenderer.render(
+                        this.godRayVisibilityTarget,
+                        this.hdrSceneDepthSnapshot,
+                        sunShadow,
+                        frameState,
+                        inFlightSlot,
+                        source
+                );
+            }
         }
         this.hdrSceneAvailable = true;
         this.hdrSceneWidth = width;
@@ -2985,6 +4252,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         boolean materialHdr = this.isMaterialHdrGenerationActive();
         boolean precomposeHdr = hdrPrecomposeAllowed
+                && !GodRayVisibilityDiagnostic.isActive()
                 && (materialHdr || this.hdrEnhancedActive)
                 && this.hdrWorldSceneAvailable
                 && this.hdrSceneAvailable
@@ -3129,6 +4397,15 @@ public final class MetalDevice implements GpuDeviceBackend {
         MemorySegment uiHandle = this.hdrUiSubmitIndex == submitIndex
                 ? this.hdrUiHandle
                 : MemorySegment.NULL;
+        if (GodRayVisibilityDiagnostic.isActive()) {
+            return new HdrSceneInputs(
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    uiHandle,
+                    false
+            );
+        }
         boolean directSourcePresent = this.hdrDirectSceneSource != null;
         boolean directRouteActive = !this.hdrDirectSceneRequiresSpatialScaling
                 || MetalFxUpscaling.isActive();
@@ -3206,6 +4483,13 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(handle));
     }
 
+    /** The native context retains all reflection textures until its own in-flight build completes. */
+    private void queueFrozenReflectionContextRelease(final MemorySegment context) {
+        this.commandEncoder.queueForDestroy(
+                () -> MetalNativeBridge.metallum_radiance_context_destroy(context)
+        );
+    }
+
     void queueResourceRelease(final MemorySegment handle, final Runnable afterRelease) {
         this.commandEncoder.queueForDestroy(() -> {
             try {
@@ -3233,7 +4517,29 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
-        return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource));
+        this.invalidatePipelinesForVertexReflectionToggle();
+        return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.defaultShaderSource));
+    }
+
+    /**
+     * The reflection carrier changes MSL resource declarations, while this cache is keyed only by
+     * RenderPipeline. A runtime toggle therefore invalidates the dependent shader/PSO cache before
+     * an OFF pipeline can be reused as ON (or vice versa).
+     */
+    private void invalidatePipelinesForVertexReflectionToggle() {
+        boolean enabled = VertexReflectionExperiment.isLayoutEnabled();
+        if (!this.vertexReflectionPipelineStateInitialized) {
+            this.vertexReflectionPipelineStateInitialized = true;
+            this.vertexReflectionPipelineState = enabled;
+            return;
+        }
+        if (this.vertexReflectionPipelineState == enabled) {
+            return;
+        }
+        this.clearPipelineCache();
+        this.closeFrozenReflectionResources();
+        this.vertexReflectionPipelineState = enabled;
+        Metallum.LOGGER.info("Vertex reflection runtime state changed; invalidated dependent PSOs (enabled={})", enabled);
     }
 
     IntermediaryShaderModule getOrCompileShader(
@@ -3283,6 +4589,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         if (key.flavor() == HdrShaderFlavor.METALLUM
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY) {
@@ -3301,6 +4608,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 );
             }
             if (key.flavor() == HdrShaderFlavor.METALLUM) {
+                // The compact G5/L8 carrier lives only in position bits ignored by Sodium's
+                // standard deinterleave path. Base Metallum therefore needs no decode/restore
+                // shim and remains byte-for-byte on its established shader path.
                 return material.source();
             }
             TerrainEnvironmentSpecialization specialization =
@@ -3308,6 +4618,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                             || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY)
                             ? TerrainEnvironmentSpecialization.AMBIENT_ONLY
                             : TerrainEnvironmentSpecialization.FULL;
+            boolean vertexReflection = key.defines().flags().contains("METALLUM_VERTEX_REFLECTION")
+                    || key.defines().values().containsKey("METALLUM_VERTEX_REFLECTION");
             AdvancedDirectLightingShaderPatcher.Result advanced =
                     AdvancedDirectLightingShaderPatcher.patch(
                             key.id().getNamespace(),
@@ -3317,7 +4629,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
                             LightingModel.ADVANCED,
                             material.source(),
-                            specialization
+                            specialization,
+                            vertexReflection
                     );
             if (!advanced.success()) {
                 throw new IllegalStateException(
@@ -3325,9 +4638,62 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 + advanced.failureReason()
                 );
             }
+            String advancedSource = advanced.source();
+            if (GiReceiverRuntime.isRequested()
+                    && "sodium".equals(key.id().getNamespace())
+                    && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH
+                    .equals(key.id().getPath())) {
+                if (GiLiveRuntime.isRequested()) {
+                    GiLiveReceiverShaderPatcher.Result receiver =
+                            GiLiveReceiverShaderPatcher.patch(
+                                    key.type() == ShaderType.VERTEX
+                                            ? GiLiveReceiverShaderPatcher.Stage.VERTEX
+                                            : GiLiveReceiverShaderPatcher.Stage.FRAGMENT,
+                                    advancedSource
+                            );
+                    if (!receiver.success()) {
+                        throw new IllegalStateException(
+                                "Failed to prepare G6 live receiver shader " + key.id() + ": "
+                                        + receiver.failureReason()
+                        );
+                    }
+                    advancedSource = receiver.source();
+                } else {
+                    GiReceiverShaderPatcher.Result receiver = GiReceiverShaderPatcher.patch(
+                            key.type() == ShaderType.VERTEX
+                                    ? GiReceiverShaderPatcher.Stage.VERTEX
+                                    : GiReceiverShaderPatcher.Stage.FRAGMENT,
+                            advancedSource
+                    );
+                    if (!receiver.success()) {
+                        throw new IllegalStateException(
+                                "Failed to prepare G5 vertex receiver shader " + key.id() + ": "
+                                        + receiver.failureReason()
+                        );
+                    }
+                    advancedSource = receiver.source();
+                }
+            }
             if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
                     || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY) {
-                return advanced.source();
+                return advancedSource;
+            }
+            if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL) {
+                L6TemporalShaderPatcher.Result temporal = L6TemporalShaderPatcher.patch(
+                        key.id().getNamespace(),
+                        key.id().getPath(),
+                        key.type() == ShaderType.VERTEX
+                                ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                                : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                        advancedSource
+                );
+                if (!temporal.success()) {
+                    throw new IllegalStateException(
+                            "Failed to prepare L6 temporal shader " + key.id() + ": "
+                                    + temporal.failureReason()
+                    );
+                }
+                return temporal.source();
             }
             L8ReactiveShaderPatcher.Result reactive = L8ReactiveShaderPatcher.patch(
                     key.id().getNamespace(),
@@ -3335,7 +4701,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                     key.type() == ShaderType.VERTEX
                             ? MetallumMaterialShaderPatcher.Stage.VERTEX
                             : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
-                    advanced.source()
+                    advancedSource
             );
             if (!reactive.success()) {
                 throw new IllegalStateException(

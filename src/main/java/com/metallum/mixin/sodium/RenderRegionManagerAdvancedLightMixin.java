@@ -5,6 +5,9 @@ import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightResidentSlot;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.LightSectionCandidate;
+import com.metallum.client.lighting.reflection.FrozenReflectionCandidateSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionCandidate;
 import com.metallum.client.voxel.VoxelCandidateSlot;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelResidentSlot;
@@ -64,6 +67,27 @@ abstract class RenderRegionManagerAdvancedLightMixin {
                 registry.discardCandidate(candidate);
                 registry.failClosed("accepted light publication failed", failure);
                 // Sodium's successful geometry upload remains valid; lighting falls back atomically.
+            }
+        }
+        FrozenReflectionFieldController reflectionController = FrozenReflectionFieldController.global();
+        for (BuilderTaskOutput result : acceptedResults) {
+            if (!(result instanceof ChunkBuildOutput output)) {
+                continue;
+            }
+            FrozenReflectionSectionCandidate candidate = null;
+            try {
+                candidate = ((FrozenReflectionCandidateSlot) output).metallum$takeFrozenReflectionCandidate();
+                if (candidate == null) {
+                    continue;
+                }
+                if (output.section.isDisposed()) {
+                    reflectionController.discardCandidate(candidate);
+                    continue;
+                }
+                reflectionController.publishAccepted(candidate);
+                candidate = null;
+            } catch (RuntimeException ignored) {
+                reflectionController.discardCandidate(candidate);
             }
         }
         // Keep L5 publication independent from L3 fail-closed handling. Geometry already made it

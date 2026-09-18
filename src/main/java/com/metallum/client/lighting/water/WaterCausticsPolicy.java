@@ -82,18 +82,18 @@ public final class WaterCausticsPolicy {
                 worldX * 0.0625 + (time * 0.09f) + 31.7,
                 255
         );
-        double domainWarpX = (macroNoise1 - 0.5f) * 3.2;
-        double domainWarpZ = (macroNoise2 - 0.5f) * 3.2;
+        double domainWarpX = (macroNoise1 - 0.5f) * 2.2;
+        double domainWarpZ = (macroNoise2 - 0.5f) * 2.2;
         double warpedPosX = worldX + domainWarpX;
         double warpedPosZ = worldZ + domainWarpZ;
 
-        double phase1 = (warpedPosX * 0.7071 + warpedPosZ * 0.7071) * 0.28 + (time * 1.25);
-        double phase2 = (warpedPosX * -0.5000 + warpedPosZ * 0.8660) * 0.42 - (time * 1.05);
-        double phase3 = (warpedPosX * 0.9239 + warpedPosZ * -0.3827) * 0.65 + (time * 1.60);
+        double phase1 = (warpedPosX * 0.7071 + warpedPosZ * 0.7071) * 0.36 + (time * 1.20);
+        double phase2 = (warpedPosX * -0.5000 + warpedPosZ * 0.8660) * 0.58 - (time * 1.45);
+        double phase3 = (warpedPosX * 0.9239 + warpedPosZ * -0.3827) * 0.90 + (time * 1.85);
 
         float medNoise = valueNoise(
-                warpedPosX * 0.25 - (time * 0.20f),
-                warpedPosZ * 0.25 + (time * 0.15f),
+                warpedPosX * 0.32 - (time * 0.22f),
+                warpedPosZ * 0.32 + (time * 0.17f),
                 255
         );
         float medCentered = medNoise - 0.5f;
@@ -106,21 +106,21 @@ public final class WaterCausticsPolicy {
         float slopeZ = wave1 * 0.7071f + wave2 * 0.8660f - wave3 * 0.3827f;
 
         float microNoise1 = valueNoise(
-                warpedPosX * 0.65 + (time * 0.45f),
-                warpedPosZ * 0.65 + (time * 0.35f),
+                warpedPosX * 1.35 + (time * 0.55f),
+                warpedPosZ * 1.35 + (time * 0.43f),
                 255
         );
         float microNoise2 = valueNoise(
-                warpedPosZ * 0.65 - (time * 0.40f) + 43.1,
-                warpedPosX * 0.65 + (time * 0.50f) + 19.4,
+                warpedPosZ * 1.65 - (time * 0.48f) + 43.1,
+                warpedPosX * 1.65 + (time * 0.62f) + 19.4,
                 255
         );
-        float microSlopeX = (microNoise1 - 0.5f) * 0.65f;
-        float microSlopeZ = (microNoise2 - 0.5f) * 0.65f;
+        float microSlopeX = (microNoise1 - 0.5f) * 0.42f;
+        float microSlopeZ = (microNoise2 - 0.5f) * 0.42f;
 
-        float localAmplitude = 0.055f + (0.095f - 0.055f) * macroNoise1;
-        float totalSlopeX = (slopeX * 0.60f + microSlopeX) * localAmplitude;
-        float totalSlopeZ = (slopeZ * 0.60f + microSlopeZ) * localAmplitude;
+        float localAmplitude = 0.038f + (0.068f - 0.038f) * macroNoise1;
+        float totalSlopeX = (slopeX * 0.44f + microSlopeX) * localAmplitude;
+        float totalSlopeZ = (slopeZ * 0.44f + microSlopeZ) * localAmplitude;
 
         float rawCrest = (wave1 * 0.35f + wave2 * 0.30f + wave3 * 0.30f + medCentered * 0.40f - 0.28f) * 3.2f;
         float crest = Math.clamp(rawCrest, 0.0f, 1.0f);
@@ -287,6 +287,24 @@ public final class WaterCausticsPolicy {
                 toLightX, toLightY, toLightZ,
                 timeSeconds
         );
+    }
+
+    /**
+     * Resolves solar-cascade visibility for a water-connected receiver.
+     *
+     * <p>The cascade contains only opaque air-space occluders. Reusing its hard
+     * silhouette for a water surface or submerged receiver makes a block-shaped
+     * dark pseudo-reflection or stamp on the bed. Cloud attenuation is evaluated
+     * separately and therefore remains active for both water paths.</p>
+     */
+    public static float waterReceiverSunVisibility(
+            final float opaqueCascadeVisibility,
+            final boolean receiverSubmerged,
+            final boolean receiverIsWaterSurface
+    ) {
+        return receiverSubmerged || receiverIsWaterSurface
+                ? 1.0f
+                : Math.clamp(opaqueCascadeVisibility, 0.0f, 1.0f);
     }
 
     /**

@@ -37,6 +37,7 @@ private typealias NativeLastCompletedStats = @convention(c) (
 private let lightingMagic: UInt32 = 0x31424c4d
 private let headerBytes = 64
 private let lightBytes = 48
+private let paramsBytes = 256
 private let guardBytes = 64
 private let clusterCap = 256
 private let tileSize = 64
@@ -1012,8 +1013,8 @@ private func runGpu(
     let lightByteCount = Int(api.contextBufferBytes(context, 0))
     let lightPointer = readbacks[0].contents().bindMemory(to: UInt8.self, capacity: lightByteCount)
     let gpuLights = Array(UnsafeBufferPointer(start: lightPointer, count: lightByteCount))
-    let paramsPointer = readbacks[3].contents().bindMemory(to: UInt8.self, capacity: 256)
-    let params = Array(UnsafeBufferPointer(start: paramsPointer, count: 256))
+    let paramsPointer = readbacks[3].contents().bindMemory(to: UInt8.self, capacity: paramsBytes)
+    let params = Array(UnsafeBufferPointer(start: paramsPointer, count: paramsBytes))
     var stats = [UInt8](repeating: 0, count: 128)
     let statsStatus = stats.withUnsafeMutableBytes {
         api.lastCompletedStats(context, $0.baseAddress, UInt64($0.count))
@@ -1226,7 +1227,7 @@ private enum LightClusterValidationMain {
                 api.layout($0.baseAddress, UInt64($0.count))
             } == 1, "Native lighting layout descriptor is unavailable")
             let expectedLayout: [UInt32] = [
-                1, 128, 64, 48, 256, 8, 512, 2, 256, 3,
+                1, 128, 64, 48, UInt32(paramsBytes), 8, 512, 2, 256, 3,
                 UInt32(tileSize), UInt32(depthSlices), 256,
                 0, 64, 128, 144, 160, 176, 192, 208, 224, 240,
                 27, 28, 29, 30, 64

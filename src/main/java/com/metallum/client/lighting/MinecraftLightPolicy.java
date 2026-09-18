@@ -30,8 +30,7 @@ public final class MinecraftLightPolicy {
         if (emission <= 0) {
             return null;
         }
-        Identifier id = BuiltInRegistries.BLOCK.getKey(cell.colorState().getBlock());
-        float[] color = linearColorForIdentifier(id);
+        float[] color = linearEmissionColor(cell.colorState());
         float normalized = emission / 15.0F;
         float radius = 1.5F + 0.75F * emission;
         float intensity = 0.15F + 3.0F * normalized * (float) Math.sqrt(normalized);
@@ -83,6 +82,26 @@ public final class MinecraftLightPolicy {
                 profile.intensity,
                 profile.priority
         );
+    }
+
+    /**
+     * Selects the interpolation phase for camera-independent entity-source extraction.
+     *
+     * <p>Minecraft deliberately reports {@code Player} as non-frozen even while the level-wide
+     * tick manager is frozen. After a server teleport that can leave the player's old pose on
+     * the pre-teleport coordinates while the render timer residual continues to change. A live
+     * GI source derived from that residual would then move every extracted frame despite the
+     * frozen world. The authoritative current pose is phase {@code 1}; normally running worlds
+     * retain their exact render interpolation phase.</p>
+     */
+    public static float worldSpaceEntityPartialTick(
+            final boolean worldRunsNormally,
+            final float runningPartialTick
+    ) {
+        if (!Float.isFinite(runningPartialTick)) {
+            throw new IllegalArgumentException("entity partial tick must be finite");
+        }
+        return worldRunsNormally ? runningPartialTick : 1.0F;
     }
 
     /**
@@ -274,6 +293,15 @@ public final class MinecraftLightPolicy {
         return new float[]{1.0F, 0.26F, 0.035F};
     }
 
+    /** Shared scene-linear chromaticity for analytic lights and GI palette fallbacks. */
+    public static float[] linearEmissionColor(final BlockState state) {
+        if (state == null) {
+            throw new NullPointerException("state");
+        }
+        Identifier id = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+        return linearColorForIdentifier(id);
+    }
+
     private static EntityProfile entityProfile(final String path, final boolean onFire) {
         if (path.contains("lightning_bolt")) {
             return new EntityProfile(16.0F, 0.63F, 0.78F, 1.0F, 4.0F, 512);
@@ -347,8 +375,7 @@ public final class MinecraftLightPolicy {
         if (emission <= 0) {
             return null;
         }
-        Identifier id = BuiltInRegistries.BLOCK.getKey(blockItem.getBlock());
-        float[] color = linearColorForIdentifier(id);
+        float[] color = linearEmissionColor(state);
         float normalized = emission / 15.0F;
         return new EntityProfile(
                 1.5F + 0.75F * emission,

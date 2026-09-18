@@ -478,6 +478,9 @@ public final class RendererGenerationPlanner {
             resources.add(resource("lighting_params", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(
                             AdvancedLightingLayout.LIGHTING_PARAMS_BYTES), false));
+            resources.add(resource("l6_temporal_params_ring", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(
+                            AdvancedLightingLayout.L6_TEMPORAL_PARAMS_RING_BYTES), false));
             resources.add(resource("cluster_statistics", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(
                             AdvancedLightingLayout.STATISTICS_BYTES), false));
